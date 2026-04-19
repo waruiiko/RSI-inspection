@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+      padding: 8px;
+      -webkit-app-region: no-drag;
+    }
+    #container { display: flex; flex-direction: column; gap: 8px; }
+
+    .card {
+      background: #1c2128;
+      border: 1px solid #30363d;
+      border-left: 3px solid #1f6feb;
+      border-radius: 8px;
+      padding: 10px 12px 12px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.7);
+      position: relative;
+      overflow: hidden;
+      animation: slideIn 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .card.red    { border-left-color: #ef4444; }
+    .card.green  { border-left-color: #22c55e; }
+    .card.orange { border-left-color: #f97316; }
+
+    @keyframes slideIn {
+      from { transform: translateX(110%); opacity: 0; }
+      to   { transform: translateX(0);   opacity: 1; }
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 3px;
+    }
+    .card-symbol { font-weight: 700; font-size: 14px; color: #e6edf3; }
+    .card-type   { font-size: 10px; color: #484f58; margin-left: 6px; }
+    .card-close  {
+      background: none; border: none; color: #484f58;
+      cursor: pointer; font-size: 13px; padding: 0; line-height: 1;
+    }
+    .card-close:hover { color: #8b949e; }
+    .card-body-wrap { cursor: pointer; }
+
+    .card-body  { font-size: 12px; color: #8b949e; line-height: 1.4; }
+    .card-value { font-weight: 700; }
+    .card-extra { font-size: 11px; color: #6e7681; margin-top: 2px; }
+    .card-special { font-size: 11px; color: #f59e0b; margin-left: 5px; }
+    .red    { color: #ef4444; }
+    .green  { color: #22c55e; }
+    .orange { color: #f97316; }
+    .blue   { color: #58a6ff; }
+
+    .progress {
+      position: absolute;
+      bottom: 0; left: 0; height: 2px;
+      animation: shrink linear forwards;
+    }
+    .card.red    .progress { background: #ef4444; }
+    .card.green  .progress { background: #22c55e; }
+    .card.orange .progress { background: #f97316; }
+    .card:not(.red):not(.green):not(.orange) .progress { background: #1f6feb; }
+
+    @keyframes shrink {
+      from { width: 100%; }
+      to   { width: 0; }
+    }
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+  <script>
+    const DURATION = 6000
+
+    function fmtPrice(v) {
+      if (v >= 1000) return v.toLocaleString('en-US', { maximumFractionDigits: 2 })
+      if (v >= 1)    return v.toFixed(4)
+      return v.toPrecision(4)
+    }
+
+    function cardClass(type, condition) {
+      if (type === 'rsi')        return condition === 'above' ? 'red' : 'green'
+      if (type === 'price')      return condition === 'above' ? 'red' : 'green'
+      if (type === 'divergence') return condition === 'bull'  ? 'green' : 'orange'
+      // change: above = surging = green, below = falling = red
+      return condition === 'above' ? 'green' : 'red'
+    }
+
+    function valueClass(type, condition) {
+      if (type === 'rsi')        return condition === 'above' ? 'red' : 'green'
+      if (type === 'price')      return condition === 'above' ? 'red' : 'green'
+      if (type === 'divergence') return condition === 'bull'  ? 'green' : 'orange'
+      return condition === 'above' ? 'green' : 'red'
+    }
+
+    function fmtValue(type, value) {
+      if (type === 'rsi')   return value.toFixed(1)
+      if (type === 'price') return fmtPrice(value)
+      return (value > 0 ? '+' : '') + value.toFixed(2) + '%'
+    }
+
+    function fmtThreshold(type, threshold) {
+      if (type === 'rsi')   return String(threshold)
+      if (type === 'price') return fmtPrice(threshold)
+      return (threshold > 0 ? '+' : '') + threshold + '%'
+    }
+
+    let cardCount = 0
+
+    function addCard(data) {
+      const container = document.getElementById('container')
+      const div = document.createElement('div')
+      const cls = cardClass(data.type, data.condition)
+      div.className = 'card' + (cls ? ' ' + cls : '')
+
+      const specialBadge = data.special ? '<span class="card-special">★</span>' : ''
+
+      let typeLabel, bodyHtml
+      if (data.type === 'divergence') {
+        typeLabel = `背离 ${data.timeframe}`
+        const dirLabel = data.condition === 'bull' ? '看涨背离 ↗' : '看跌背离 ↘'
+        const dirCls   = data.condition === 'bull' ? 'green' : 'orange'
+        bodyHtml = `检测到 <span class="card-value ${dirCls}">${dirLabel}</span>`
+      } else {
+        const condLabel = data.type === 'price'
+          ? (data.condition === 'above' ? '突破' : '跌破')
+          : data.type === 'change'
+          ? (data.condition === 'above' ? '涨超' : '跌超')
+          : (data.condition === 'above' ? '超过' : '低于')
+        typeLabel = data.type === 'rsi' ? `RSI ${data.timeframe ?? ''}`
+          : data.type === 'price' ? '价格'
+          : '24h涨跌幅'
+        const valCls = valueClass(data.type, data.condition)
+        bodyHtml = `当前 <span class="card-value ${valCls}">${fmtValue(data.type, data.value)}</span> 已${condLabel}预设值 ${fmtThreshold(data.type, data.threshold)}`
+      }
+
+      // Extra info line: price + 24h change
+      let extraHtml = ''
+      const pricePart  = data.price    != null ? `价格 <span style="color:#e6edf3">${fmtPrice(data.price)}</span>` : ''
+      const changePart = data.change24h != null
+        ? `  24h <span class="${data.change24h >= 0 ? 'green' : 'red'}">${data.change24h >= 0 ? '+' : ''}${data.change24h.toFixed(2)}%</span>`
+        : ''
+      if (pricePart || changePart) extraHtml = `<div class="card-extra">${pricePart}${changePart}</div>`
+
+      div.innerHTML = `
+        <div class="card-header">
+          <div><span class="card-symbol">${data.symbol}</span><span class="card-type">${typeLabel}</span>${specialBadge}</div>
+          <button class="card-close">✕</button>
+        </div>
+        <div class="card-body card-body-wrap">
+          ${bodyHtml}
+          ${extraHtml}
+        </div>
+        <div class="progress" style="animation-duration:${DURATION}ms"></div>
+      `
+
+      const timer = setTimeout(() => dismiss(div), DURATION)
+      div.querySelector('.card-close').onclick = () => { clearTimeout(timer); dismiss(div) }
+      div.querySelector('.card-body-wrap').onclick = () => window.notif.focusSymbol(data.symbol)
+
+      cardCount++
+      container.appendChild(div)
+      requestAnimationFrame(() => {
+        const h = document.getElementById('container').offsetHeight
+        if (h > 0) window.notif.updateHeight(h + 16)
+      })
+    }
+
+    function dismiss(card) {
+      card.remove()
+      cardCount--
+      if (cardCount <= 0) {
+        cardCount = 0
+        window.notif.reportEmpty()
+      } else {
+        // Window already visible, layout is stable — measure directly
+        const h = document.getElementById('container').offsetHeight
+        if (h > 0) window.notif.updateHeight(h + 16)
+      }
+    }
+
+    function addSummaryCard(items) {
+      const container = document.getElementById('container')
+      const div = document.createElement('div')
+      div.className = 'card orange'
+
+      const rsiCount    = items.filter(i => i.type === 'rsi').length
+      const changeCount = items.filter(i => i.type === 'change').length
+      const priceCount  = items.filter(i => i.type === 'price').length
+      const parts = []
+      if (rsiCount)    parts.push(`RSI ${rsiCount} 条`)
+      if (changeCount) parts.push(`涨跌幅 ${changeCount} 条`)
+      if (priceCount)  parts.push(`价格 ${priceCount} 条`)
+
+      div.innerHTML = `
+        <div class="card-header">
+          <div><span class="card-symbol">提醒汇总</span><span class="card-type">${items.length} 条触发</span></div>
+          <button class="card-close">✕</button>
+        </div>
+        <div class="card-body">${parts.join('，')}</div>
+        <div class="progress" style="animation-duration:${DURATION}ms"></div>
+      `
+
+      const timer = setTimeout(() => dismiss(div), DURATION)
+      div.querySelector('.card-close').onclick = () => { clearTimeout(timer); dismiss(div) }
+
+      cardCount++
+      container.appendChild(div)
+      requestAnimationFrame(() => {
+        const h = document.getElementById('container').offsetHeight
+        if (h > 0) window.notif.updateHeight(h + 16)
+      })
+    }
+
+    window.notif.onAdd(addCard)
+    window.notif.onBatch(items => {
+      if (items.length <= 3) items.forEach(addCard)
+      else addSummaryCard(items)
+    })
+  </script>
+</body>
+</html>
