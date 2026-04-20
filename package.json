@@ -27,10 +27,10 @@
     "files": [
       "main.js",
       "preload.js",
+      "notification.html",
+      "notification-preload.js",
       "src/**/*",
-      "renderer/dist/**/*",
-      "node_modules/**/*",
-      "!node_modules/.cache/**/*"
+      "renderer/dist/**/*"
     ],
     "directories": {
       "output": "dist"
