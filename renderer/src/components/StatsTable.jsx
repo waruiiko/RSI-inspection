@@ -262,14 +262,6 @@ export default function StatsTable() {
                       ? `${a.change24h > 0 ? '+' : ''}${a.change24h.toFixed(2)}%`
                       : '—'}
                   </td>
-                  {(() => {
-                    const s = getScore(a, rsiOverbought, rsiOversold)
-                    return (
-                      <td key="score" className="mono" style={{ color: scoreColor(s), fontWeight: 600 }}>
-                        {s > 0 ? `+${s}` : s}
-                      </td>
-                    )
-                  })()}
                   {TIMEFRAMES.map(tf => {
                     const cur   = a.rsi[tf]
                     const prev  = prevRsi[a.symbol]?.[tf]
@@ -287,6 +279,14 @@ export default function StatsTable() {
                       </td>
                     )
                   })}
+                  {(() => {
+                    const s = getScore(a, rsiOverbought, rsiOversold)
+                    return (
+                      <td key="score" className="mono" style={{ color: scoreColor(s), fontWeight: 600 }}>
+                        {s > 0 ? `+${s}` : s}
+                      </td>
+                    )
+                  })()}
                 </tr>
               )
             })}
