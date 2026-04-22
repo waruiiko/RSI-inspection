@@ -3,6 +3,12 @@ const path = require('path')
 
 let win = null
 
+function park() {
+  if (!win || win.isDestroyed()) return
+  win.setIgnoreMouseEvents(true)
+  win.setPosition(-400, -400)
+}
+
 function ensureWindow() {
   if (win && !win.isDestroyed()) return win
 
@@ -26,8 +32,8 @@ function ensureWindow() {
 
   win.loadFile(path.join(__dirname, '..', 'notification.html'))
 
-  // Park off-screen and show once loaded — avoids transparent-window hide/show bug on Windows
   win.webContents.once('did-finish-load', () => {
+    win.setIgnoreMouseEvents(true)
     win.setPosition(-400, -400)
     win.showInactive()
     win.setAlwaysOnTop(true, 'screen-saver')
@@ -42,6 +48,7 @@ function reposition(h) {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize
   win.setSize(320, h)
   win.setPosition(width - 328, height - h - 8)
+  win.setIgnoreMouseEvents(false)
   win.setAlwaysOnTop(true, 'screen-saver')
 }
 
@@ -52,10 +59,7 @@ exports.registerIpc = (ipcMain) => {
     if (!win || win.isDestroyed() || h <= 0) return
     reposition(h)
   })
-  // When all cards gone, park off-screen instead of hide() — avoids transparent-window re-show bug
-  ipcMain.on('notification:empty', () => {
-    if (win && !win.isDestroyed()) win.setPosition(-400, -400)
-  })
+  ipcMain.on('notification:empty', () => park())
 }
 
 exports.show = (data) => {
