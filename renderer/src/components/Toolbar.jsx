@@ -22,8 +22,17 @@ const ZONE_DEFS = [
   { key: 'oversold',   label: '超卖', color: '#22c55e' },
 ]
 
+const ZONE_COLORS = {
+  overbought: '#ef4444', strong: '#f97316', neutral: '#6b7280',
+  weak: '#4ade80', oversold: '#22c55e',
+}
+const ZONE_LABELS = {
+  overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
+}
+
+/* ── Zone filter dropdown ──────────────────────────────────── */
 function ZoneFilter() {
-  const rsiZones   = useMarketStore(s => s.rsiZones)
+  const rsiZones    = useMarketStore(s => s.rsiZones)
   const setRsiZones = useMarketStore(s => s.setRsiZones)
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
@@ -38,10 +47,10 @@ function ZoneFilter() {
     const next = rsiZones.includes(key)
       ? rsiZones.filter(z => z !== key)
       : [...rsiZones, key]
-    if (next.length > 0) setRsiZones(next)  // keep at least one
+    if (next.length > 0) setRsiZones(next)
   }
 
-  const allOn  = rsiZones.length === ALL_ZONES.length
+  const allOn    = rsiZones.length === ALL_ZONES.length
   const btnLabel = allOn
     ? '全部区间'
     : ZONE_DEFS.filter(z => rsiZones.includes(z.key)).map(z => z.label).join(', ')
@@ -76,15 +85,7 @@ function ZoneFilter() {
   )
 }
 
-const ZONE_COLORS = {
-  overbought: '#ef4444',
-  strong:     '#f97316',
-  neutral:    '#6b7280',
-  weak:       '#4ade80',
-  oversold:   '#22c55e',
-}
-const ZONE_LABELS = { overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖' }
-
+/* ── Sentiment bar ─────────────────────────────────────────── */
 function SentimentBar({ assets, timeframe }) {
   const counts = useMemo(() => {
     const valid = assets.filter(a => a.rsi[timeframe] != null)
@@ -99,18 +100,26 @@ function SentimentBar({ assets, timeframe }) {
 
   return (
     <div className="sentiment-bar-wrap" title="市场情绪分布">
-      <div className="sentiment-bar">
+      {/* Segmented bar — slightly taller, gap between segments */}
+      <div style={{
+        display: 'flex', height: 6, width: 120,
+        borderRadius: 4, overflow: 'hidden', gap: 1,
+        background: 'var(--bg3)',
+      }}>
         {Object.entries(tally).map(([zone, n]) => n > 0 && (
-          <div key={zone}
+          <div
+            key={zone}
             style={{ flex: n, background: ZONE_COLORS[zone], minWidth: 2 }}
-            title={`${ZONE_LABELS[zone]} ${n} (${((n/total)*100).toFixed(0)}%)`}
+            title={`${ZONE_LABELS[zone]} ${n} (${((n / total) * 100).toFixed(0)}%)`}
           />
         ))}
       </div>
-      <div className="sentiment-labels">
+      {/* Compact labels */}
+      <div style={{ display: 'flex', gap: 8, fontSize: 10 }}>
         {Object.entries(tally).map(([zone, n]) => n > 0 && (
-          <span key={zone} style={{ color: ZONE_COLORS[zone] }}>
-            {ZONE_LABELS[zone]}&nbsp;{((n/total)*100).toFixed(0)}%
+          <span key={zone} style={{ color: ZONE_COLORS[zone], display: 'flex', alignItems: 'center', gap: 3 }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', background: ZONE_COLORS[zone], display: 'inline-block', flexShrink: 0 }} />
+            {ZONE_LABELS[zone]}&nbsp;{((n / total) * 100).toFixed(0)}%
           </span>
         ))}
       </div>
@@ -118,6 +127,7 @@ function SentimentBar({ assets, timeframe }) {
   )
 }
 
+/* ── Group filter ──────────────────────────────────────────── */
 function GroupFilter() {
   const groups      = useGroupsStore(s => s.groups)
   const groupFilter = useGroupsStore(s => s.groupFilter)
@@ -134,6 +144,7 @@ function GroupFilter() {
   )
 }
 
+/* ── Main toolbar ──────────────────────────────────────────── */
 export default function Toolbar({ activeTab, setActiveTab }) {
   const filter       = useMarketStore(s => s.filter)
   const assets       = useMarketStore(s => s.assets)
@@ -171,20 +182,60 @@ export default function Toolbar({ activeTab, setActiveTab }) {
     return `${m}:${s}`
   })()
 
+  const TABS = [
+    { key: 'market',   label: '市场' },
+    { key: 'manage',   label: '管理品种' },
+    { key: 'alerts',   label: '提醒' },
+    { key: 'settings', label: '设置' },
+  ]
+
   return (
     <div className="toolbar">
-      {/* Row 1: title + tabs (always visible) */}
+      {/* ── Row 1: brand + tabs ── */}
       <div className="toolbar-row toolbar-top">
-        <h1 className="toolbar-title">市场 RSI 热力图</h1>
-        <div className="tab-group">
-          <button className={activeTab === 'market'   ? 'active' : ''} onClick={() => setActiveTab('market')}>市场</button>
-          <button className={activeTab === 'manage'   ? 'active' : ''} onClick={() => setActiveTab('manage')}>管理品种</button>
-          <button className={activeTab === 'alerts'   ? 'active' : ''} onClick={() => setActiveTab('alerts')}>提醒</button>
-          <button className={activeTab === 'settings' ? 'active' : ''} onClick={() => setActiveTab('settings')}>设置</button>
+        {/* Brand mark */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <div style={{
+            width: 22, height: 22, borderRadius: 5,
+            background: 'linear-gradient(135deg, var(--blue) 0%, #388bfd 100%)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 11, fontWeight: 700, color: '#fff', flexShrink: 0,
+            boxShadow: '0 0 8px rgba(31,111,235,0.4)',
+          }}>R</div>
+          <h1 className="toolbar-title">市场 RSI 热力图</h1>
         </div>
+
+        {/* Underline tab navigation */}
+        <nav style={{ display: 'flex', gap: 0, alignSelf: 'stretch' }}>
+          {TABS.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => setActiveTab(key)}
+              style={{
+                padding: '0 16px',
+                background: 'none',
+                border: 'none',
+                borderBottom: activeTab === key
+                  ? '2px solid var(--blue)'
+                  : '2px solid transparent',
+                color: activeTab === key ? '#58a6ff' : 'var(--muted)',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: activeTab === key ? 600 : 400,
+                transition: 'color 0.12s, border-color 0.12s',
+                letterSpacing: '0.01em',
+                marginBottom: -1, // flush with toolbar bottom border
+              }}
+              onMouseEnter={e => { if (activeTab !== key) e.currentTarget.style.color = 'var(--text)' }}
+              onMouseLeave={e => { if (activeTab !== key) e.currentTarget.style.color = 'var(--muted)' }}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
       </div>
 
-      {/* Row 2: market controls (wraps when narrow) */}
+      {/* ── Row 2: market controls ── */}
       {activeTab === 'market' && (
         <div className="toolbar-row toolbar-controls">
           <ZoneFilter />
@@ -215,20 +266,31 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             {loading ? '…' : '↻'}
           </button>
 
-          <span className={`market-status ${usMarketOpen ? 'open' : 'closed'}`}
-            title={usMarketOpen ? '美股交易中' : '美股休市'}>
+          {/* Market status with animated dot */}
+          <div
+            className={`market-status ${usMarketOpen ? 'open' : 'closed'}`}
+            title={usMarketOpen ? '美股交易中' : '美股休市'}
+          >
             <span className="market-status-dot" />
             美股
-          </span>
+          </div>
 
+          {/* Sentiment bar */}
           <SentimentBar assets={assets} timeframe={timeframe} />
 
+          {/* Status / errors */}
           {error && !loading && (
             <span className="conn-error" title={error}>⚠ 数据获取失败</span>
           )}
-          {loading && assetCount > 0 && <span className="updated-at">加载中 {assetCount}…</span>}
+          {loading && assetCount > 0 && (
+            <span className="updated-at">加载中 {assetCount}…</span>
+          )}
           {!loading && timeStr && (
-            <span className="updated-at">更新于 {timeStr}{countdownStr && `　下次 ${countdownStr}`}</span>
+            <span className="updated-at">
+              更新于 {timeStr}
+              {countdownStr && <span style={{ color: 'var(--border)', margin: '0 4px' }}>·</span>}
+              {countdownStr && `下次 ${countdownStr}`}
+            </span>
           )}
         </div>
       )}

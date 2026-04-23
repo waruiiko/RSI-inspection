@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useMemo } from 'react'
 import useMarketStore   from './store/marketStore'
 import useAlertStore    from './store/alertStore'
 import useSettingsStore from './store/settingsStore'
-import useGroupsStore  from './store/groupsStore'
+import useGroupsStore   from './store/groupsStore'
 import { isUSMarketOpen } from './utils/marketHours'
 import { playAlertSound } from './utils/sound'
 import { sendWebhooks }  from './utils/webhook'
+import { getRsiZone }   from './utils/rsi'
 import Toolbar      from './components/Toolbar'
 import Heatmap      from './components/Heatmap'
 import StatsTable   from './components/StatsTable'
@@ -24,6 +25,108 @@ function isSilentHours(start, end) {
   return s <= e ? cur >= s && cur < e : cur >= s || cur < e
 }
 
+/* ── Summary stat cards ────────────────────────────────────── */
+const ZONE_COLORS = {
+  overbought: '#ef4444', strong: '#f97316',
+  neutral: '#64748b', weak: '#4ade80', oversold: '#22c55e',
+}
+const ZONE_LABELS = {
+  overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
+}
+
+function SummaryBar({ assets, timeframe }) {
+  const counts = useMemo(() => {
+    const valid = assets.filter(a => a.rsi[timeframe] != null)
+    if (!valid.length) return null
+    const t = { overbought: 0, strong: 0, neutral: 0, weak: 0, oversold: 0 }
+    for (const a of valid) { const z = getRsiZone(a.rsi[timeframe]); if (z) t[z]++ }
+    return { t, total: valid.length }
+  }, [assets, timeframe])
+
+  if (!counts) return null
+  const { t, total } = counts
+  const ob  = t.overbought
+  const os  = t.oversold
+  const up  = assets.filter(a => (a.change24h ?? 0) > 0).length
+  const avg = assets.length
+    ? (assets.reduce((s, a) => s + (a.rsi[timeframe] ?? 50), 0) / assets.length).toFixed(1)
+    : '—'
+
+  const StatCard = ({ label, value, sub, color, bg }) => (
+    <div style={{
+      padding: '8px 14px',
+      background: bg,
+      border: `1px solid ${color}22`,
+      borderRadius: 10,
+      display: 'flex', flexDirection: 'column', gap: 2,
+      minWidth: 72, flexShrink: 0,
+    }}>
+      <span style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>
+        {label}
+      </span>
+      <span style={{ fontSize: 22, fontWeight: 700, color, lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>
+        {value}
+      </span>
+      {sub && <span style={{ fontSize: 10, color: 'var(--dim)' }}>{sub}</span>}
+    </div>
+  )
+
+  return (
+    <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'stretch' }}>
+      {/* Average RSI gauge */}
+      <div style={{
+        padding: '8px 14px', background: 'var(--bg2)',
+        border: '1px solid var(--border)', borderRadius: 10,
+        display: 'flex', flexDirection: 'column', gap: 3, minWidth: 90,
+      }}>
+        <span style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>
+          均值 RSI
+        </span>
+        <span style={{ fontSize: 22, fontWeight: 700, color: 'var(--text)', lineHeight: 1.1, fontVariantNumeric: 'tabular-nums' }}>
+          {avg}
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--dim)' }}>{total} 个品种</span>
+      </div>
+
+      <StatCard label="超买" value={ob} sub={`≥ 70`}       color="#ef4444" bg="rgba(239,68,68,0.07)" />
+      <StatCard label="超卖" value={os} sub={`≤ 30`}       color="#22c55e" bg="rgba(34,197,94,0.07)" />
+      <StatCard label="上涨" value={up} sub={`${Math.round(up/assets.length*100)}%`} color="#22c55e" bg="rgba(34,197,94,0.05)" />
+      <StatCard label="下跌" value={assets.length-up} sub={`${Math.round((assets.length-up)/assets.length*100)}%`} color="#ef4444" bg="rgba(239,68,68,0.05)" />
+
+      {/* Sentiment bar */}
+      <div style={{
+        flex: 1, padding: '8px 14px',
+        background: 'var(--bg2)', border: '1px solid var(--border)',
+        borderRadius: 10, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 5,
+        minWidth: 160,
+      }}>
+        <span style={{ fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>
+          市场情绪分布
+        </span>
+        <div style={{
+          height: 7, borderRadius: 4, overflow: 'hidden',
+          display: 'flex', gap: 1, background: 'var(--bg4)',
+        }}>
+          {Object.entries(t).map(([zone, n]) => n > 0 && (
+            <div key={zone} style={{ flex: n, background: ZONE_COLORS[zone], borderRadius: 2 }} />
+          ))}
+        </div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {Object.entries(t).map(([zone, n]) => n > 0 && (
+            <div key={zone} style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+              <div style={{ width: 5, height: 5, borderRadius: '50%', background: ZONE_COLORS[zone] }} />
+              <span style={{ fontSize: 9, color: ZONE_COLORS[zone] }}>
+                {ZONE_LABELS[zone]}&nbsp;{n}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ── Main App ──────────────────────────────────────────────── */
 export default function App() {
   const fetchData  = useMarketStore(s => s.fetchData)
   const loading    = useMarketStore(s => s.loading)
@@ -31,6 +134,8 @@ export default function App() {
   const assets     = useMarketStore(s => s.assets)
   const updatedAt  = useMarketStore(s => s.updatedAt)
   const setFlash   = useMarketStore(s => s.setFlash)
+  const filter     = useMarketStore(s => s.filter)
+  const timeframe  = useMarketStore(s => s.timeframe)
   const hasData    = assets.length > 0
 
   const configs         = useAlertStore(s => s.configs)
@@ -38,7 +143,11 @@ export default function App() {
   const addFeedItems    = useAlertStore(s => s.addFeedItems)
   const loadAlerts      = useAlertStore(s => s.load)
 
-  const { refreshInterval, alertCooldown, popupEnabled, soundEnabled, silentStart, silentEnd, telegramToken, telegramChatId, discordWebhook, loaded: settingsLoaded, load: loadSettings } = useSettingsStore()
+  const {
+    refreshInterval, alertCooldown, popupEnabled, soundEnabled,
+    silentStart, silentEnd, telegramToken, telegramChatId, discordWebhook,
+    loaded: settingsLoaded, load: loadSettings,
+  } = useSettingsStore()
 
   const configsRef    = useRef(configs)
   const assetsRef     = useRef(assets)
@@ -56,20 +165,18 @@ export default function App() {
   silentRef.current   = { start: silentStart, end: silentEnd }
   webhookRef.current  = { telegramToken, telegramChatId, discordWebhook }
 
-  const focusSearch   = useMarketStore(s => s.focusSearch)
-  const setTimeframe  = useMarketStore(s => s.setTimeframe)
+  const focusSearch  = useMarketStore(s => s.focusSearch)
+  const setTimeframe = useMarketStore(s => s.setTimeframe)
   const [activeTab, setActiveTab] = useState('market')
 
   const loadGroups = useGroupsStore(s => s.load)
 
-  // Load settings first, then data
   useEffect(() => {
     loadSettings()
     loadAlerts()
     loadGroups()
   }, [])
 
-  // Global keyboard shortcuts
   useEffect(() => {
     const TF_KEYS = { '1': '15m', '2': '1h', '3': '4h', '4': '1d' }
     const onKey = e => {
@@ -85,7 +192,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [activeTab, focusSearch, setTimeframe])
 
-  // Start/restart refresh interval whenever refreshInterval setting changes
   useEffect(() => {
     if (!settingsLoaded) return
     fetchData()
@@ -100,11 +206,8 @@ export default function App() {
     })
   }, [])
 
-  // Check alert configs whenever data refreshes
   useEffect(() => {
     if (!updatedAt) return
-
-    // First fetch: establish baseline, never alert
     if (!prevAssetsRef.current) {
       prevAssetsRef.current = [...assetsRef.current]
       return
@@ -134,7 +237,6 @@ export default function App() {
       const ctx = { price: asset.price, change24h: asset.change24h }
       const c = (key, nd) => collect(cfg, key, { ...ctx, ...nd })
 
-      // Per-timeframe RSI alerts (always, regardless of requireAllTf)
       for (const tf of tfs) {
         const rsi     = asset.rsi?.[tf]
         const prevRsi = prev.rsi?.[tf]
@@ -145,7 +247,6 @@ export default function App() {
           c(`${tf}_rsi_below`, { symbol: cfg.symbol, type: 'rsi', timeframe: tf, condition: 'below', threshold: cfg.rsiBelow, value: rsi })
       }
 
-      // Resonance: all TFs simultaneously satisfy → special alert
       if (cfg.requireAllTf && tfs.length > 1) {
         if (cfg.rsiAbove != null) {
           const allNow  = tfs.every(tf => (asset.rsi?.[tf] ?? 0)   > cfg.rsiAbove)
@@ -161,8 +262,7 @@ export default function App() {
         }
       }
 
-      const change     = asset.change24h
-      const prevChange = prev.change24h
+      const change = asset.change24h, prevChange = prev.change24h
       if (change != null && prevChange != null) {
         if (cfg.changeAbove != null && change > cfg.changeAbove && prevChange <= cfg.changeAbove)
           c('change_above', { symbol: cfg.symbol, type: 'change', condition: 'above', threshold: cfg.changeAbove, value: change })
@@ -170,8 +270,7 @@ export default function App() {
           c('change_below', { symbol: cfg.symbol, type: 'change', condition: 'below', threshold: -cfg.changeBelow, value: change })
       }
 
-      const price     = asset.price
-      const prevPrice = prev.price
+      const price = asset.price, prevPrice = prev.price
       if (price != null && prevPrice != null) {
         if (cfg.priceAbove != null && price > cfg.priceAbove && prevPrice <= cfg.priceAbove)
           c('price_above', { symbol: cfg.symbol, type: 'price', condition: 'above', threshold: cfg.priceAbove, value: price })
@@ -202,6 +301,13 @@ export default function App() {
     }
   }, [updatedAt])
 
+  /* ── Filtered assets for summary bar ── */
+  const filteredAssets = useMemo(() => {
+    return filter === 'all'    ? assets
+         : filter === 'crypto' ? assets.filter(a => a.type === 'crypto')
+         : assets.filter(a => a.type !== 'crypto')
+  }, [assets, filter])
+
   return (
     <div className="app">
       <Toolbar activeTab={activeTab} setActiveTab={setActiveTab} />
@@ -227,9 +333,15 @@ export default function App() {
 
           {hasData && (
             <>
+              {/* Summary cards */}
+              <SummaryBar assets={filteredAssets} timeframe={timeframe} />
+
+              {/* Heatmap */}
               <div className="heatmap-wrapper">
                 <Heatmap />
               </div>
+
+              {/* Table + Feed */}
               <div className="market-bottom">
                 <StatsTable />
                 <AlertFeed />

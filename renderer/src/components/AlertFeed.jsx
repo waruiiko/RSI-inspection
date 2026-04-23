@@ -15,8 +15,7 @@ function fmtTime(ts) {
   const time = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   const day  = String(d.getDate()).padStart(2, '0')
   const mon  = String(d.getMonth() + 1).padStart(2, '0')
-  const yr   = d.getFullYear()
-  return `${time} ${day}/${mon}/${yr}`
+  return `${time}  ${day}/${mon}`
 }
 
 function fmtPrice(v) {
@@ -45,8 +44,7 @@ function fmtDetail(item) {
 
 function itemColor(item) {
   if (item.type === 'rsi') {
-    if (item.condition === 'above') return 'feed-orange'
-    return 'feed-sky'
+    return item.condition === 'above' ? 'feed-orange' : 'feed-sky'
   }
   if (item.type === 'price') {
     return item.condition === 'above' ? 'feed-red' : 'feed-green'
@@ -76,20 +74,31 @@ export default function AlertFeed() {
 
   return (
     <div className="alert-feed">
+      {/* Head */}
       <div className="feed-head">
         <span className="feed-title">提醒记录</span>
-        {feed.length > 0 && (
-          <button className="feed-clear-btn" onClick={clearFeed}>清除</button>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {feed.length > 0 && (
+            <span style={{ fontSize: 10, color: 'var(--dim)', fontVariantNumeric: 'tabular-nums' }}>
+              {feed.length} 条
+            </span>
+          )}
+          {feed.length > 0 && (
+            <button className="feed-clear-btn" onClick={clearFeed}>清除</button>
+          )}
+        </div>
       </div>
 
+      {/* Filters */}
       {feed.length > 0 && (
         <div className="feed-filters">
           <div className="feed-type-btns">
             {TYPE_FILTERS.map(f => (
-              <button key={f.key}
+              <button
+                key={f.key}
                 className={`feed-type-btn ${typeFilter === f.key ? 'active' : ''}`}
-                onClick={() => setTypeFilter(f.key)}>
+                onClick={() => setTypeFilter(f.key)}
+              >
                 {f.label}
               </button>
             ))}
@@ -104,17 +113,26 @@ export default function AlertFeed() {
         </div>
       )}
 
+      {/* List */}
       <div className="feed-list">
         {feed.length === 0
           ? <div className="feed-empty">暂无提醒</div>
           : visible.length === 0
             ? <div className="feed-empty">无匹配记录</div>
             : visible.map(item => (
-              <div key={item.id} className={`feed-item ${itemColor(item)} ${item.special ? 'feed-special' : ''}`}>
+              <div
+                key={item.id}
+                className={`feed-item ${itemColor(item)} ${item.special ? 'feed-special' : ''}`}
+              >
                 <span className="feed-time">{fmtTime(item.ts)}</span>
                 <span className="feed-msg">
                   {item.special && <span className="feed-star">★</span>}
-                  <span className="feed-symbol" onClick={() => setFlash(item.symbol)}>{item.symbol}</span>
+                  <span
+                    className="feed-symbol"
+                    onClick={() => setFlash(item.symbol)}
+                  >
+                    {item.symbol}
+                  </span>
                   {fmtDetail(item)}
                 </span>
               </div>
