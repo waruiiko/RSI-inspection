@@ -53,6 +53,16 @@ export default function ManagePage({ onSaved }) {
     })
   }, [])
 
+  const allFilteredCryptoSelected = filteredPairs.length > 0 && filteredPairs.every(p => trackedCrypto.has(p.apiSymbol))
+  const toggleAllCrypto = useCallback(() => {
+    setTrackedCrypto(prev => {
+      const next = new Set(prev)
+      const allSel = filteredPairs.every(p => next.has(p.apiSymbol))
+      filteredPairs.forEach(p => allSel ? next.delete(p.apiSymbol) : next.add(p.apiSymbol))
+      return next
+    })
+  }, [filteredPairs])
+
   // ── Stock toggle ───────────────────────────────────────────
   const toggleStock = useCallback((apiSymbol) => {
     setTrackedStocks(prev => {
@@ -61,6 +71,21 @@ export default function ManagePage({ onSaved }) {
       return next
     })
   }, [])
+
+  const filteredStocks = useMemo(() => {
+    const q = stockSearch.trim().toUpperCase()
+    return q ? knownStocks.filter(s => s.symbol.toUpperCase().includes(q) || (s.name ?? '').toUpperCase().includes(q)) : knownStocks
+  }, [knownStocks, stockSearch])
+
+  const allFilteredStocksSelected = filteredStocks.length > 0 && filteredStocks.every(s => trackedStocks.has(s.apiSymbol))
+  const toggleAllStocks = useCallback(() => {
+    setTrackedStocks(prev => {
+      const next = new Set(prev)
+      const allSel = filteredStocks.every(s => next.has(s.apiSymbol))
+      filteredStocks.forEach(s => allSel ? next.delete(s.apiSymbol) : next.add(s.apiSymbol))
+      return next
+    })
+  }, [filteredStocks])
 
   // ── Stock validate & add ───────────────────────────────────
   const handleValidate = useCallback(async () => {
@@ -178,9 +203,16 @@ export default function ManagePage({ onSaved }) {
                 <button className={cryptoMarket === 'tradifi' ? 'active' : ''} onClick={() => setCryptoMarket('tradifi')}>TradFi</button>
               </div>
             </div>
-            <span className="panel-count">
-              {pairsLoading ? '加载中…' : `已选 ${trackedCrypto.size} / 共 ${activePairs.length}`}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="panel-count">
+                {pairsLoading ? '加载中…' : `已选 ${trackedCrypto.size} / 共 ${activePairs.length}`}
+              </span>
+              {!pairsLoading && filteredPairs.length > 0 && (
+                <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={toggleAllCrypto}>
+                  {allFilteredCryptoSelected ? '取消全选' : '全选'}
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="panel-search-wrap">
@@ -214,7 +246,14 @@ export default function ManagePage({ onSaved }) {
         <div className="manage-panel">
           <div className="panel-head">
             <span className="panel-title">美股</span>
-            <span className="panel-count">{trackedStocks.size} / {knownStocks.length}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="panel-count">{trackedStocks.size} / {knownStocks.length}</span>
+              {filteredStocks.length > 0 && (
+                <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={toggleAllStocks}>
+                  {allFilteredStocksSelected ? '取消全选' : '全选'}
+                </button>
+              )}
+            </div>
           </div>
 
           {knownStocks.length > 0 && (
@@ -233,26 +272,17 @@ export default function ManagePage({ onSaved }) {
             {knownStocks.length === 0 && (
               <div className="pair-empty">请在下方验证并添加股票</div>
             )}
-            {knownStocks
-              .filter(s => {
-                const q = stockSearch.trim().toUpperCase()
-                return !q || s.symbol.toUpperCase().includes(q) || (s.name ?? '').toUpperCase().includes(q)
-              })
-              .map(s => {
-                const on = trackedStocks.has(s.apiSymbol)
-                return (
-                  <label key={s.apiSymbol} className={`pair-item ${on ? 'on' : ''}`}>
-                    <input type="checkbox" checked={on} onChange={() => toggleStock(s.apiSymbol)} />
-                    <span className="pair-symbol">{s.symbol}</span>
-                    {s.name && <span className="pair-api">{s.name}</span>}
-                  </label>
-                )
-              })
-            }
-            {knownStocks.length > 0 && stockSearch.trim() && knownStocks.filter(s => {
-              const q = stockSearch.trim().toUpperCase()
-              return s.symbol.toUpperCase().includes(q) || (s.name ?? '').toUpperCase().includes(q)
-            }).length === 0 && (
+            {filteredStocks.map(s => {
+              const on = trackedStocks.has(s.apiSymbol)
+              return (
+                <label key={s.apiSymbol} className={`pair-item ${on ? 'on' : ''}`}>
+                  <input type="checkbox" checked={on} onChange={() => toggleStock(s.apiSymbol)} />
+                  <span className="pair-symbol">{s.symbol}</span>
+                  {s.name && <span className="pair-api">{s.name}</span>}
+                </label>
+              )
+            })}
+            {knownStocks.length > 0 && stockSearch.trim() && filteredStocks.length === 0 && (
               <div className="pair-empty">无匹配结果</div>
             )}
           </div>

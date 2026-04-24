@@ -239,7 +239,8 @@ export default function StatsTable() {
   const doSearch = useCallback(() => {
     const q = query.trim().toUpperCase()
     if (!q) return
-    const idx = visible.findIndex(a => a.symbol.toUpperCase().includes(q))
+    let idx = visible.findIndex(a => a.symbol.toUpperCase() === q)
+    if (idx < 0) idx = visible.findIndex(a => a.symbol.toUpperCase().includes(q))
     if (idx < 0) return
     scrollToIndex(idx)
     setHighlighted(visible[idx].symbol)
