@@ -1,6 +1,6 @@
 {
   "name": "market-rsi",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "加密货币与美股RSI热力图",
   "main": "main.js",
   "scripts": {
