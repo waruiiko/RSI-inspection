@@ -144,7 +144,6 @@ export default function StatsTable() {
   const assets        = useMarketStore(s => s.assets)
   const filter        = useMarketStore(s => s.filter)
   const timeframe     = useMarketStore(s => s.timeframe)
-  const rsiZones      = useMarketStore(s => s.rsiZones)
   const pinnedSymbols = useMarketStore(s => s.pinnedSymbols)
   const flashSymbol   = useMarketStore(s => s.flashSymbol)
   const prevRsi       = useMarketStore(s => s.prevRsi)
@@ -195,7 +194,6 @@ export default function StatsTable() {
       : assets.filter(a => a.type !== 'crypto'))
       .filter(a => a.rsi[timeframe] != null)
       .filter(a => !groupSet || groupSet.has(a.apiSymbol))
-      .filter(a => rsiZones.length === 5 || rsiZones.includes(getRsiZone(a.rsi[timeframe])))
 
     let sorted
     if (sortCol && sortDir) {
@@ -216,7 +214,7 @@ export default function StatsTable() {
     const pinned   = sorted.filter(a =>  pinnedSymbols.has(a.symbol))
     const unpinned = sorted.filter(a => !pinnedSymbols.has(a.symbol))
     return [...pinned, ...unpinned]
-  }, [assets, filter, timeframe, rsiZones, sortCol, sortDir, pinnedSymbols, groupFilter, groups])
+  }, [assets, filter, timeframe, sortCol, sortDir, pinnedSymbols, groupFilter, groups])
 
   const virtualizer = useVirtualizer({
     count: visible.length,
