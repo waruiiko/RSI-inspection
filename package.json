@@ -30,7 +30,8 @@
       "notification.html",
       "notification-preload.js",
       "src/**/*",
-      "renderer/dist/**/*"
+      "renderer/dist/**/*",
+      "build/**/*"
     ],
     "directories": {
       "output": "dist"

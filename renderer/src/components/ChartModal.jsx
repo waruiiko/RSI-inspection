@@ -86,29 +86,46 @@ function computeRsi(candles, period = 14) {
   return result
 }
 
+function findLocalPivots(arr, lob = 3) {
+  const peaks = [], troughs = []
+  for (let i = lob; i < arr.length - lob; i++) {
+    let hi = true, lo = true
+    for (let j = 1; j <= lob; j++) {
+      if (arr[i] <= arr[i - j] || arr[i] <= arr[i + j]) hi = false
+      if (arr[i] >= arr[i - j] || arr[i] >= arr[i + j]) lo = false
+    }
+    if (hi) peaks.push(i)
+    if (lo) troughs.push(i)
+  }
+  return { peaks, troughs }
+}
+
 function findDivergencePoints(candles, rsiVals) {
-  const WINDOW = 30
+  const WINDOW = 50
   if (candles.length < WINDOW) return null
   const startIdx = candles.length - WINDOW
   const closes = candles.slice(startIdx).map(c => c.close)
   const rsi    = rsiVals.slice(startIdx)
   if (rsi.some(v => v == null)) return null
   const last = WINDOW - 1
-  const scanEnd = Math.floor(WINDOW * 0.8)
-  let maxIdx = 0, minIdx = 0
-  for (let i = 1; i < scanEnd; i++) {
-    if (closes[i] > closes[maxIdx]) maxIdx = i
-    if (closes[i] < closes[minIdx]) minIdx = i
-  }
   const curPrice = closes[last], curRsi = rsi[last]
-  if (curPrice > closes[maxIdx] * 0.997 && curRsi < rsi[maxIdx] - 4)
-    return { type: 'bearish', pivotIdx: startIdx + maxIdx, currentIdx: candles.length - 1,
-             pivotPrice: closes[maxIdx], currentPrice: curPrice,
-             pivotRsi: rsi[maxIdx], currentRsi: curRsi }
-  if (curPrice < closes[minIdx] * 1.003 && curRsi > rsi[minIdx] + 4)
-    return { type: 'bullish', pivotIdx: startIdx + minIdx, currentIdx: candles.length - 1,
-             pivotPrice: closes[minIdx], currentPrice: curPrice,
-             pivotRsi: rsi[minIdx], currentRsi: curRsi }
+
+  const { peaks, troughs } = findLocalPivots(closes)
+
+  if (peaks.length >= 1) {
+    const pk = peaks[peaks.length - 1]
+    if (curPrice > closes[pk] * 0.997 && curRsi < rsi[pk] - 3)
+      return { type: 'bearish', pivotIdx: startIdx + pk, currentIdx: candles.length - 1,
+               pivotPrice: closes[pk], currentPrice: curPrice,
+               pivotRsi: rsi[pk], currentRsi: curRsi }
+  }
+  if (troughs.length >= 1) {
+    const tr = troughs[troughs.length - 1]
+    if (curPrice < closes[tr] * 1.003 && curRsi > rsi[tr] + 3)
+      return { type: 'bullish', pivotIdx: startIdx + tr, currentIdx: candles.length - 1,
+               pivotPrice: closes[tr], currentPrice: curPrice,
+               pivotRsi: rsi[tr], currentRsi: curRsi }
+  }
   return null
 }
 

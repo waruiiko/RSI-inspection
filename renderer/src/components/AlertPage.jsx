@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import useAlertStore  from '../store/alertStore'
 import usePairsStore  from '../store/pairsStore'
+import useMarketStore from '../store/marketStore'
 
 const ALL_TF = ['15m', '1h', '4h', '1d']
 
@@ -43,7 +44,10 @@ export default function AlertPage() {
   const [priceBelow,   setPriceBelow]    = useState('')
   const [divBull,      setDivBull]       = useState(false)
   const [divBear,      setDivBear]       = useState(false)
+  const [priceMode,    setPriceMode]     = useState('absolute')  // 'absolute' | 'pct'
   const [error,        setError]         = useState('')
+
+  const assets = useMarketStore(s => s.assets)
 
   useEffect(() => {
     window.api.getAssetsConfig().then(cfg => {
@@ -105,6 +109,7 @@ export default function AlertPage() {
     setPriceBelow(c.priceBelow  != null ? String(c.priceBelow)  : '')
     setDivBull(!!c.divBull)
     setDivBear(!!c.divBear)
+    setPriceMode('absolute')
     setError('')
   }, [spotPairs, futuresPairs, knownStocks])
 
@@ -119,12 +124,22 @@ export default function AlertPage() {
     const parse = v => v === '' ? null : parseFloat(v)
     const ra = parse(rsiAbove),   rb = parse(rsiBelow)
     const ca = parse(changeAbove), cb = parse(changeBelow)
-    const pa = parse(priceAbove),  pb = parse(priceBelow)
+    let   pa = parse(priceAbove),  pb = parse(priceBelow)
 
     if (ra != null && (isNaN(ra) || ra < 0 || ra > 100)) { setError('RSI 超过：范围 0–100'); return }
     if (rb != null && (isNaN(rb) || rb < 0 || rb > 100)) { setError('RSI 低于：范围 0–100'); return }
     if (ca != null && (isNaN(ca) || ca <= 0))             { setError('涨幅请输入正数'); return }
     if (cb != null && (isNaN(cb) || cb <= 0))             { setError('跌幅请输入正数'); return }
+
+    // Resolve % mode to absolute price
+    if (priceMode === 'pct') {
+      const sym = [...selected][0]
+      const currentPrice = assets.find(a => a.symbol === sym)?.price
+      if ((pa != null || pb != null) && !currentPrice) { setError('找不到该品种的当前价格，无法换算'); return }
+      if (pa != null) pa = parseFloat((currentPrice * (1 + pa / 100)).toPrecision(6))
+      if (pb != null) pb = parseFloat((currentPrice * (1 - pb / 100)).toPrecision(6))
+    }
+
     if (pa != null && (isNaN(pa) || pa <= 0))             { setError('价格突破：请输入正数'); return }
     if (pb != null && (isNaN(pb) || pb <= 0))             { setError('价格跌破：请输入正数'); return }
 
@@ -274,25 +289,63 @@ export default function AlertPage() {
               </div>
             </div>
 
-            {(selected.size <= 1 || editingId) && (
-              <div className="alert-cond-row">
-                <span className="alert-cond-label">价格</span>
-                <div className="alert-cond-inputs">
-                  <label className="alert-cond-input-wrap">
-                    <span className="alert-cond-hint" style={{ color: '#f85149' }}>突破</span>
-                    <input className="alert-num-input" type="number" min="0"
-                      placeholder="如 50000" value={priceAbove}
-                      onChange={e => setPriceAbove(e.target.value)} />
-                  </label>
-                  <label className="alert-cond-input-wrap">
-                    <span className="alert-cond-hint" style={{ color: '#3fb950' }}>跌破</span>
-                    <input className="alert-num-input" type="number" min="0"
-                      placeholder="如 40000" value={priceBelow}
-                      onChange={e => setPriceBelow(e.target.value)} />
-                  </label>
+            {(selected.size <= 1 || editingId) && (() => {
+              const sym = [...selected][0]
+              const currentPrice = sym ? assets.find(a => a.symbol === sym)?.price : null
+              const isPct = priceMode === 'pct'
+              const previewAbove = isPct && currentPrice && priceAbove !== ''
+                ? parseFloat((currentPrice * (1 + parseFloat(priceAbove) / 100)).toPrecision(6))
+                : null
+              const previewBelow = isPct && currentPrice && priceBelow !== ''
+                ? parseFloat((currentPrice * (1 - parseFloat(priceBelow) / 100)).toPrecision(6))
+                : null
+              return (
+                <div className="alert-cond-row">
+                  <span className="alert-cond-label">价格</span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                      <button
+                        className={`zone-btn ${!isPct ? 'filtered' : ''}`}
+                        style={{ fontSize: 10, padding: '1px 7px' }}
+                        onClick={() => { setPriceMode('absolute'); setPriceAbove(''); setPriceBelow('') }}
+                      >绝对价格</button>
+                      <button
+                        className={`zone-btn ${isPct ? 'filtered' : ''}`}
+                        style={{ fontSize: 10, padding: '1px 7px' }}
+                        onClick={() => { setPriceMode('pct'); setPriceAbove(''); setPriceBelow('') }}
+                      >% 偏离</button>
+                      {isPct && currentPrice && (
+                        <span style={{ fontSize: 10, color: 'var(--dim)' }}>
+                          当前 {currentPrice.toPrecision(5)}
+                        </span>
+                      )}
+                    </div>
+                    <div className="alert-cond-inputs">
+                      <label className="alert-cond-input-wrap">
+                        <span className="alert-cond-hint" style={{ color: '#f85149' }}>突破</span>
+                        <input className="alert-num-input" type="number" min="0"
+                          placeholder={isPct ? '如 +2%' : '如 50000'} value={priceAbove}
+                          onChange={e => setPriceAbove(e.target.value)} />
+                        {isPct && <span className="alert-cond-unit">%</span>}
+                        {previewAbove != null && (
+                          <span style={{ fontSize: 10, color: '#f85149', marginLeft: 4 }}>≈{previewAbove}</span>
+                        )}
+                      </label>
+                      <label className="alert-cond-input-wrap">
+                        <span className="alert-cond-hint" style={{ color: '#3fb950' }}>跌破</span>
+                        <input className="alert-num-input" type="number" min="0"
+                          placeholder={isPct ? '如 2%' : '如 40000'} value={priceBelow}
+                          onChange={e => setPriceBelow(e.target.value)} />
+                        {isPct && <span className="alert-cond-unit">%</span>}
+                        {previewBelow != null && (
+                          <span style={{ fontSize: 10, color: '#3fb950', marginLeft: 4 }}>≈{previewBelow}</span>
+                        )}
+                      </label>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            )}
+              )
+            })()}
             {selected.size > 1 && !editingId && (
               <div className="alert-cond-row">
                 <span className="alert-cond-label" style={{ color: 'var(--dim)' }}>价格</span>

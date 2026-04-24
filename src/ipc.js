@@ -192,38 +192,49 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
   const divergence = {}
   for (const tf of timeframes) {
     const candles = candlesByTf[tf]
-    if (!candles || candles.length < rsiPeriod + 30) continue
+    if (!candles || candles.length < rsiPeriod + 50) continue
     const rsiSeries = rsiIndicator.computeSeriesFromCandles(candles, { period: rsiPeriod })
-    if (rsiSeries.length < 25) continue
-    divergence[tf] = detectDivergence(candles.slice(-30).map(c => c.close), rsiSeries.slice(-30))
+    if (rsiSeries.length < 40) continue
+    divergence[tf] = detectDivergence(candles.slice(-50).map(c => c.close), rsiSeries.slice(-50))
   }
 
   return { ...asset, price, change24h, rsi, sparkline, divergence }
 }
 
+function findLocalPivots(arr, lob = 3) {
+  const peaks = [], troughs = []
+  for (let i = lob; i < arr.length - lob; i++) {
+    let hi = true, lo = true
+    for (let j = 1; j <= lob; j++) {
+      if (arr[i] <= arr[i - j] || arr[i] <= arr[i + j]) hi = false
+      if (arr[i] >= arr[i - j] || arr[i] >= arr[i + j]) lo = false
+    }
+    if (hi) peaks.push(i)
+    if (lo) troughs.push(i)
+  }
+  return { peaks, troughs }
+}
+
 function detectDivergence(closes, rsiSeries) {
   const n = Math.min(closes.length, rsiSeries.length)
-  if (n < 10) return null
+  if (n < 15) return null
 
-  const c   = closes.slice(-n)
-  const r   = rsiSeries.slice(-n)
+  const c = closes.slice(-n)
+  const r = rsiSeries.slice(-n)
   const last = n - 1
-
-  // Find the highest and lowest close in the first 80% of the window
-  const scanEnd = Math.floor(n * 0.8)
-  let maxIdx = 0, minIdx = 0
-  for (let i = 1; i < scanEnd; i++) {
-    if (c[i] > c[maxIdx]) maxIdx = i
-    if (c[i] < c[minIdx]) minIdx = i
-  }
-
-  const priceAtHigh = c[maxIdx], rsiAtHigh = r[maxIdx]
-  const priceAtLow  = c[minIdx], rsiAtLow  = r[minIdx]
   const curPrice = c[last], curRsi = r[last]
 
-  // Bearish divergence: price makes new high, RSI makes lower high
-  if (curPrice > priceAtHigh * 0.997 && curRsi < rsiAtHigh - 4) return 'bearish'
-  // Bullish divergence: price makes new low, RSI makes higher low
-  if (curPrice < priceAtLow  * 1.003 && curRsi > rsiAtLow  + 4) return 'bullish'
+  const { peaks, troughs } = findLocalPivots(c)
+
+  // Bearish: last pivot peak where price < curPrice (higher price now) but RSI was higher then
+  if (peaks.length >= 1) {
+    const pk = peaks[peaks.length - 1]
+    if (curPrice > c[pk] * 0.997 && curRsi < r[pk] - 3) return 'bearish'
+  }
+  // Bullish: last pivot trough where price > curPrice (lower price now) but RSI was lower then
+  if (troughs.length >= 1) {
+    const tr = troughs[troughs.length - 1]
+    if (curPrice < c[tr] * 1.003 && curRsi > r[tr] + 3) return 'bullish'
+  }
   return null
 }

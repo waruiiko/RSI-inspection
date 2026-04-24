@@ -113,7 +113,7 @@ export default function Heatmap() {
         value: [xVal, a.rsi[timeframe]],
         name:  a.symbol,
         asset: a,
-        itemStyle: { color: getRsiColor(a.rsi[timeframe]) },
+        itemStyle: { color: getRsiColor(a.rsi[timeframe]), borderColor: 'rgba(255,255,255,0.18)', borderWidth: 1 },
         label: {
           show:      true,
           position:  'bottom',
@@ -131,7 +131,7 @@ export default function Heatmap() {
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      grid: { top: 14, bottom: 52, left: 45, right: 20 },
+      grid: { top: 14, bottom: 44, left: 45, right: 20 },
       xAxis: {
         type:  'value',
         min:   isRandom ? -2 : -0.5,
