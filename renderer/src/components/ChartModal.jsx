@@ -86,6 +86,32 @@ function computeRsi(candles, period = 14) {
   return result
 }
 
+function findDivergencePoints(candles, rsiVals) {
+  const WINDOW = 30
+  if (candles.length < WINDOW) return null
+  const startIdx = candles.length - WINDOW
+  const closes = candles.slice(startIdx).map(c => c.close)
+  const rsi    = rsiVals.slice(startIdx)
+  if (rsi.some(v => v == null)) return null
+  const last = WINDOW - 1
+  const scanEnd = Math.floor(WINDOW * 0.8)
+  let maxIdx = 0, minIdx = 0
+  for (let i = 1; i < scanEnd; i++) {
+    if (closes[i] > closes[maxIdx]) maxIdx = i
+    if (closes[i] < closes[minIdx]) minIdx = i
+  }
+  const curPrice = closes[last], curRsi = rsi[last]
+  if (curPrice > closes[maxIdx] * 0.997 && curRsi < rsi[maxIdx] - 4)
+    return { type: 'bearish', pivotIdx: startIdx + maxIdx, currentIdx: candles.length - 1,
+             pivotPrice: closes[maxIdx], currentPrice: curPrice,
+             pivotRsi: rsi[maxIdx], currentRsi: curRsi }
+  if (curPrice < closes[minIdx] * 1.003 && curRsi > rsi[minIdx] + 4)
+    return { type: 'bullish', pivotIdx: startIdx + minIdx, currentIdx: candles.length - 1,
+             pivotPrice: closes[minIdx], currentPrice: curPrice,
+             pivotRsi: rsi[minIdx], currentRsi: curRsi }
+  return null
+}
+
 export default function ChartModal({ asset, onClose }) {
   const rsiPeriod     = useSettingsStore(s => s.rsiPeriod)
   const rsiOverbought = useSettingsStore(s => s.rsiOverbought)
@@ -127,6 +153,21 @@ export default function ChartModal({ asset, onClose }) {
     const candles = ohlcv[tf] ?? []
     const times   = candles.map(c => new Date(c.time).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }))
     const rsiVals = computeRsi(candles, rsiPeriod)
+    const divPts  = findDivergencePoints(candles, rsiVals)
+    const divColor = divPts?.type === 'bearish' ? '#f97316' : '#22c55e'
+
+    // Helper: build a 2-point line series for divergence annotation
+    const divLineSeries = (yPivot, yCurrent) => divPts ? [{
+      type: 'line',
+      data: Array(candles.length).fill(null).map((_, i) =>
+        i === divPts.pivotIdx ? yPivot : i === divPts.currentIdx ? yCurrent : null
+      ),
+      symbol: 'circle', symbolSize: 6,
+      lineStyle: { color: divColor, type: 'dashed', width: 1.5 },
+      itemStyle: { color: divColor },
+      connectNulls: true,
+      silent: true, z: 10,
+    }] : []
 
     candleChart.current.setOption({
       backgroundColor: 'transparent',
@@ -194,6 +235,7 @@ export default function ChartModal({ asset, onClose }) {
           })),
           barMaxWidth: 8,
         },
+        ...divLineSeries(divPts?.pivotPrice, divPts?.currentPrice),
       ],
     }, true)
 
@@ -282,6 +324,7 @@ export default function ChartModal({ asset, onClose }) {
             origin: 'start',
           },
         },
+        ...divLineSeries(divPts?.pivotRsi, divPts?.currentRsi),
       ],
     }, true)
 
@@ -297,15 +340,19 @@ export default function ChartModal({ asset, onClose }) {
     rsiChart.current?.dispose();    rsiChart.current    = null
   }, [])
 
-  const rsiStats = useMemo(() => {
+  const { rsiStats, divPtsDisplay } = useMemo(() => {
     const candles = ohlcv[tf]
-    if (!candles || candles.length < rsiPeriod + 10) return null
-    const series = computeRsi(candles, rsiPeriod).filter(v => v != null)
-    if (!series.length) return null
-    const ob  = series.filter(v => v >= rsiOverbought).length
-    const os  = series.filter(v => v <= rsiOversold).length
-    const pct = n => ((n / series.length) * 100).toFixed(1)
-    return { obPct: pct(ob), osPct: pct(os), bars: series.length }
+    if (!candles || candles.length < rsiPeriod + 10) return { rsiStats: null, divPtsDisplay: null }
+    const series = computeRsi(candles, rsiPeriod)
+    const valid  = series.filter(v => v != null)
+    if (!valid.length) return { rsiStats: null, divPtsDisplay: null }
+    const ob  = valid.filter(v => v >= rsiOverbought).length
+    const os  = valid.filter(v => v <= rsiOversold).length
+    const pct = n => ((n / valid.length) * 100).toFixed(1)
+    return {
+      rsiStats:    { obPct: pct(ob), osPct: pct(os), bars: valid.length },
+      divPtsDisplay: findDivergencePoints(candles, series),
+    }
   }, [ohlcv, tf, rsiPeriod, rsiOverbought, rsiOversold])
 
   return (
@@ -348,6 +395,17 @@ export default function ChartModal({ asset, onClose }) {
                   <span style={{ color: '#ef4444' }}>超买 {rsiStats.obPct}%</span>
                   <span style={{ color: '#9ca3af' }}>·</span>
                   <span style={{ color: '#22c55e' }}>超卖 {rsiStats.osPct}%</span>
+                  {divPtsDisplay && (
+                    <>
+                      <span style={{ color: '#9ca3af' }}>·</span>
+                      <span style={{
+                        color: divPtsDisplay.type === 'bearish' ? '#f97316' : '#22c55e',
+                        fontWeight: 600,
+                      }}>
+                        {divPtsDisplay.type === 'bearish' ? '⚠ 熊市背离' : '✓ 牛市背离'}
+                      </span>
+                    </>
+                  )}
                 </div>
               )}
             </>
