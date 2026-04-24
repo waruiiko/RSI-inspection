@@ -131,7 +131,7 @@ export default function Heatmap() {
     chart.setOption({
       backgroundColor: 'transparent',
       animation: false,
-      grid: { top: 16, bottom: 68, left: 45, right: 20 },
+      grid: { top: 14, bottom: 52, left: 45, right: 20 },
       xAxis: {
         type:  'value',
         min:   isRandom ? -2 : -0.5,

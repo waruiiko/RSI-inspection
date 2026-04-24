@@ -103,8 +103,9 @@ body {
 }
 
 .heatmap-wrapper {
-  flex: 0 0 175px;
+  flex: 0 0 200px;
   min-height: 0;
+  overflow: hidden;
 }
 
 /* ── Toolbar ────────────────────────────────────────────────── */
