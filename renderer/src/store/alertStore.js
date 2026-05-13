@@ -7,8 +7,7 @@ import { create } from 'zustand'
 //   priceAbove: number|null, priceBelow: number|null,
 //   requireAllTf: bool, enabled: bool,
 //   lastFired: { [key]: timestamp } (persisted — cooldown survives restarts) }
-// Regular alerts (special=false): one per symbol, upsert overwrites.
-// Special alerts (special=true): multiple per symbol, managed by ID.
+// One alert rule per symbol. "special" only changes notification weight.
 
 const useAlertStore = create((set, get) => ({
   configs: [],
@@ -19,34 +18,30 @@ const useAlertStore = create((set, get) => ({
       window.api.loadFeed(),
     ])
     if (Array.isArray(saved)) {
-      set({ configs: saved.map(c => ({ ...c, lastFired: c.lastFired ?? {} })) })
+      const configs = normalizeAlertConfigs(saved)
+      set({ configs })
+      if (configs.length !== saved.length) _persist(configs)
     }
     if (Array.isArray(feed)) set({ feed })
   },
 
   upsert: (symbols, fields) => {
-    const result = [...get().configs]
+    const result = normalizeAlertConfigs(get().configs)
     for (const symbol of symbols) {
-      if (fields.special) {
-        // Special: always create a new entry (multiple allowed per symbol)
-        result.push({
-          id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-          symbol, enabled: true, lastFired: {}, ...fields,
-        })
-      } else {
-        // Regular: one per symbol — overwrite existing regular alert
-        const idx = result.findIndex(c => c.symbol === symbol && !c.special)
-        const base = {
-          id: idx >= 0 ? result[idx].id : (Date.now().toString(36) + Math.random().toString(36).slice(2)),
-          symbol, enabled: true,
-          lastFired: idx >= 0 ? result[idx].lastFired : {},
-        }
-        if (idx >= 0) result[idx] = { ...base, ...fields }
-        else result.push({ ...base, ...fields })
+      const key = symbolKey(symbol)
+      const idx = result.findIndex(c => symbolKey(c.symbol) === key)
+      const base = {
+        id: idx >= 0 ? result[idx].id : makeId(),
+        symbol,
+        enabled: true,
+        lastFired: idx >= 0 ? result[idx].lastFired : {},
       }
+      if (idx >= 0) result[idx] = { ...base, ...fields }
+      else result.push({ ...base, ...fields })
     }
-    set({ configs: result })
-    _persist(result)
+    const configs = normalizeAlertConfigs(result)
+    set({ configs })
+    _persist(configs)
   },
 
   // Update an existing alert by ID (used when editing any alert in-place)
@@ -75,6 +70,50 @@ const useAlertStore = create((set, get) => ({
 
   setAllEnabled: (enabled) => {
     const configs = get().configs.map(c => ({ ...c, enabled }))
+    set({ configs })
+    _persist(configs)
+  },
+
+  syncFollowTop: (symbols) => {
+    const current = normalizeAlertConfigs(get().configs)
+    const template = current.find(c => c.followTop)
+    if (!template) return
+    const limit = template.followTopLimit ?? 50
+    if (symbols.length < limit) return
+    const top = new Set(symbols.map(symbolKey))
+    const fields = {
+      timeframes: template.timeframes,
+      requireAllTf: template.requireAllTf,
+      alertLevel: template.alertLevel ?? (template.special ? 3 : 1),
+      special: !!template.special,
+      rsiAbove: template.rsiAbove ?? null,
+      rsiBelow: template.rsiBelow ?? null,
+      changeAbove: template.changeAbove ?? null,
+      changeBelow: template.changeBelow ?? null,
+      priceAbove: null,
+      priceBelow: null,
+      divBull: !!template.divBull,
+      divBear: !!template.divBear,
+      volumeSignal: !!template.volumeSignal,
+      strategies: template.strategies ?? null,
+      strategy: template.strategy ?? null,
+      minScore: template.minScore ?? null,
+      followTop: true,
+      followTopLimit: limit,
+    }
+    const kept = current.filter(c => !c.followTop || top.has(symbolKey(c.symbol)))
+    for (const symbol of symbols) {
+      const idx = kept.findIndex(c => symbolKey(c.symbol) === symbolKey(symbol))
+      const base = {
+        id: idx >= 0 ? kept[idx].id : makeId(),
+        symbol,
+        enabled: idx >= 0 ? kept[idx].enabled : true,
+        lastFired: idx >= 0 ? kept[idx].lastFired : {},
+      }
+      if (idx >= 0) kept[idx] = { ...base, ...fields }
+      else kept.push({ ...base, ...fields })
+    }
+    const configs = normalizeAlertConfigs(kept)
     set({ configs })
     _persist(configs)
   },
@@ -110,6 +149,38 @@ const useAlertStore = create((set, get) => ({
 
 function _persist(configs) {
   window.api.saveAlertRules(configs)
+}
+
+function makeId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+
+function symbolKey(symbol) {
+  return String(symbol ?? '').trim().toUpperCase()
+}
+
+function normalizeAlertConfigs(configs) {
+  const bySymbol = new Map()
+  for (const rule of configs) {
+    const key = symbolKey(rule.symbol)
+    if (!key) continue
+    const previous = bySymbol.get(key)
+    bySymbol.set(key, {
+      ...previous,
+      ...rule,
+      symbol: rule.symbol,
+      id: previous?.id ?? rule.id ?? makeId(),
+      alertLevel: rule.alertLevel ?? (rule.special ? 3 : 1),
+      special: rule.special ?? ((rule.alertLevel ?? 1) >= 2),
+      lastFired: {
+        ...(previous?.lastFired ?? {}),
+        ...(rule.lastFired ?? {}),
+      },
+      fireCount: Math.max(previous?.fireCount ?? 0, rule.fireCount ?? 0),
+      lastFiredAt: Math.max(previous?.lastFiredAt ?? 0, rule.lastFiredAt ?? 0) || undefined,
+    })
+  }
+  return [...bySymbol.values()]
 }
 
 export default useAlertStore

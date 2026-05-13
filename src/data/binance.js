@@ -19,12 +19,17 @@ async function fetchKlines(symbol, interval, limit = 100) {
 
   const raw = await res.json()
   return raw.map(k => ({
-    time:   k[0],
-    open:   parseFloat(k[1]),
-    high:   parseFloat(k[2]),
-    low:    parseFloat(k[3]),
-    close:  parseFloat(k[4]),
-    volume: parseFloat(k[5]),
+    time:               k[0],
+    open:               parseFloat(k[1]),
+    high:               parseFloat(k[2]),
+    low:                parseFloat(k[3]),
+    close:              parseFloat(k[4]),
+    volume:             parseFloat(k[5]),
+    closeTime:          k[6],
+    quoteVolume:        parseFloat(k[7]),
+    trades:             Number(k[8]),
+    takerBuyBaseVolume: parseFloat(k[9]),
+    takerBuyQuoteVolume: parseFloat(k[10]),
   }))
 }
 
@@ -43,6 +48,7 @@ async function fetchTickers(symbols) {
         price:     parseFloat(t.lastPrice),
         change24h: parseFloat(t.priceChangePercent),
         volume24h: parseFloat(t.quoteVolume),
+        quoteVolume24h: parseFloat(t.quoteVolume),
       }])
   )
 }
@@ -73,12 +79,17 @@ async function fetchFuturesKlines(symbol, interval, limit = 100) {
   if (!res.ok) throw new Error(`Binance Futures ${res.status} ${symbol} ${interval}`)
   const raw = await res.json()
   return raw.map(k => ({
-    time:   k[0],
-    open:   parseFloat(k[1]),
-    high:   parseFloat(k[2]),
-    low:    parseFloat(k[3]),
-    close:  parseFloat(k[4]),
-    volume: parseFloat(k[5]),
+    time:               k[0],
+    open:               parseFloat(k[1]),
+    high:               parseFloat(k[2]),
+    low:                parseFloat(k[3]),
+    close:              parseFloat(k[4]),
+    volume:             parseFloat(k[5]),
+    closeTime:          k[6],
+    quoteVolume:        parseFloat(k[7]),
+    trades:             Number(k[8]),
+    takerBuyBaseVolume: parseFloat(k[9]),
+    takerBuyQuoteVolume: parseFloat(k[10]),
   }))
 }
 
@@ -96,6 +107,7 @@ async function fetchFuturesTickers(symbols) {
         price:     parseFloat(t.lastPrice),
         change24h: parseFloat(t.priceChangePercent),
         volume24h: parseFloat(t.quoteVolume),
+        quoteVolume24h: parseFloat(t.quoteVolume),
       }])
   )
 }

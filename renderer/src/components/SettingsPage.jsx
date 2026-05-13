@@ -9,6 +9,7 @@ const RSI_PERIOD_OPTIONS = [7, 14, 21]
 const RSI_MA_TYPES       = ['None', 'SMA', 'EMA', 'RMA', 'WMA', 'BB']
 const RSI_MA_LENGTHS     = [5, 9, 14, 21]
 const RSI_BB_MULTS       = [1.5, 2.0, 2.5, 3.0]
+const LEVEL_OPTIONS      = [1, 2, 3]
 
 /* ── Section title ─────────────────────────────────────────── */
 function SectionTitle({ children }) {
@@ -50,6 +51,7 @@ export default function SettingsPage() {
     refreshInterval, alertCooldown, popupEnabled, soundEnabled,
     startMinimized, rsiPeriod, rsiOverbought, rsiOversold,
     rsiMaType, rsiMaLength, rsiBbMult,
+    popupMinLevel, soundMinLevel, webhookMinLevel, autoCheckUpdates,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook,
     update,
@@ -57,6 +59,7 @@ export default function SettingsPage() {
 
   const [autoLaunch,     setAutoLaunch]     = useState(false)
   const [autoLaunchBusy, setAutoLaunchBusy] = useState(true)
+  const [settingsMsg,    setSettingsMsg]    = useState('')
 
   useEffect(() => {
     window.api.getAutoLaunch().then(v => { setAutoLaunch(v); setAutoLaunchBusy(false) })
@@ -82,7 +85,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.0.2
+          v1.0.4
         </span>
       </div>
 
@@ -99,6 +102,25 @@ export default function SettingsPage() {
               checked={startMinimized}
               onChange={e => update('startMinimized', e.target.checked)}
             />
+          </Row>
+          <Row label="自动检查更新" hint="启动时检查 GitHub Releases，不会自动安装">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Toggle checked={autoCheckUpdates} onChange={e => update('autoCheckUpdates', e.target.checked)} />
+              <button
+                className="zone-btn"
+                style={{ fontSize: 11, padding: '3px 10px' }}
+                onClick={async () => {
+                  try {
+                    const r = await window.api.checkForUpdates(true)
+                    setSettingsMsg(`已打开最新版本页面：${r.tag ?? r.name ?? ''}`)
+                  } catch (err) {
+                    setSettingsMsg(`检查更新失败：${err.message}`)
+                  }
+                }}
+              >
+                检查更新
+              </button>
+            </div>
           </Row>
         </div>
 
@@ -194,7 +216,7 @@ export default function SettingsPage() {
                 className="zone-btn"
                 style={{ fontSize: 11, padding: '3px 10px' }}
                 onClick={() => window.api.showNotificationBatch([
-                  { symbol: 'TEST', type: 'rsi', timeframe: '1h', condition: 'above', threshold: 70, value: 73.5 }
+                    { symbol: 'TEST', type: 'rsi', timeframe: '1h', condition: 'above', threshold: 70, value: 73.5, level: 1 }
                 ])}
               >
                 测试弹窗
@@ -235,6 +257,50 @@ export default function SettingsPage() {
               format={v => `${v} 小时`}
             />
           </Row>
+
+          <Row label="弹窗等级" hint="只对达到该等级的提醒弹窗">
+            <BtnGroup options={LEVEL_OPTIONS} value={popupMinLevel} onChange={v => update('popupMinLevel', v)} format={v => `${v}级+`} />
+          </Row>
+
+          <Row label="声音等级" hint="只对达到该等级的提醒播放声音">
+            <BtnGroup options={LEVEL_OPTIONS} value={soundMinLevel} onChange={v => update('soundMinLevel', v)} format={v => `${v}级+`} />
+          </Row>
+
+          <Row label="Webhook 等级" hint="只对达到该等级的提醒发送 Telegram / Discord">
+            <BtnGroup options={LEVEL_OPTIONS} value={webhookMinLevel} onChange={v => update('webhookMinLevel', v)} format={v => `${v}级+`} />
+          </Row>
+        </div>
+
+        <div className="settings-section">
+          <SectionTitle>备份</SectionTitle>
+          <Row label="导出配置" hint="导出品种、分组、提醒规则与常规设置；不会导出 Telegram / Discord 密钥">
+            <button
+              className="zone-btn"
+              style={{ fontSize: 11, padding: '3px 10px' }}
+              onClick={async () => {
+                const r = await window.api.exportConfig()
+                if (r?.ok) setSettingsMsg(`已导出：${r.filePath}`)
+              }}
+            >
+              导出
+            </button>
+          </Row>
+          <Row label="导入配置" hint="导入后建议重新刷新市场数据；现有 Webhook 密钥会保留">
+            <button
+              className="zone-btn"
+              style={{ fontSize: 11, padding: '3px 10px' }}
+              onClick={async () => {
+                const r = await window.api.importConfig()
+                if (r?.ok) {
+                  setSettingsMsg('导入完成，请重启或刷新数据')
+                  window.location.reload()
+                }
+              }}
+            >
+              导入
+            </button>
+          </Row>
+          {settingsMsg && <div className="settings-note">{settingsMsg}</div>}
         </div>
 
         {/* ── Webhook ── */}

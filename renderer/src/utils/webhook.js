@@ -3,6 +3,11 @@ function fmtItem(item) {
     const dir = item.condition === 'bull' ? '牛市背离' : '熊市背离'
     return `${item.symbol}  (${item.timeframe}) 检测到${dir}`
   }
+  if (item.type === 'structure') {
+    const ratio = item.volumeRatio != null ? `  量能 ${item.volumeRatio}x` : ''
+    const move = item.priceMovePct != null ? `  K线 ${item.priceMovePct > 0 ? '+' : ''}${item.priceMovePct}%` : ''
+    return `${item.symbol}  (${item.timeframe}) ${item.signal ?? '量价结构'}  评分 ${item.value}${ratio}${move}`
+  }
   const dir = item.condition === 'above' ? '↑' : '↓'
   if (item.type === 'rsi')
     return `${item.symbol}  RSI(${item.timeframe}) ${dir} ${item.threshold}  当前 ${item.value?.toFixed(1) ?? '—'}`

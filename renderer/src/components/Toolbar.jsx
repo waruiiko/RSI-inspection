@@ -5,6 +5,7 @@ import useSettingsStore from '../store/settingsStore'
 import { isUSMarketOpen } from '../utils/marketHours'
 import { getRsiZone }  from '../utils/rsi'
 import useGroupsStore from '../store/groupsStore'
+import { LIQUIDITY_LIMITS, applyLiquidityLimit, formatTurnover, getQuoteVolume } from '../utils/liquidity'
 
 const FILTERS = [
   { value: 'all',    label: '全部' },
@@ -150,6 +151,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
   const assets       = useMarketStore(s => s.assets)
   const timeframe    = useMarketStore(s => s.timeframe)
   const layout       = useMarketStore(s => s.layout)
+  const liquidityLimit = useMarketStore(s => s.liquidityLimit)
   const updatedAt    = useMarketStore(s => s.updatedAt)
   const loading      = useMarketStore(s => s.loading)
   const error        = useMarketStore(s => s.error)
@@ -157,6 +159,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
   const setFilter    = useMarketStore(s => s.setFilter)
   const setTimeframe = useMarketStore(s => s.setTimeframe)
   const setLayout    = useMarketStore(s => s.setLayout)
+  const setLiquidityLimit = useMarketStore(s => s.setLiquidityLimit)
   const fetchData    = useMarketStore(s => s.fetchData)
   const refreshInterval = useSettingsStore(s => s.refreshInterval)
 
@@ -182,6 +185,19 @@ export default function Toolbar({ activeTab, setActiveTab }) {
     return `${m}:${s}`
   })()
 
+  const liquiditySummary = useMemo(() => {
+    const scoped = filter === 'all' ? assets
+      : filter === 'crypto' ? assets.filter(a => a.type === 'crypto')
+      : assets.filter(a => a.type !== 'crypto')
+    const shown = applyLiquidityLimit(scoped, liquidityLimit)
+    const min = liquidityLimit ? Math.min(...shown.map(getQuoteVolume).filter(Boolean)) : null
+    return {
+      shown: shown.length,
+      total: scoped.length,
+      min,
+    }
+  }, [assets, filter, liquidityLimit])
+
   const TABS = [
     { key: 'market',   label: '市场' },
     { key: 'manage',   label: '管理品种' },
@@ -203,7 +219,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             boxShadow: '0 0 8px rgba(31,111,235,0.4)',
           }}>R</div>
           <h1 className="toolbar-title">市场 RSI 热力图</h1>
-          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.0.3</span>
+          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.0.4</span>
         </div>
 
         {/* Underline tab navigation */}
@@ -250,6 +266,18 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             ))}
           </div>
 
+          <div className="btn-group" title={liquiditySummary.min ? `最低成交额 ${formatTurnover(liquiditySummary.min)}` : '按24h成交额过滤'}>
+            {LIQUIDITY_LIMITS.map(opt => (
+              <button
+                key={opt.value}
+                className={liquidityLimit === opt.value ? 'active' : ''}
+                onClick={() => setLiquidityLimit(opt.value)}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
           <div className="btn-group">
             {TIMEFRAMES.map(tf => (
               <button key={tf} className={timeframe === tf ? 'active' : ''} onClick={() => setTimeframe(tf)}>
@@ -288,6 +316,8 @@ export default function Toolbar({ activeTab, setActiveTab }) {
           )}
           {!loading && timeStr && (
             <span className="updated-at">
+              显示 {liquiditySummary.shown}/{liquiditySummary.total}
+              <span style={{ color: 'var(--border)', margin: '0 4px' }}>·</span>
               更新于 {timeStr}
               {countdownStr && <span style={{ color: 'var(--border)', margin: '0 4px' }}>·</span>}
               {countdownStr && `下次 ${countdownStr}`}

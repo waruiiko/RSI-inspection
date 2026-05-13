@@ -87,6 +87,7 @@
       if (type === 'rsi')        return condition === 'above' ? 'red' : 'green'
       if (type === 'price')      return condition === 'above' ? 'red' : 'green'
       if (type === 'divergence') return condition === 'bull'  ? 'green' : 'orange'
+      if (type === 'structure')  return condition === 'bullish' ? 'green' : condition === 'bearish' ? 'red' : 'orange'
       // change: above = surging = green, below = falling = red
       return condition === 'above' ? 'green' : 'red'
     }
@@ -95,12 +96,14 @@
       if (type === 'rsi')        return condition === 'above' ? 'red' : 'green'
       if (type === 'price')      return condition === 'above' ? 'red' : 'green'
       if (type === 'divergence') return condition === 'bull'  ? 'green' : 'orange'
+      if (type === 'structure')  return condition === 'bullish' ? 'green' : condition === 'bearish' ? 'red' : 'orange'
       return condition === 'above' ? 'green' : 'red'
     }
 
     function fmtValue(type, value) {
-      if (type === 'rsi')   return value.toFixed(1)
-      if (type === 'price') return fmtPrice(value)
+      if (type === 'rsi')       return value.toFixed(1)
+      if (type === 'price')     return fmtPrice(value)
+      if (type === 'structure') return String(value)
       return (value > 0 ? '+' : '') + value.toFixed(2) + '%'
     }
 
@@ -118,7 +121,8 @@
       const cls = cardClass(data.type, data.condition)
       div.className = 'card' + (cls ? ' ' + cls : '')
 
-      const specialBadge = data.special ? '<span class="card-special">★</span>' : ''
+      const level = data.level ?? (data.special ? 3 : 1)
+      const specialBadge = `<span class="card-special">${level}级</span>`
 
       let typeLabel, bodyHtml
       if (data.type === 'divergence') {
@@ -126,6 +130,12 @@
         const dirLabel = data.condition === 'bull' ? '看涨背离 ↗' : '看跌背离 ↘'
         const dirCls   = data.condition === 'bull' ? 'green' : 'orange'
         bodyHtml = `检测到 <span class="card-value ${dirCls}">${dirLabel}</span>`
+      } else if (data.type === 'structure') {
+        typeLabel = `量价 ${data.timeframe ?? ''}`
+        const dirCls = valueClass(data.type, data.condition)
+        const ratio = data.volumeRatio != null ? `，量能 ${data.volumeRatio}x` : ''
+        const move = data.priceMovePct != null ? `，K线 ${data.priceMovePct > 0 ? '+' : ''}${data.priceMovePct}%` : ''
+        bodyHtml = `<span class="card-value ${dirCls}">${data.signal ?? '量价结构'}</span> 评分 ${data.value}${ratio}${move}`
       } else {
         const condLabel = data.type === 'price'
           ? (data.condition === 'above' ? '突破' : '跌破')
@@ -192,10 +202,12 @@
       const rsiCount    = items.filter(i => i.type === 'rsi').length
       const changeCount = items.filter(i => i.type === 'change').length
       const priceCount  = items.filter(i => i.type === 'price').length
+      const structureCount = items.filter(i => i.type === 'structure').length
       const parts = []
       if (rsiCount)    parts.push(`RSI ${rsiCount} 条`)
       if (changeCount) parts.push(`涨跌幅 ${changeCount} 条`)
       if (priceCount)  parts.push(`价格 ${priceCount} 条`)
+      if (structureCount) parts.push(`量价 ${structureCount} 条`)
 
       div.innerHTML = `
         <div class="card-header">

@@ -1,4 +1,5 @@
-const { app }        = require('electron')
+const { app, BrowserWindow, dialog, shell } = require('electron')
+const fs             = require('fs')
 const { fetchOHLCV } = require('./data/provider')
 const binance        = require('./data/binance')
 const yahoo          = require('./data/yahoo')
@@ -9,7 +10,8 @@ const config         = require('./config')
 const { isUSMarketOpen } = require('./marketHours')
 
 const DEFAULT_TIMEFRAMES = ['15m', '1h', '4h', '1d']
-
+let _marketCache = null
+let _marketCacheDirty = false
 exports.register = (ipcMain) => {
 
   // Asset config management
@@ -62,6 +64,41 @@ exports.register = (ipcMain) => {
   ipcMain.handle('settings:get',  ()     => config.loadSettings())
   ipcMain.handle('settings:save', (_, s) => { config.saveSettings(s); return { ok: true } })
 
+  ipcMain.handle('settings:exportConfig', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const result = await dialog.showSaveDialog(win, {
+      title: '导出 RSI-inspection 配置',
+      defaultPath: `RSI-inspection-config-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (result.canceled || !result.filePath) return { canceled: true }
+    fs.writeFileSync(result.filePath, JSON.stringify(config.exportUserConfig(), null, 2), 'utf8')
+    return { ok: true, filePath: result.filePath }
+  })
+
+  ipcMain.handle('settings:importConfig', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const result = await dialog.showOpenDialog(win, {
+      title: '导入 RSI-inspection 配置',
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    })
+    if (result.canceled || !result.filePaths?.[0]) return { canceled: true }
+    const payload = JSON.parse(fs.readFileSync(result.filePaths[0], 'utf8'))
+    config.importUserConfig(payload)
+    return { ok: true, filePath: result.filePaths[0] }
+  })
+
+  ipcMain.handle('settings:checkUpdates', async (_, openRelease = true) => {
+    const res = await fetch('https://api.github.com/repos/waruiiko/RSI-inspection/releases/latest', {
+      headers: { 'User-Agent': 'RSI-inspection' },
+    })
+    if (!res.ok) throw new Error(`GitHub ${res.status}`)
+    const release = await res.json()
+    if (openRelease && release.html_url) shell.openExternal(release.html_url)
+    return { ok: true, tag: release.tag_name, url: release.html_url, name: release.name }
+  })
+
   ipcMain.handle('settings:getAutoLaunch', () =>
     app.getLoginItemSettings().openAtLogin
   )
@@ -71,44 +108,59 @@ exports.register = (ipcMain) => {
   })
 
   // Streaming: returns immediately, pushes chunks via event as each asset finishes
-  ipcMain.handle('market:fetch', async (event, { timeframes = DEFAULT_TIMEFRAMES, rsiPeriod = 14 } = {}) => {
+  ipcMain.handle('market:fetch', async (event, { timeframes = DEFAULT_TIMEFRAMES, rsiPeriod = 14, requestId = Date.now() } = {}) => {
     const assets        = getRuntimeAll()
-    const cryptoAssets  = assets.filter(a => a.source === 'binance')
-    const futuresAssets = assets.filter(a => a.source === 'binance-futures')
-    const stockAssets   = assets.filter(a => a.source === 'yahoo')
+    const normalizedAssets = assets.map(normalizeAsset)
+    const cryptoAssets  = normalizedAssets.filter(a => a.source === 'binance')
+    const futuresAssets = normalizedAssets.filter(a => a.source === 'binance-futures')
+    const stockAssets   = normalizedAssets.filter(a => a.source === 'yahoo')
 
+    const status = []
     const push = (data) => {
-      if (!event.sender.isDestroyed()) event.sender.send('market:chunk', data)
+      if (!event.sender.isDestroyed()) event.sender.send('market:chunk', { requestId, data })
+    }
+    const pushStatus = (item) => {
+      status.push({ ...item, ts: Date.now() })
+      if (!event.sender.isDestroyed()) event.sender.send('market:status', { requestId, item: status.at(-1) })
     }
 
-    // Fetch spot + futures tickers in parallel (single request each)
+    // Fetch spot + futures tickers independently, so one failed endpoint
+    // does not discard the other endpoint's turnover data.
     let spotTickers = {}, futuresTickers = {}
-    try {
-      [spotTickers, futuresTickers] = await Promise.all([
-        binance.fetchTickers(cryptoAssets.map(a => a.apiSymbol)),
-        binance.fetchFuturesTickers(futuresAssets.map(a => a.apiSymbol)),
-      ])
-    } catch (err) {
-      console.warn('[ipc] ticker fetch failed:', err.message)
+    const [spotTickerResult, futuresTickerResult] = await Promise.allSettled([
+      binance.fetchTickers(cryptoAssets.map(a => a.apiSymbol)),
+      binance.fetchFuturesTickers(futuresAssets.map(a => a.apiSymbol)),
+    ])
+    if (spotTickerResult.status === 'fulfilled') spotTickers = spotTickerResult.value
+    else {
+      const message = spotTickerResult.reason?.message ?? String(spotTickerResult.reason)
+      console.warn('[ipc] spot ticker fetch failed:', message)
+      pushStatus({ level: 'warn', scope: 'Binance spot ticker', message })
+    }
+    if (futuresTickerResult.status === 'fulfilled') futuresTickers = futuresTickerResult.value
+    else {
+      const message = futuresTickerResult.reason?.message ?? String(futuresTickerResult.reason)
+      console.warn('[ipc] futures ticker fetch failed:', message)
+      pushStatus({ level: 'warn', scope: 'Binance futures ticker', message })
     }
 
-    // Spot crypto: fully parallel
-    const cryptoJobs = cryptoAssets.map(async asset => {
+    const cryptoJob = runWithConcurrency(cryptoAssets, 4, async asset => {
       try {
         const result = await buildResult(asset, timeframes, spotTickers, rsiPeriod)
         if (result) push(result)
       } catch (err) {
         console.warn(`[ipc] ${asset.symbol}: ${err.message}`)
+        pushStatus({ level: 'warn', scope: asset.symbol, message: err.message })
       }
     })
 
-    // Futures: fully parallel
-    const futuresJobs = futuresAssets.map(async asset => {
+    const futuresJob = runWithConcurrency(futuresAssets, 4, async asset => {
       try {
         const result = await buildResult(asset, timeframes, futuresTickers, rsiPeriod)
         if (result) push(result)
       } catch (err) {
         console.warn(`[ipc] ${asset.symbol}: ${err.message}`)
+        pushStatus({ level: 'warn', scope: asset.symbol, message: err.message })
       }
     })
 
@@ -121,18 +173,20 @@ exports.register = (ipcMain) => {
               if (result) push(result)
             } catch (err) {
               console.warn(`[ipc] ${asset.symbol}: ${err.message}`)
+              pushStatus({ level: 'warn', scope: asset.symbol, message: err.message })
             }
           }
         })()
       : Promise.resolve()
 
-    await Promise.all([...cryptoJobs, ...futuresJobs, stockJob])
+    await Promise.all([cryptoJob, futuresJob, stockJob])
 
+    const updatedAt = Date.now()
     if (!event.sender.isDestroyed()) {
-      event.sender.send('market:done', { updatedAt: Date.now() })
+      event.sender.send('market:done', { requestId, updatedAt, status })
     }
 
-    return { ok: true }
+    return { ok: true, requestId, updatedAt }
   })
 
   // Raw OHLCV for future use (candlestick charts, custom indicators, etc.)
@@ -147,41 +201,58 @@ exports.register = (ipcMain) => {
   })
 }
 
+async function runWithConcurrency(items, concurrency, worker) {
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++]
+      await worker(item)
+    }
+  })
+  await Promise.all(workers)
+}
+
 async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
   const candlesByTf = {}
+  const closedCandlesByTf = {}
   for (const tf of timeframes) {
     try {
-      candlesByTf[tf] = await fetchOHLCV(asset, tf)
+      candlesByTf[tf] = await fetchOHLCVWithRetry(asset, tf)
+      closedCandlesByTf[tf] = onlyClosedCandles(candlesByTf[tf])
     } catch (err) {
       console.warn(`[ipc] ${asset.symbol} ${tf}: ${err.message}`)
       candlesByTf[tf] = []
+      closedCandlesByTf[tf] = []
     }
   }
 
   const rsi = {}
   for (const tf of timeframes) {
-    if (candlesByTf[tf]?.length > rsiPeriod + 1) {
-      rsi[tf] = computeAll(candlesByTf[tf], ['rsi'], { rsi: { period: rsiPeriod } }).rsi
+    if (closedCandlesByTf[tf]?.length > rsiPeriod + 1) {
+      rsi[tf] = computeAll(closedCandlesByTf[tf], ['rsi'], { rsi: { period: rsiPeriod } }).rsi
     }
   }
   if (Object.keys(rsi).length === 0) return null
 
   // Price from ticker (crypto) or last candle (stocks)
-  let price = null, change24h = null
-  const ticker = tickers[asset.apiSymbol]
+  let price = null, change24h = null, quoteVolume24h = null
+  const ticker = resolveTicker(tickers, asset)
   if (ticker) {
     price = ticker.price
     change24h = ticker.change24h
+    quoteVolume24h = toNumber(ticker.quoteVolume24h ?? ticker.volume24h)
   } else {
     for (const tf of timeframes) {
-      if (candlesByTf[tf]?.length) { price = candlesByTf[tf].at(-1).close; break }
+      if (closedCandlesByTf[tf]?.length) { price = closedCandlesByTf[tf].at(-1).close; break }
     }
   }
+
+  if (quoteVolume24h == null) quoteVolume24h = estimateTurnover(closedCandlesByTf)
 
   // Sparkline: last 20 closes from longest available timeframe
   let sparkline = []
   for (const tf of ['1d', '4h', '1h', '15m']) {
-    const candles = candlesByTf[tf]
+    const candles = closedCandlesByTf[tf]
     if (candles?.length >= 10) {
       sparkline = candles.slice(-20).map(c => c.close)
       break
@@ -190,15 +261,334 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
 
   // RSI divergence per timeframe (last 30 bars)
   const divergence = {}
+  const volumeSignal = {}
+  const signalScore = {}
   for (const tf of timeframes) {
-    const candles = candlesByTf[tf]
+    const candles = closedCandlesByTf[tf]
     if (!candles || candles.length < rsiPeriod + 50) continue
     const rsiSeries = rsiIndicator.computeSeriesFromCandles(candles, { period: rsiPeriod })
     if (rsiSeries.length < 40) continue
     divergence[tf] = detectDivergence(candles.slice(-50).map(c => c.close), rsiSeries.slice(-50))
   }
 
-  return { ...asset, price, change24h, rsi, sparkline, divergence }
+  for (const tf of timeframes) {
+    volumeSignal[tf] = detectVolumePriceSignal(closedCandlesByTf[tf])
+    signalScore[tf] = computeSignalScore({
+      rsi: rsi[tf],
+      divergence: divergence[tf],
+      volumeSignal: volumeSignal[tf],
+      higherTfTrend: tf !== '1d' ? detectTrend(closedCandlesByTf['1d']) : null,
+    })
+  }
+
+  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore }
+}
+
+async function fetchOHLCVWithRetry(asset, timeframe, attempts = 3) {
+  const cacheKey = `${asset.source}:${asset.apiSymbol}:${timeframe}`
+  const ttlMs = cacheTtlMs(timeframe)
+  const marketCache = getMarketCache()
+  const cached = marketCache[cacheKey]
+  if (cached?.candles?.length && Date.now() - (cached.savedAt ?? 0) < ttlMs) {
+    return cached.candles
+  }
+
+  let lastError
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const candles = await fetchOHLCV(asset, timeframe)
+      marketCache[cacheKey] = { savedAt: Date.now(), candles }
+      saveMarketCacheSoon()
+      return candles
+    } catch (err) {
+      lastError = err
+      const message = String(err?.message ?? '')
+      const retryable = /429|418|5\d\d|fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND/i.test(message)
+      if (!retryable || i === attempts - 1) break
+      await sleep(350 * (i + 1) + Math.floor(Math.random() * 250))
+    }
+  }
+  if (cached?.candles?.length) return cached.candles
+  throw lastError
+}
+
+function getMarketCache() {
+  if (!_marketCache) _marketCache = config.loadMarketCache()
+  return _marketCache
+}
+
+function saveMarketCacheSoon() {
+  if (_marketCacheDirty) return
+  _marketCacheDirty = true
+  setTimeout(() => {
+    _marketCacheDirty = false
+    config.saveMarketCache(_marketCache)
+  }, 500)
+}
+
+function cacheTtlMs(timeframe) {
+  if (timeframe === '15m') return 2 * 60 * 1000
+  if (timeframe === '1h') return 5 * 60 * 1000
+  if (timeframe === '4h') return 10 * 60 * 1000
+  return 30 * 60 * 1000
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function normalizeAsset(asset) {
+  const source = asset.source || (asset.type === 'stock' ? 'yahoo' : 'binance')
+  let apiSymbol = asset.apiSymbol || asset.symbol
+  if ((source === 'binance' || source === 'binance-futures') && apiSymbol && !apiSymbol.endsWith('USDT')) {
+    apiSymbol = `${apiSymbol}USDT`
+  }
+  return {
+    ...asset,
+    source,
+    apiSymbol,
+    type: asset.type || (source === 'yahoo' ? 'stock' : 'crypto'),
+  }
+}
+
+function resolveTicker(tickers, asset) {
+  return tickers[asset.apiSymbol]
+    || tickers[asset.symbol]
+    || tickers[`${asset.symbol}USDT`]
+    || null
+}
+
+function onlyClosedCandles(candles) {
+  const now = Date.now()
+  return (candles ?? []).filter(c => !c.closeTime || c.closeTime <= now)
+}
+
+function toNumber(value) {
+  const n = typeof value === 'string' ? parseFloat(value) : value
+  return Number.isFinite(n) ? n : null
+}
+
+function estimateTurnover(candlesByTf) {
+  const dayCandle = candlesByTf['1d']?.at(-1)
+  const dayTurnover = candleTurnover(dayCandle)
+  if (dayTurnover != null) return dayTurnover
+
+  const hourly = candlesByTf['1h']?.slice(-24).map(candleTurnover).filter(v => v != null)
+  if (hourly?.length) return hourly.reduce((sum, v) => sum + v, 0)
+
+  const fourHour = candlesByTf['4h']?.slice(-6).map(candleTurnover).filter(v => v != null)
+  if (fourHour?.length) return fourHour.reduce((sum, v) => sum + v, 0)
+
+  const fifteen = candlesByTf['15m']?.slice(-96).map(candleTurnover).filter(v => v != null)
+  if (fifteen?.length) return fifteen.reduce((sum, v) => sum + v, 0)
+
+  return null
+}
+
+function candleTurnover(candle) {
+  if (!candle) return null
+  const quoteVolume = toNumber(candle.quoteVolume)
+  if (quoteVolume != null) return quoteVolume
+  const volume = toNumber(candle.volume)
+  const close = toNumber(candle.close)
+  return volume != null && close != null ? volume * close : null
+}
+
+function avg(nums) {
+  const vals = nums.filter(v => Number.isFinite(v))
+  return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null
+}
+
+function pctChange(from, to) {
+  if (!from) return 0
+  return ((to - from) / from) * 100
+}
+
+function candleVolume(candle) {
+  return candle?.quoteVolume || candle?.volume || 0
+}
+
+function closePosition(candle) {
+  const range = candle.high - candle.low
+  if (!Number.isFinite(range) || range <= 0) return 0.5
+  return (candle.close - candle.low) / range
+}
+
+function consecutiveHigherCloses(candles, count = 3) {
+  if (!candles || candles.length < count) return false
+  const recent = candles.slice(-count)
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i].close <= recent[i - 1].close) return false
+  }
+  return true
+}
+
+function consecutiveLowerCloses(candles, count = 3) {
+  if (!candles || candles.length < count) return false
+  const recent = candles.slice(-count)
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i].close >= recent[i - 1].close) return false
+  }
+  return true
+}
+
+function detectTrend(candles) {
+  if (!candles || candles.length < 30) return null
+  const last = candles.at(-1)
+  const ma20 = avg(candles.slice(-20).map(c => c.close))
+  const ma50 = candles.length >= 50 ? avg(candles.slice(-50).map(c => c.close)) : avg(candles.slice(-30).map(c => c.close))
+  if (!last || ma20 == null || ma50 == null) return null
+  if (last.close > ma20 && ma20 > ma50) return 'up'
+  if (last.close < ma20 && ma20 < ma50) return 'down'
+  return 'range'
+}
+
+function detectVolumePriceSignal(candles) {
+  if (!candles || candles.length < 35) return null
+
+  const cur = candles.at(-1)
+  const prev = candles.at(-2)
+  const lookback = candles.slice(-31, -1)
+  const longer = candles.slice(-51, -1)
+  const vol = candleVolume(cur)
+  const avgVol = avg(lookback.slice(-20).map(candleVolume))
+  if (!cur || !prev || !avgVol) return null
+
+  const volumeRatio = parseFloat((vol / avgVol).toFixed(2))
+  const priceMovePct = parseFloat(pctChange(prev.close, cur.close).toFixed(2))
+  const closePos = parseFloat(closePosition(cur).toFixed(2))
+  const prevHigh = Math.max(...lookback.map(c => c.high))
+  const prevLow = Math.min(...lookback.map(c => c.low))
+  const breaksUp = cur.close > prevHigh * 1.002
+  const breaksDown = cur.close < prevLow * 0.998
+  const volExpansion = volumeRatio >= 1.5
+  const strongVolExpansion = volumeRatio >= 1.8
+  const volDry = volumeRatio <= 0.7
+  const risingCloses = consecutiveHigherCloses(candles.slice(-4), 3)
+  const fallingCloses = consecutiveLowerCloses(candles.slice(-4), 3)
+
+  const highCloseCandle = longer.reduce((best, c) => c.close > best.close ? c : best, longer[0])
+  const lowCloseCandle = longer.reduce((best, c) => c.close < best.close ? c : best, longer[0])
+  const highVol = candleVolume(highCloseCandle)
+  const lowVol = candleVolume(lowCloseCandle)
+
+  if (cur.close > highCloseCandle.close * 1.003 && highVol && vol < highVol * 0.75 && volumeRatio < 1.2) {
+    return {
+      type: 'bearish_volume_divergence',
+      label: '新高量能背离',
+      direction: 'caution',
+      score: -2,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+      level: highCloseCandle.close,
+    }
+  }
+
+  if (cur.close < lowCloseCandle.close * 0.997 && lowVol && vol < lowVol * 0.75 && volumeRatio < 1.2) {
+    return {
+      type: 'bullish_seller_exhaustion',
+      label: '新低抛压减弱',
+      direction: 'caution',
+      score: 2,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+      level: lowCloseCandle.close,
+    }
+  }
+
+  if (breaksUp) {
+    const confirmed = volExpansion && priceMovePct > 0 && closePos >= 0.65
+    return {
+      type: confirmed ? 'breakout_confirmed' : 'breakout_attempt',
+      label: confirmed ? '放量突破' : '突破尝试',
+      direction: confirmed ? 'bullish' : 'caution',
+      score: confirmed ? 4 : 1,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+      level: prevHigh,
+    }
+  }
+
+  if (breaksDown) {
+    const confirmed = volExpansion && priceMovePct < 0 && closePos <= 0.35
+    return {
+      type: confirmed ? 'breakdown_confirmed' : 'breakdown_attempt',
+      label: confirmed ? '放量破位' : '破位尝试',
+      direction: confirmed ? 'bearish' : 'caution',
+      score: confirmed ? -4 : -1,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+      level: prevLow,
+    }
+  }
+
+  const recentVol = avg(lookback.slice(-5).map(candleVolume))
+  const rangePct = pctChange(prev.close, Math.max(...lookback.slice(-8).map(c => c.high)))
+    - pctChange(prev.close, Math.min(...lookback.slice(-8).map(c => c.low)))
+  if (recentVol && recentVol < avgVol * 0.72 && Math.abs(rangePct) < 4) {
+    return {
+      type: 'range_compression',
+      label: '缩量压缩',
+      direction: 'neutral',
+      score: 0,
+      volumeRatio: parseFloat((recentVol / avgVol).toFixed(2)),
+      priceMovePct,
+      closePos,
+    }
+  }
+
+  if (strongVolExpansion && priceMovePct >= 2 && closePos >= 0.65 && risingCloses) {
+    return {
+      type: 'volume_rebound_up',
+      label: '放量反弹',
+      direction: 'caution',
+      score: 1,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+    }
+  }
+
+  if (strongVolExpansion && priceMovePct <= -2 && closePos <= 0.35 && fallingCloses) {
+    return {
+      type: 'volume_selloff',
+      label: '放量回落',
+      direction: 'caution',
+      score: -1,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+    }
+  }
+
+  if (volDry) {
+    return {
+      type: 'quiet_volume',
+      label: '量能偏低',
+      direction: 'neutral',
+      score: 0,
+      volumeRatio,
+      priceMovePct,
+      closePos,
+    }
+  }
+
+  return null
+}
+
+function computeSignalScore({ rsi, divergence, volumeSignal, higherTfTrend }) {
+  let score = volumeSignal?.score ?? 0
+  if (higherTfTrend === 'up') score += 1
+  if (higherTfTrend === 'down') score -= 1
+  if (rsi >= 70) score -= 1
+  if (rsi <= 30) score += 1
+  if (divergence === 'bullish') score += 1
+  if (divergence === 'bearish') score -= 1
+  return Math.max(-6, Math.min(6, score))
 }
 
 function findLocalPivots(arr, lob = 3) {

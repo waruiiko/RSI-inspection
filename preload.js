@@ -12,8 +12,14 @@ contextBridge.exposeInMainWorld('api', {
 
   onMarketDone: (cb) => {
     const handler = (_, data) => cb(data)
-    ipcRenderer.once('market:done', handler)
+    ipcRenderer.on('market:done', handler)
     return () => ipcRenderer.off('market:done', handler)
+  },
+
+  onMarketStatus: (cb) => {
+    const handler = (_, data) => cb(data)
+    ipcRenderer.on('market:status', handler)
+    return () => ipcRenderer.off('market:status', handler)
   },
 
   fetchRawOHLCV: (symbol, source, timeframes) =>
@@ -44,6 +50,9 @@ contextBridge.exposeInMainWorld('api', {
   // Settings
   getSettings:     ()        => ipcRenderer.invoke('settings:get'),
   saveSettings:    (s)       => ipcRenderer.invoke('settings:save', s),
+  exportConfig:    ()        => ipcRenderer.invoke('settings:exportConfig'),
+  importConfig:    ()        => ipcRenderer.invoke('settings:importConfig'),
+  checkForUpdates: (openRelease = true) => ipcRenderer.invoke('settings:checkUpdates', openRelease),
   getAutoLaunch:   ()        => ipcRenderer.invoke('settings:getAutoLaunch'),
   setAutoLaunch:   (enabled) => ipcRenderer.invoke('settings:setAutoLaunch', enabled),
 })

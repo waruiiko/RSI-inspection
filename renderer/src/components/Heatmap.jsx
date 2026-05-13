@@ -1,9 +1,11 @@
-import { useRef, useEffect, useMemo } from 'react'
+import { useRef, useEffect, useMemo, useState } from 'react'
 import * as echarts from 'echarts'
 import useMarketStore   from '../store/marketStore'
 import useSettingsStore from '../store/settingsStore'
 import useGroupsStore   from '../store/groupsStore'
 import { getRsiColor, getRsiZone } from '../utils/rsi'
+import { applyLiquidityLimit, formatTurnover, getQuoteVolume } from '../utils/liquidity'
+import { assetKey, matchesAssetRef } from '../utils/assetKey'
 
 const TIMEFRAMES = ['15m', '1h', '4h', '1d']
 
@@ -33,10 +35,12 @@ export default function Heatmap() {
   const flashTimer        = useRef(null)
   const downplayTimer     = useRef(null)
   const currentHoveredRef = useRef(null)
+  const renderTimer       = useRef(null)
 
   const assets        = useMarketStore(s => s.assets)
   const filter        = useMarketStore(s => s.filter)
   const timeframe     = useMarketStore(s => s.timeframe)
+  const liquidityLimit = useMarketStore(s => s.liquidityLimit)
   const layout        = useMarketStore(s => s.layout)
   const rsiZones      = useMarketStore(s => s.rsiZones)
   const hoveredSymbol = useMarketStore(s => s.hoveredSymbol)
@@ -52,24 +56,39 @@ export default function Heatmap() {
     const base = filter === 'all'    ? assets
       : filter === 'crypto'          ? assets.filter(a => a.type === 'crypto')
       : assets.filter(a => a.type !== 'crypto')
-    return base
+    return applyLiquidityLimit(base
       .filter(a => a.rsi[timeframe] != null)
       .filter(a => !groupSet || groupSet.has(a.apiSymbol))
-      .filter(a => rsiZones.length === 5 || rsiZones.includes(getRsiZone(a.rsi[timeframe])))
+      .filter(a => rsiZones.length === 5 || rsiZones.includes(getRsiZone(a.rsi[timeframe]))), liquidityLimit)
       .sort((a, b) => b.rsi[timeframe] - a.rsi[timeframe])
-  }, [assets, filter, timeframe, rsiZones, groupFilter, groups])
+  }, [assets, filter, timeframe, rsiZones, groupFilter, groups, liquidityLimit])
 
-  visibleRef.current = visible
+  const [renderVisible, setRenderVisible] = useState([])
+
+  useEffect(() => {
+    if (renderTimer.current) clearTimeout(renderTimer.current)
+    renderTimer.current = setTimeout(() => {
+      setRenderVisible(visible)
+      renderTimer.current = null
+    }, 900)
+    return () => {
+      if (renderTimer.current) clearTimeout(renderTimer.current)
+    }
+  }, [visible])
+
+  const chartVisible = renderVisible.length ? renderVisible : visible
+
+  visibleRef.current = chartVisible
   currentHoveredRef.current = hoveredSymbol
 
   const avgRsi = useMemo(() => {
-    if (!visible.length) return 50
-    return visible.reduce((s, a) => s + a.rsi[timeframe], 0) / visible.length
-  }, [visible, timeframe])
+    if (!chartVisible.length) return 50
+    return chartVisible.reduce((s, a) => s + a.rsi[timeframe], 0) / chartVisible.length
+  }, [chartVisible, timeframe])
 
   const randomPos = useMemo(
-    () => buildRandomPositions(visible.map(a => a.symbol)),
-    [visible.map(a => a.symbol).join(',')]
+    () => buildRandomPositions(chartVisible.map(assetKey)),
+    [chartVisible.map(assetKey).join(',')]
   )
 
   const setFlashRef = useRef(setFlash)
@@ -103,15 +122,16 @@ export default function Heatmap() {
   // Update chart data
   useEffect(() => {
     const chart = chartRef.current
-    if (!chart || !visible.length) return
+    if (!chart || !chartVisible.length) return
 
     const isRandom = layout === 'random'
 
-    const scatterData = visible.map((a, i) => {
-      const xVal = isRandom ? randomPos[a.symbol] : i
+    const scatterData = chartVisible.map((a, i) => {
+      const key = assetKey(a)
+      const xVal = isRandom ? randomPos[key] : i
       return {
         value: [xVal, a.rsi[timeframe]],
-        name:  a.symbol,
+        name:  key,
         asset: a,
         itemStyle: { color: getRsiColor(a.rsi[timeframe]), borderColor: 'rgba(255,255,255,0.18)', borderWidth: 1 },
         label: {
@@ -126,7 +146,7 @@ export default function Heatmap() {
       }
     })
 
-    const xAxisMax = isRandom ? 100 : visible.length - 1
+    const xAxisMax = isRandom ? 100 : chartVisible.length - 1
 
     chart.setOption({
       backgroundColor: 'transparent',
@@ -162,6 +182,7 @@ export default function Heatmap() {
             ? `<span style="color:${a.change24h > 0 ? '#3fb950' : '#f85149'}">${a.change24h > 0 ? '+' : ''}${a.change24h.toFixed(2)}%</span>`
             : '—'
 
+          const turnover = formatTurnover(getQuoteVolume(a))
           const rsiRows = TIMEFRAMES.map(tf => {
             const val = a.rsi[tf]
             const color = getRsiColor(val)
@@ -177,6 +198,7 @@ export default function Heatmap() {
                 ${a.symbol}&nbsp;&nbsp;${chg}
               </div>
               <div style="color:#8b949e;margin-bottom:6px">${price}</div>
+              <div style="color:#8b949e;margin-bottom:6px">成交额 ${turnover}</div>
               <table style="border-collapse:collapse;width:100%">${rsiRows}</table>
             </div>`
         },
@@ -229,12 +251,13 @@ export default function Heatmap() {
       },
       {
         type: 'scatter',
-        data: visible.map((a, i) => {
-          const xVal = isRandom ? randomPos[a.symbol] : i
-          const chg  = a.change24h
-          return {
-            value: [xVal, a.rsi[timeframe]],
-            name:  a.symbol,
+        data: chartVisible.map((a, i) => {
+      const key = assetKey(a)
+      const xVal = isRandom ? randomPos[key] : i
+      const chg  = a.change24h
+      return {
+        value: [xVal, a.rsi[timeframe]],
+        name:  key,
             label: {
               show:      chg != null,
               position:  'top',
@@ -251,7 +274,7 @@ export default function Heatmap() {
         z: 9,
       }],
     }, true)
-  }, [visible, timeframe, layout, avgRsi, randomPos, rsiOverbought, rsiOversold])
+  }, [chartVisible, timeframe, layout, avgRsi, randomPos, rsiOverbought, rsiOversold])
 
   // Hover highlight with 1s delayed downplay of previous
   useEffect(() => {
@@ -262,7 +285,7 @@ export default function Heatmap() {
       chart.dispatchAction({ type: 'downplay', seriesIndex: 0 })
       return
     }
-    const idx = visibleRef.current.findIndex(a => a.symbol === hoveredSymbol)
+    const idx = visibleRef.current.findIndex(a => matchesAssetRef(a, hoveredSymbol))
     if (idx >= 0) chart.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: idx })
     downplayTimer.current = setTimeout(() => {
       downplayTimer.current = null
@@ -271,7 +294,7 @@ export default function Heatmap() {
       c.dispatchAction({ type: 'downplay', seriesIndex: 0 })
       const cur = currentHoveredRef.current
       if (cur) {
-        const curIdx = visibleRef.current.findIndex(a => a.symbol === cur)
+        const curIdx = visibleRef.current.findIndex(a => matchesAssetRef(a, cur))
         if (curIdx >= 0) c.dispatchAction({ type: 'highlight', seriesIndex: 0, dataIndex: curIdx })
       }
     }, 1000)
@@ -282,7 +305,7 @@ export default function Heatmap() {
     if (!flashSymbol) return
     const chart = chartRef.current
     if (!chart || chart.isDisposed()) return
-    const idx = visibleRef.current.findIndex(a => a.symbol === flashSymbol.symbol)
+    const idx = visibleRef.current.findIndex(a => matchesAssetRef(a, flashSymbol.symbol))
     if (idx < 0) return
 
     if (flashTimer.current) clearInterval(flashTimer.current)

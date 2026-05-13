@@ -17,6 +17,10 @@ const useSettingsStore = create((set, get) => ({
   rsiMaType:       'SMA',
   rsiMaLength:     14,
   rsiBbMult:       2.0,
+  popupMinLevel:   1,
+  soundMinLevel:   1,
+  webhookMinLevel: 1,
+  autoCheckUpdates:false,
   loaded:          false,
 
   load: async () => {

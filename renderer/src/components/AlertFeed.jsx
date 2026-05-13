@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import useAlertStore  from '../store/alertStore'
 import useMarketStore from '../store/marketStore'
+import ChartModal from './ChartModal'
 
 const TYPE_FILTERS = [
   { key: 'all',        label: '全部' },
@@ -8,6 +9,7 @@ const TYPE_FILTERS = [
   { key: 'price',      label: '价格' },
   { key: 'change',     label: '涨跌' },
   { key: 'divergence', label: '背离' },
+  { key: 'structure',  label: '量价' },
 ]
 
 function fmtTime(ts) {
@@ -37,9 +39,19 @@ function fmtDetail(item) {
     const dir = item.condition === 'bull' ? '牛市背离' : '熊市背离'
     return ` (${item.timeframe}) 检测到 ${dir}`
   }
+  if (item.type === 'structure') {
+    const ratio = item.volumeRatio != null ? `，量能 ${item.volumeRatio}x` : ''
+    const move = item.priceMovePct != null ? `，K线 ${item.priceMovePct > 0 ? '+' : ''}${item.priceMovePct}%` : ''
+    return ` (${item.timeframe}) ${item.signal ?? '量价结构'}，评分 ${item.value}${ratio}${move}`
+  }
   const dir = item.condition === 'above' ? '涨超' : '跌超'
   const mag = Math.abs(item.threshold)
   return ` 24h${dir} ${mag}%，当前 ${(item.value > 0 ? '+' : '') + item.value.toFixed(2)}%`
+}
+
+function levelLabel(item) {
+  const level = item.level ?? (item.special ? 3 : 1)
+  return `${level}级`
 }
 
 function itemColor(item) {
@@ -52,6 +64,11 @@ function itemColor(item) {
   if (item.type === 'divergence') {
     return item.condition === 'bull' ? 'feed-green' : 'feed-orange'
   }
+  if (item.type === 'structure') {
+    return item.condition === 'bullish' ? 'feed-green'
+      : item.condition === 'bearish' ? 'feed-red'
+      : 'feed-orange'
+  }
   return item.value > 0 ? 'feed-green' : 'feed-red'
 }
 
@@ -59,9 +76,12 @@ export default function AlertFeed() {
   const feed      = useAlertStore(s => s.feed)
   const clearFeed = useAlertStore(s => s.clearFeed)
   const setFlash  = useMarketStore(s => s.setFlash)
+  const assets    = useMarketStore(s => s.assets)
 
   const [typeFilter,   setTypeFilter]   = useState('all')
   const [symbolFilter, setSymbolFilter] = useState('')
+  const [selectedItem, setSelectedItem] = useState(null)
+  const [chartAsset, setChartAsset] = useState(null)
 
   const visible = useMemo(() => {
     const q = symbolFilter.trim().toUpperCase()
@@ -72,6 +92,32 @@ export default function AlertFeed() {
     })
   }, [feed, typeFilter, symbolFilter])
 
+  const reviewAsset = selectedItem
+    ? assets.find(a => a.symbol === selectedItem.symbol || a.apiSymbol === selectedItem.symbol)
+    : null
+  const currentMove = selectedItem?.price && reviewAsset?.price
+    ? ((reviewAsset.price - selectedItem.price) / selectedItem.price) * 100
+    : null
+
+  const perf = useMemo(() => {
+    const rows = []
+    for (const item of feed) {
+      const a = assets.find(x => x.symbol === item.symbol || x.apiSymbol === item.symbol)
+      if (!a?.price || !item.price) continue
+      const move = ((a.price - item.price) / item.price) * 100
+      const expectedUp = item.type === 'rsi'
+        ? item.condition === 'below'
+        : item.type === 'price'
+          ? item.condition === 'above'
+          : item.type === 'divergence'
+            ? item.condition === 'bull'
+            : (item.value ?? 0) > 0
+      rows.push({ move, hit: expectedUp ? move > 0 : move < 0 })
+    }
+    const hit = rows.filter(r => r.hit).length
+    return { total: rows.length, hit, rate: rows.length ? Math.round(hit / rows.length * 100) : null }
+  }, [feed, assets])
+
   return (
     <div className="alert-feed">
       {/* Head */}
@@ -80,7 +126,7 @@ export default function AlertFeed() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           {feed.length > 0 && (
             <span style={{ fontSize: 10, color: 'var(--dim)', fontVariantNumeric: 'tabular-nums' }}>
-              {feed.length} 条
+              {feed.length} 条{perf.total ? ` · 命中 ${perf.rate}%` : ''}
             </span>
           )}
           {feed.length > 0 && (
@@ -122,14 +168,15 @@ export default function AlertFeed() {
             : visible.map(item => (
               <div
                 key={item.id}
-                className={`feed-item ${itemColor(item)} ${item.special ? 'feed-special' : ''}`}
+                className={`feed-item ${itemColor(item)} ${item.level >= 2 || item.special ? 'feed-special' : ''}`}
+                onClick={() => setSelectedItem(item)}
               >
                 <span className="feed-time">{fmtTime(item.ts)}</span>
                 <span className="feed-msg">
-                  {item.special && <span className="feed-star">★</span>}
+                  <span className="feed-star">{levelLabel(item)}</span>
                   <span
                     className="feed-symbol"
-                    onClick={() => setFlash(item.symbol)}
+                    onClick={e => { e.stopPropagation(); setFlash(item.symbol) }}
                   >
                     {item.symbol}
                   </span>
@@ -139,6 +186,35 @@ export default function AlertFeed() {
             ))
         }
       </div>
+
+      {selectedItem && (
+        <div className="review-overlay" onClick={() => setSelectedItem(null)}>
+          <div className="review-panel" onClick={e => e.stopPropagation()}>
+            <div className="review-head">
+              <strong>{selectedItem.symbol} 提醒复盘</strong>
+              <button className="chart-modal-close" onClick={() => setSelectedItem(null)}>×</button>
+            </div>
+            <div className="review-grid">
+              <span>触发时间</span><b>{new Date(selectedItem.ts).toLocaleString('zh-CN')}</b>
+              <span>提醒内容</span><b>{fmtDetail(selectedItem)}</b>
+              <span>触发价格</span><b>{selectedItem.price ? fmtPrice(selectedItem.price) : '-'}</b>
+              <span>当前价格</span><b>{reviewAsset?.price ? fmtPrice(reviewAsset.price) : '-'}</b>
+              <span>触发后变化</span>
+              <b style={{ color: currentMove == null ? 'var(--muted)' : currentMove >= 0 ? '#22c55e' : '#ef4444' }}>
+                {currentMove == null ? '-' : `${currentMove >= 0 ? '+' : ''}${currentMove.toFixed(2)}%`}
+              </b>
+            </div>
+            <div className="review-actions">
+              <button className="zone-btn" onClick={() => setFlash(selectedItem.symbol)}>在首页定位</button>
+              <button className="zone-btn" disabled={!reviewAsset} onClick={() => reviewAsset && setChartAsset(reviewAsset)}>
+                打开K线并查看标记
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {chartAsset && <ChartModal asset={chartAsset} alertItem={selectedItem} onClose={() => setChartAsset(null)} />}
     </div>
   )
 }

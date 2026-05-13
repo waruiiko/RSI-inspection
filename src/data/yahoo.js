@@ -76,6 +76,7 @@ async function fetchOHLCV(symbol, interval, limit = 100, retries = 2) {
       low:    ohlcv.low?.[i],
       close:  ohlcv.close?.[i],
       volume: ohlcv.volume?.[i] ?? 0,
+      closeTime: t * 1000 + intervalMs(interval) - 1,
     }))
     .filter(c => c.close != null)
 
@@ -88,7 +89,7 @@ function aggregateTo4h(candles) {
   for (const c of candles) {
     const key = Math.floor(c.time / 14_400_000) * 14_400_000
     if (!groups.has(key)) {
-      groups.set(key, { ...c, time: key })
+      groups.set(key, { ...c, time: key, closeTime: key + 14_400_000 - 1 })
     } else {
       const g = groups.get(key)
       g.high   = Math.max(g.high, c.high)
@@ -98,6 +99,13 @@ function aggregateTo4h(candles) {
     }
   }
   return Array.from(groups.values()).sort((a, b) => a.time - b.time)
+}
+
+function intervalMs(interval) {
+  if (interval === '15m') return 900_000
+  if (interval === '1h') return 3_600_000
+  if (interval === '4h') return 14_400_000
+  return 86_400_000
 }
 
 async function fetchQuote(symbol) {

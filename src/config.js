@@ -9,6 +9,7 @@ function filePath()        { return path.join(_dir, 'assets.json')   }
 function alertFilePath()   { return path.join(_dir, 'alerts.json')   }
 function settingsFilePath(){ return path.join(_dir, 'settings.json') }
 function feedFilePath()    { return path.join(_dir, 'feed.json')     }
+function marketCachePath() { return path.join(_dir, 'market-cache.json') }
 
 const SETTINGS_DEFAULTS = {
   refreshInterval: 5,    // minutes
@@ -27,6 +28,10 @@ const SETTINGS_DEFAULTS = {
   rsiMaType:       'SMA',
   rsiMaLength:     14,
   rsiBbMult:       2.0,
+  popupMinLevel:   1,
+  soundMinLevel:   1,
+  webhookMinLevel: 1,
+  autoCheckUpdates:false,
 }
 
 exports.load = () => {
@@ -84,4 +89,50 @@ exports.loadFeed = () => {
 exports.saveFeed = (feed) => {
   if (!_dir) return
   fs.writeFileSync(feedFilePath(), JSON.stringify(feed), 'utf8')
+}
+
+exports.loadMarketCache = () => {
+  if (!_dir) return {}
+  try { return JSON.parse(fs.readFileSync(marketCachePath(), 'utf8')) }
+  catch { return {} }
+}
+
+exports.saveMarketCache = (cache) => {
+  if (!_dir) return
+  const entries = Object.entries(cache ?? {})
+    .sort((a, b) => (b[1]?.savedAt ?? 0) - (a[1]?.savedAt ?? 0))
+    .slice(0, 1200)
+  try { fs.writeFileSync(marketCachePath(), JSON.stringify(Object.fromEntries(entries)), 'utf8') } catch {}
+}
+
+exports.exportUserConfig = () => {
+  const safeSettings = exports.loadSettings()
+  delete safeSettings.telegramToken
+  delete safeSettings.telegramChatId
+  delete safeSettings.discordWebhook
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    assets: exports.load(),
+    alerts: exports.loadAlerts() ?? [],
+    settings: safeSettings,
+  }
+}
+
+exports.importUserConfig = (payload) => {
+  if (!payload || typeof payload !== 'object') throw new Error('Invalid config file')
+  if (payload.assets) exports.save(payload.assets)
+  if (Array.isArray(payload.alerts)) exports.saveAlerts(payload.alerts)
+  if (payload.settings) {
+    const current = exports.loadSettings()
+    const next = {
+      ...current,
+      ...payload.settings,
+      telegramToken: current.telegramToken,
+      telegramChatId: current.telegramChatId,
+      discordWebhook: current.discordWebhook,
+    }
+    exports.saveSettings(next)
+  }
+  return { ok: true }
 }

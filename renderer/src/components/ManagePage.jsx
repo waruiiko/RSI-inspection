@@ -146,6 +146,7 @@ export default function ManagePage({ onSaved }) {
   const loadGroups  = useGroupsStore(s => s.load)
   const [activeGroup,  setActiveGroup]  = useState(null)
   const [newGroupName, setNewGroupName] = useState('')
+  const [groupSearch,  setGroupSearch]  = useState('')
 
   useEffect(() => { loadGroups() }, [])
 
@@ -161,6 +162,10 @@ export default function ManagePage({ onSaved }) {
   }, [spotPairs, futuresPairs, trackedCrypto, knownStocks, trackedStocks])
 
   const groupMembers = activeGroup ? new Set(groups[activeGroup] ?? []) : new Set()
+  const filteredTracked = useMemo(() => {
+    const q = groupSearch.trim().toUpperCase()
+    return q ? allTracked.filter(a => a.symbol.toUpperCase().includes(q) || a.apiSymbol.toUpperCase().includes(q)) : allTracked
+  }, [allTracked, groupSearch])
 
   const toggleMember = (apiSymbol) => {
     if (!activeGroup) return
@@ -175,6 +180,13 @@ export default function ManagePage({ onSaved }) {
     createGroup(name)
     setActiveGroup(name)
     setNewGroupName('')
+  }
+
+  const createPresetGroup = (name, members) => {
+    if (!members.length) return
+    createGroup(name)
+    setMembers(name, members)
+    setActiveGroup(name)
   }
 
   const totalSelected = trackedCrypto.size + trackedStocks.size
@@ -363,6 +375,17 @@ export default function ManagePage({ onSaved }) {
             </div>
           )}
 
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+            <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
+              onClick={() => createPresetGroup('加密货币', allTracked.filter(a => !knownStocks.some(s => s.apiSymbol === a.apiSymbol)).map(a => a.apiSymbol))}>
+              生成加密货币组
+            </button>
+            <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
+              onClick={() => createPresetGroup('美股', allTracked.filter(a => knownStocks.some(s => s.apiSymbol === a.apiSymbol)).map(a => a.apiSymbol))}>
+              生成美股组
+            </button>
+          </div>
+
           {/* Member picker */}
           {activeGroup && (
             <>
@@ -373,10 +396,18 @@ export default function ManagePage({ onSaved }) {
                   删除分组
                 </button>
               </div>
+              <input
+                type="search"
+                className="search-input"
+                style={{ marginBottom: 6 }}
+                placeholder="搜索分组成员..."
+                value={groupSearch}
+                onChange={e => setGroupSearch(e.target.value)}
+              />
               <div className="pair-list">
                 {allTracked.length === 0
                   ? <div className="pair-empty">请先在左侧两个面板勾选品种并保存</div>
-                  : allTracked.map(({ symbol, apiSymbol }) => (
+                  : filteredTracked.map(({ symbol, apiSymbol }) => (
                     <label key={apiSymbol} className={`pair-item ${groupMembers.has(apiSymbol) ? 'on' : ''}`}>
                       <input type="checkbox"
                         checked={groupMembers.has(apiSymbol)}

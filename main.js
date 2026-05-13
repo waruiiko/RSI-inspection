@@ -6,6 +6,28 @@ const zlib = require('zlib')
 
 const isDev = process.env.NODE_ENV === 'development'
 
+// In dev mode the parent terminal can disappear while Electron keeps running.
+// Writing console output to a closed pipe throws EPIPE on Windows, so make logs
+// best-effort instead of letting a warning crash the main process.
+function installSafeConsole() {
+  const ignoreBrokenPipe = err => {
+    if (err?.code !== 'EPIPE') throw err
+  }
+  process.stdout?.on?.('error', ignoreBrokenPipe)
+  process.stderr?.on?.('error', ignoreBrokenPipe)
+
+  for (const name of ['log', 'warn', 'error', 'info']) {
+    const original = console[name].bind(console)
+    console[name] = (...args) => {
+      try { original(...args) }
+      catch (err) {
+        if (err?.code !== 'EPIPE') throw err
+      }
+    }
+  }
+}
+installSafeConsole()
+
 // Try candidate ports until one responds — handles Vite auto-port fallback
 function findVitePort(candidates = [5173, 4000, 3000, 5174, 5175]) {
   return new Promise(resolve => {

@@ -2,8 +2,27 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import useAlertStore  from '../store/alertStore'
 import usePairsStore  from '../store/pairsStore'
 import useMarketStore from '../store/marketStore'
+import useGroupsStore from '../store/groupsStore'
+import { applyLiquidityLimit } from '../utils/liquidity'
 
 const ALL_TF = ['15m', '1h', '4h', '1d']
+const STRATEGIES = [
+  { key: 'breakout', label: '放量突破', score: 4 },
+  { key: 'breakdown', label: '放量破位', score: 4 },
+  { key: 'volume_divergence', label: '量价背离', score: 3 },
+]
+const DEFAULT_STRATEGIES = ['breakout', 'breakdown', 'volume_divergence']
+const RULE_TEMPLATES = [
+  { name: 'RSI超卖反弹', timeframes: ['1h', '4h'], customMode: true, rsiBelow: '30', alertLevel: 2, divBull: true },
+  { name: '多周期共振', timeframes: ['1h', '4h', '1d'], customMode: true, rsiBelow: '35', requireAllTf: true, alertLevel: 3 },
+  { name: '熊市背离', timeframes: ['1h', '4h'], customMode: true, divBear: true, alertLevel: 2 },
+  { name: '量价突破', timeframes: ['4h', '1d'], customMode: false, strategies: ['breakout'], minScore: 4, alertLevel: 2 },
+]
+const ALERT_LEVELS = [
+  { value: 1, label: '一级提醒' },
+  { value: 2, label: '二级提醒' },
+  { value: 3, label: '三级提醒' },
+]
 
 const LIST_TABS = [
   { key: 'spot',    label: '现货'   },
@@ -11,6 +30,49 @@ const LIST_TABS = [
   { key: 'tradfi',  label: 'TradFi' },
   { key: 'stock',   label: '美股'   },
 ]
+
+function getRuleStrategies(rule) {
+  if (Array.isArray(rule.strategies)) return rule.strategies
+  if (rule.strategy) return [rule.strategy]
+  return rule.volumeSignal ? DEFAULT_STRATEGIES : []
+}
+
+function getStrategyLabels(rule) {
+  return getRuleStrategies(rule).map(k => STRATEGIES.find(s => s.key === k)?.label ?? k)
+}
+
+function getConditionTags(rule) {
+  const tags = []
+  if (rule.rsiAbove != null) tags.push({ label: `RSI > ${rule.rsiAbove}`, tone: 'red' })
+  if (rule.rsiBelow != null) tags.push({ label: `RSI < ${rule.rsiBelow}`, tone: 'green' })
+  if (rule.changeAbove != null) tags.push({ label: `涨超 ${rule.changeAbove}%`, tone: 'red' })
+  if (rule.changeBelow != null) tags.push({ label: `跌超 ${rule.changeBelow}%`, tone: 'green' })
+  if (rule.priceAbove != null) tags.push({ label: `突破 ${rule.priceAbove}`, tone: 'red' })
+  if (rule.priceBelow != null) tags.push({ label: `跌破 ${rule.priceBelow}`, tone: 'green' })
+  if (rule.divBull) tags.push({ label: '看涨背离', tone: 'green' })
+  if (rule.divBear) tags.push({ label: '看跌背离', tone: 'orange' })
+  if (rule.volumeSignal && getStrategyLabels(rule).length === 0) tags.push({ label: '量价结构', tone: 'blue' })
+  return tags
+}
+
+function getLevelLabel(rule) {
+  const level = rule.alertLevel ?? (rule.special ? 3 : 1)
+  return ALERT_LEVELS.find(l => l.value === level)?.label ?? '一级提醒'
+}
+
+function describeRule(rule, selectedSize = 1) {
+  const scope = rule.followTop ? `成交额 Top${rule.followTopLimit ?? 50}` : selectedSize > 1 ? `${selectedSize} 个品种` : rule.symbol
+  const parts = [
+    scope,
+    (rule.timeframes ?? []).join('/'),
+    getStrategyLabels(rule).join('/') || (rule.volumeSignal ? '量价结构' : ''),
+    rule.minScore != null ? `评分 >= ${rule.minScore}` : '',
+    rule.requireAllTf ? '共振' : '',
+    getLevelLabel(rule),
+    ...getConditionTags(rule).map(t => t.label),
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
 
 export default function AlertPage() {
   const configs      = useAlertStore(s => s.configs)
@@ -34,7 +96,8 @@ export default function AlertPage() {
   const [selected,    setSelected]    = useState(new Set())
   const [timeframes,    setTimeframes]    = useState(new Set(['1h', '4h', '1d']))
   const [requireAllTf, setRequireAllTf]  = useState(false)
-  const [isSpecial,    setIsSpecial]     = useState(false)
+  const [alertLevel,   setAlertLevel]    = useState(1)
+  const [followTop,    setFollowTop]     = useState(false)
   const [editingId,    setEditingId]     = useState(null)
   const [rsiAbove,     setRsiAbove]      = useState('')
   const [rsiBelow,     setRsiBelow]      = useState('')
@@ -44,10 +107,33 @@ export default function AlertPage() {
   const [priceBelow,   setPriceBelow]    = useState('')
   const [divBull,      setDivBull]       = useState(false)
   const [divBear,      setDivBear]       = useState(false)
+  const [volumeSignal, setVolumeSignal]  = useState(false)
+  const [strategies,   setStrategies]    = useState(DEFAULT_STRATEGIES)
+  const [customMode,   setCustomMode]    = useState(false)
+  const [minScore,     setMinScore]      = useState(3)
   const [priceMode,    setPriceMode]     = useState('absolute')  // 'absolute' | 'pct'
   const [error,        setError]         = useState('')
 
   const assets = useMarketStore(s => s.assets)
+  const groups = useGroupsStore(s => s.groups)
+
+  const applyTemplate = (tpl) => {
+    setTimeframes(new Set(tpl.timeframes))
+    setRequireAllTf(!!tpl.requireAllTf)
+    setAlertLevel(tpl.alertLevel ?? 1)
+    setCustomMode(!!tpl.customMode)
+    setRsiAbove(tpl.rsiAbove ?? '')
+    setRsiBelow(tpl.rsiBelow ?? '')
+    setChangeAbove(tpl.changeAbove ?? '')
+    setChangeBelow(tpl.changeBelow ?? '')
+    setPriceAbove('')
+    setPriceBelow('')
+    setDivBull(!!tpl.divBull)
+    setDivBear(!!tpl.divBear)
+    setVolumeSignal(!tpl.customMode)
+    setStrategies(tpl.strategies ?? DEFAULT_STRATEGIES)
+    setMinScore(tpl.minScore ?? 3)
+  }
 
   useEffect(() => {
     window.api.getAssetsConfig().then(cfg => {
@@ -72,6 +158,17 @@ export default function AlertPage() {
     return q ? items.filter(s => s.includes(q)) : items
   }, [spotPairs, futuresPairs, knownStocks, activeList, search])
 
+  const selectGroup = (name) => {
+    const members = new Set(groups[name] ?? [])
+    const allPairs = [...spotPairs, ...futuresPairs]
+    const symbols = [
+      ...allPairs.filter(p => members.has(p.apiSymbol)).map(p => p.symbol),
+      ...knownStocks.filter(s => members.has(s.apiSymbol)).map(s => s.symbol),
+    ]
+    setSelected(new Set(symbols))
+    setError(symbols.length ? '' : '该分组没有可用成员，请先在品种管理里保存分组')
+  }
+
   // ── Interactions ──────────────────────────────────────────
   const toggleSymbol = useCallback(sym => setSelected(prev => {
     const next = new Set(prev)
@@ -86,6 +183,28 @@ export default function AlertPage() {
     return next
   })
 
+  const toggleStrategy = key => {
+    setStrategies(prev => prev.includes(key)
+      ? prev.filter(s => s !== key)
+      : [...prev, key])
+  }
+
+  const selectTop50Alerts = () => {
+    const candidates = assets
+      .filter(a => a.type === 'crypto' || a.type === 'tradfi')
+      .filter(a => a.rsi?.['4h'] != null || a.rsi?.['1d'] != null)
+    const top = applyLiquidityLimit(candidates, 50).map(a => a.symbol)
+    setSelected(new Set(top))
+    setTimeframes(new Set(['4h', '1d']))
+    setRequireAllTf(false)
+    setCustomMode(false)
+    setStrategies(DEFAULT_STRATEGIES)
+    setMinScore(4)
+    setAlertLevel(2)
+    setFollowTop(true)
+    setError(top.length ? '' : '当前没有可用于 Top50 的市场数据，请先刷新')
+  }
+
   const handleEdit = useCallback(c => {
     // Determine which tab this symbol belongs to
     const inSpot    = spotPairs.some(p => p.symbol === c.symbol)
@@ -98,7 +217,8 @@ export default function AlertPage() {
     setSearch('')
     setSelected(new Set([c.symbol]))
     setEditingId(c.id)
-    setIsSpecial(!!c.special)
+    setAlertLevel(c.alertLevel ?? (c.special ? 3 : 1))
+    setFollowTop(!!c.followTop)
     setTimeframes(new Set(c.timeframes ?? ['1h', '4h', '1d']))
     setRequireAllTf(c.requireAllTf ?? false)
     setRsiAbove(c.rsiAbove    != null ? String(c.rsiAbove)    : '')
@@ -109,6 +229,10 @@ export default function AlertPage() {
     setPriceBelow(c.priceBelow  != null ? String(c.priceBelow)  : '')
     setDivBull(!!c.divBull)
     setDivBear(!!c.divBear)
+    setVolumeSignal(!!c.volumeSignal)
+    setStrategies(getRuleStrategies(c))
+    setCustomMode(!c.volumeSignal && !c.strategy && !c.strategies)
+    setMinScore(c.minScore ?? 3)
     setPriceMode('absolute')
     setError('')
   }, [spotPairs, futuresPairs, knownStocks])
@@ -119,7 +243,9 @@ export default function AlertPage() {
     const hasChange    = changeAbove !== '' || changeBelow !== ''
     const hasPrice     = priceAbove !== '' || priceBelow !== ''
     const hasDivergence = divBull || divBear
-    if (!hasRsi && !hasChange && !hasPrice && !hasDivergence) { setError('至少设置一个条件'); return }
+    const useStrategy = !customMode
+    if (useStrategy && strategies.length === 0) { setError('至少选择一个策略'); return }
+    if (!useStrategy && !hasRsi && !hasChange && !hasPrice && !hasDivergence && !volumeSignal) { setError('至少设置一个条件'); return }
 
     const parse = v => v === '' ? null : parseFloat(v)
     const ra = parse(rsiAbove),   rb = parse(rsiBelow)
@@ -147,11 +273,18 @@ export default function AlertPage() {
     const fields = {
       timeframes: [...timeframes],
       requireAllTf,
-      special: isSpecial,
+      alertLevel,
+      special: alertLevel >= 2,
+      followTop,
+      followTopLimit: followTop ? 50 : null,
       rsiAbove: ra, rsiBelow: rb,
       changeAbove: ca, changeBelow: cb,
       priceAbove: pa, priceBelow: pb,
       divBull, divBear,
+      volumeSignal: useStrategy ? true : volumeSignal,
+      strategies: useStrategy ? strategies : null,
+      strategy: useStrategy && strategies.length === 1 ? strategies[0] : null,
+      minScore: useStrategy ? minScore : null,
     }
 
     if (editingId) {
@@ -161,7 +294,12 @@ export default function AlertPage() {
       upsert([...selected], fields)
     }
     setSelected(new Set())
-    setIsSpecial(false)
+    setAlertLevel(1)
+    setFollowTop(false)
+    setVolumeSignal(false)
+    setStrategies(DEFAULT_STRATEGIES)
+    setCustomMode(false)
+    setMinScore(3)
   }
 
   const clearAll      = useAlertStore(s => s.clearAll)
@@ -171,17 +309,19 @@ export default function AlertPage() {
     const tf = (c.timeframes ?? ['1h'])[0]
     let item
     if (c.rsiAbove != null)
-      item = { symbol: c.symbol, type: 'rsi', timeframe: tf, condition: 'above', threshold: c.rsiAbove, value: parseFloat((c.rsiAbove + 2.3).toFixed(1)), special: !!c.special }
+      item = { symbol: c.symbol, type: 'rsi', timeframe: tf, condition: 'above', threshold: c.rsiAbove, value: parseFloat((c.rsiAbove + 2.3).toFixed(1)), level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
     else if (c.rsiBelow != null)
-      item = { symbol: c.symbol, type: 'rsi', timeframe: tf, condition: 'below', threshold: c.rsiBelow, value: parseFloat((c.rsiBelow - 2.3).toFixed(1)), special: !!c.special }
+      item = { symbol: c.symbol, type: 'rsi', timeframe: tf, condition: 'below', threshold: c.rsiBelow, value: parseFloat((c.rsiBelow - 2.3).toFixed(1)), level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
     else if (c.changeAbove != null)
-      item = { symbol: c.symbol, type: 'change', condition: 'above', threshold: c.changeAbove, value: parseFloat((c.changeAbove + 1).toFixed(2)), special: !!c.special }
+      item = { symbol: c.symbol, type: 'change', condition: 'above', threshold: c.changeAbove, value: parseFloat((c.changeAbove + 1).toFixed(2)), level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
     else if (c.changeBelow != null)
-      item = { symbol: c.symbol, type: 'change', condition: 'below', threshold: -c.changeBelow, value: -parseFloat((c.changeBelow + 1).toFixed(2)), special: !!c.special }
+      item = { symbol: c.symbol, type: 'change', condition: 'below', threshold: -c.changeBelow, value: -parseFloat((c.changeBelow + 1).toFixed(2)), level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
     else if (c.priceAbove != null)
-      item = { symbol: c.symbol, type: 'price', condition: 'above', threshold: c.priceAbove, value: c.priceAbove * 1.01, special: !!c.special }
+      item = { symbol: c.symbol, type: 'price', condition: 'above', threshold: c.priceAbove, value: c.priceAbove * 1.01, level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
     else if (c.priceBelow != null)
-      item = { symbol: c.symbol, type: 'price', condition: 'below', threshold: c.priceBelow, value: c.priceBelow * 0.99, special: !!c.special }
+      item = { symbol: c.symbol, type: 'price', condition: 'below', threshold: c.priceBelow, value: c.priceBelow * 0.99, level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
+    else if (c.volumeSignal)
+      item = { symbol: c.symbol, type: 'structure', timeframe: tf, condition: 'bullish', signal: '放量突破', value: 4, volumeRatio: 1.8, priceMovePct: 2.4, level: c.alertLevel ?? (c.special ? 3 : 1), special: !!c.special }
     else return
     addFeedItems([item])
     window.api.showNotificationBatch([item])
@@ -193,6 +333,26 @@ export default function AlertPage() {
 
   const enabledCount = configs.filter(c => c.enabled).length
   const isEmpty      = !pairsLoading && currentSymbols.length === 0
+  const draftRule = useMemo(() => ({
+    symbol: [...selected][0] ?? '未选品种',
+    timeframes: [...timeframes],
+    requireAllTf,
+    alertLevel,
+    special: alertLevel >= 2,
+    followTop,
+    followTopLimit: 50,
+    rsiAbove: rsiAbove === '' ? null : rsiAbove,
+    rsiBelow: rsiBelow === '' ? null : rsiBelow,
+    changeAbove: changeAbove === '' ? null : changeAbove,
+    changeBelow: changeBelow === '' ? null : changeBelow,
+    priceAbove: priceAbove === '' ? null : priceAbove,
+    priceBelow: priceBelow === '' ? null : priceBelow,
+    divBull,
+    divBear,
+    volumeSignal: customMode ? volumeSignal : true,
+    strategies: customMode ? null : strategies,
+    minScore: customMode ? null : minScore,
+  }), [selected, timeframes, requireAllTf, alertLevel, followTop, rsiAbove, rsiBelow, changeAbove, changeBelow, priceAbove, priceBelow, divBull, divBear, volumeSignal, customMode, strategies, minScore])
 
   return (
     <div className="alert-page">
@@ -220,6 +380,13 @@ export default function AlertPage() {
                   导入观察列表 ({trackedSymbols.length})
                 </button>
               )}
+              {assets.length > 0 && (
+                <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
+                  title="按24h成交额选择当前市场 Top50，并使用4h/1d量价策略"
+                  onClick={selectTop50Alerts}>
+                  Top50提醒
+                </button>
+              )}
               {selected.size > 0 && (
                 <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
                   onClick={() => setSelected(new Set())}>清空</button>
@@ -229,6 +396,30 @@ export default function AlertPage() {
 
           {/* Condition form — top */}
           <div className="alert-condition-form">
+            <div className="alert-cond-row">
+              <span className="alert-cond-label">模板</span>
+              <div className="alert-tf-group">
+                {RULE_TEMPLATES.map(tpl => (
+                  <button key={tpl.name} className="alert-tf-btn" onClick={() => applyTemplate(tpl)}>
+                    {tpl.name}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {Object.keys(groups).length > 0 && (
+              <div className="alert-cond-row">
+                <span className="alert-cond-label">分组</span>
+                <div className="alert-tf-group">
+                  {Object.keys(groups).map(name => (
+                    <button key={name} className="alert-tf-btn" onClick={() => selectGroup(name)}>
+                      {name} ({groups[name]?.length ?? 0})
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="alert-cond-row">
               <span className="alert-cond-label">时间框</span>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -242,7 +433,7 @@ export default function AlertPage() {
                   ))}
                 </div>
                 {timeframes.size > 1 && (
-                  <label className="alert-resonance-label" title="单个周期满足触发普通提醒；所选全部周期同时满足时额外触发特殊提醒（★）">
+                  <label className="alert-resonance-label" title="要求所选周期同时满足规则后才提醒">
                     <input type="checkbox" checked={requireAllTf}
                       onChange={e => setRequireAllTf(e.target.checked)} />
                     <span>共振</span>
@@ -251,6 +442,49 @@ export default function AlertPage() {
               </div>
             </div>
 
+            <div className="alert-cond-row">
+              <span className="alert-cond-label">等级</span>
+              <div className="alert-tf-group">
+                {ALERT_LEVELS.map(level => (
+                  <button key={level.value}
+                    className={`alert-tf-btn ${alertLevel === level.value ? 'active' : ''}`}
+                    onClick={() => setAlertLevel(level.value)}>
+                    {level.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="alert-cond-row">
+              <span className="alert-cond-label">策略</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <div className="alert-tf-group">
+                  {STRATEGIES.map(s => (
+                    <button key={s.key}
+                      className={`alert-tf-btn ${!customMode && strategies.includes(s.key) ? 'active' : ''}`}
+                      onClick={() => { setCustomMode(false); toggleStrategy(s.key); setMinScore(Math.max(minScore, s.score)) }}>
+                      {s.label}
+                    </button>
+                  ))}
+                  <button
+                    className={`alert-tf-btn ${customMode ? 'active' : ''}`}
+                    onClick={() => setCustomMode(true)}>
+                    自定义
+                  </button>
+                </div>
+                {!customMode && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}>
+                    <span style={{ color: 'var(--dim)' }}>最低评分</span>
+                    <input className="alert-num-input" type="number" min="1" max="6"
+                      style={{ width: 54 }} value={minScore}
+                      onChange={e => setMinScore(Number(e.target.value) || 3)} />
+                  </label>
+                )}
+              </div>
+            </div>
+
+            {customMode && (
+            <>
             <div className="alert-cond-row">
               <span className="alert-cond-label">RSI</span>
               <div className="alert-cond-inputs">
@@ -367,25 +601,37 @@ export default function AlertPage() {
               </div>
             </div>
 
+            <div className="alert-cond-row">
+              <span className="alert-cond-label">量价</span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12, cursor: 'pointer' }}
+                title="只在放量突破、放量破位、价量背离等强结构信号出现时提醒">
+                <input type="checkbox" checked={volumeSignal} onChange={e => setVolumeSignal(e.target.checked)} />
+                <span style={{ color: '#58a6ff' }}>结构信号</span>
+              </label>
+            </div>
+            </>
+            )}
+
             <div className="alert-form-actions">
-              <button
-                className={`special-toggle-btn ${isSpecial ? 'active' : ''}`}
-                title={isSpecial ? '当前为特别提醒（叠加在普通提醒之上）' : '切换为特别提醒'}
-                onClick={() => setIsSpecial(v => !v)}
-              >
-                ★ {isSpecial ? '特别提醒' : '普通提醒'}
-              </button>
+              <label className="alert-resonance-label" title="保存后会跟随当前成交额 Top50 自动维护提醒范围">
+                <input type="checkbox" checked={followTop}
+                  onChange={e => setFollowTop(e.target.checked)} />
+                <span>跟随成交额 Top50</span>
+              </label>
               <button className="save-btn" onClick={handleSave}
                 disabled={!editingId && selected.size === 0}>
                 {editingId ? '更新提醒' : selected.size > 1 ? `保存 (${selected.size} 个品种)` : '保存提醒'}
               </button>
               {editingId && (
                 <button className="zone-btn" style={{ fontSize: 11 }}
-                  onClick={() => { setEditingId(null); setSelected(new Set()); setIsSpecial(false) }}>
+                  onClick={() => { setEditingId(null); setSelected(new Set()); setAlertLevel(1); setFollowTop(false) }}>
                   取消编辑
                 </button>
               )}
               {error && <span className="alert-error">{error}</span>}
+            </div>
+            <div className="rule-preview">
+              {describeRule(draftRule, selected.size || 1)}
             </div>
           </div>
 
@@ -470,96 +716,86 @@ export default function AlertPage() {
             </div>
           </div>
 
-          <div className="pair-list" style={{ marginTop: 0 }}>
+          <div className="rules-list">
             {configs.length === 0
               ? <div className="pair-empty">暂无规则，请在左侧添加</div>
               : (() => {
                 const q = rulesSearch.trim().toUpperCase()
-                const filtered = q ? configs.filter(c => c.symbol.toUpperCase().includes(q)) : configs
+                const filtered = q
+                  ? configs.filter(c => {
+                    const text = [
+                      c.symbol,
+                      ...getStrategyLabels(c),
+                      ...(c.timeframes ?? []),
+                    ].join(' ').toUpperCase()
+                    return text.includes(q)
+                  })
+                  : configs
                 if (filtered.length === 0) return <div className="pair-empty">无匹配规则</div>
                 return (
-                <table className="stats-table">
-                  <thead>
-                    <tr>
-                      <th></th>
-                      <th>品种</th>
-                      <th style={{ width: 24 }}>★</th>
-                      <th>时间框</th>
-                      <th>共振</th>
-                      <th>RSI↑</th>
-                      <th>RSI↓</th>
-                      <th>涨超</th>
-                      <th>跌超</th>
-                      <th>价↑</th>
-                      <th>价↓</th>
-                      <th>背离</th>
-                      <th>触发</th>
-                      <th>启用</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.map(c => (
-                      <tr key={c.id} className={c.enabled ? '' : 'rule-disabled'}>
-                        <td style={{ whiteSpace: 'nowrap' }}>
-                          <button className="rule-test-btn" onClick={() => testAlert(c)} title="模拟触发一次提醒">测试</button>
-                          <button className="rule-edit-btn" style={{ marginLeft: 4 }} onClick={() => { handleEdit(c); setPendingDelete(null) }}>编辑</button>
-                          {pendingDelete === c.id ? (
-                            <>
-                              <button className="rule-del-btn" style={{ marginLeft: 4 }}
-                                onClick={() => { remove(c.id); setPendingDelete(null) }}>确认</button>
-                              <button className="zone-btn" style={{ fontSize: 11, padding: '2px 6px', marginLeft: 3 }}
-                                onClick={() => setPendingDelete(null)}>取消</button>
-                            </>
-                          ) : (
-                            <button className="rule-del-btn" style={{ marginLeft: 4 }}
-                              onClick={() => setPendingDelete(c.id)}>删除</button>
-                          )}
-                        </td>
-                        <td>
-                          <strong>{c.symbol}</strong>
-                        </td>
-                        <td style={{ textAlign: 'center', color: c.special ? '#f59e0b' : 'transparent', fontSize: 12 }}>
-                          ★
-                        </td>
-                        <td>
-                          <div className="tf-tags">
-                            {(c.timeframes ?? []).map(tf => (
-                              <span key={tf} className="tf-tag">{tf}</span>
-                            ))}
+                <div className="rule-card-list">
+                  {filtered.map(c => {
+                    const strategyLabels = getStrategyLabels(c)
+                    const conditionTags = getConditionTags(c)
+                    return (
+                      <div key={c.id} className={`rule-card ${c.enabled ? '' : 'rule-disabled'}`}>
+                        <div className="rule-card-main">
+                          <div className="rule-card-title">
+                            <strong className="rule-card-symbol">{c.symbol}</strong>
+                            <span className="rule-chip orange">{getLevelLabel(c)}</span>
+                            {c.followTop && <span className="rule-chip blue">Top{c.followTopLimit ?? 50} 跟随</span>}
+                            {c.requireAllTf && <span className="rule-chip orange">共振</span>}
+                            {!c.enabled && <span className="rule-chip muted">已禁用</span>}
                           </div>
-                        </td>
-                        <td style={{ color: c.requireAllTf ? '#f59e0b' : 'var(--dim)', fontSize: 11 }}>
-                          {c.requireAllTf ? '是' : '—'}
-                        </td>
-                        <td className="mono" style={{ color: '#ef4444' }}>{c.rsiAbove    ?? '—'}</td>
-                        <td className="mono" style={{ color: '#22c55e' }}>{c.rsiBelow    ?? '—'}</td>
-                        <td className="mono" style={{ color: '#f85149' }}>{c.changeAbove != null ? `+${c.changeAbove}%` : '—'}</td>
-                        <td className="mono" style={{ color: '#3fb950' }}>{c.changeBelow != null ? `-${c.changeBelow}%` : '—'}</td>
-                        <td className="mono" style={{ color: '#f85149' }}>{c.priceAbove  != null ? c.priceAbove  : '—'}</td>
-                        <td className="mono" style={{ color: '#3fb950' }}>{c.priceBelow  != null ? c.priceBelow  : '—'}</td>
-                        <td className="mono" style={{ fontSize: 11 }}>
-                          {c.divBull && <span style={{ color: '#22c55e' }}>↗</span>}
-                          {c.divBear && <span style={{ color: '#f97316' }}>↘</span>}
-                          {!c.divBull && !c.divBear && <span style={{ color: 'var(--dim)' }}>—</span>}
-                        </td>
-                        <td className="mono" style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>
-                          {c.fireCount > 0
-                            ? <span title={c.lastFiredAt ? `最后: ${new Date(c.lastFiredAt).toLocaleString('zh-CN')}` : ''}>
-                                {c.fireCount} 次
-                              </span>
-                            : <span style={{ color: 'var(--dim)' }}>—</span>
-                          }
-                        </td>
-                        <td>
-                          <label className="toggle-switch">
+                          <div className="rule-chip-row">
+                            {(c.timeframes ?? []).map(tf => (
+                              <span key={tf} className="rule-chip">{tf}</span>
+                            ))}
+                            {strategyLabels.map(label => (
+                              <span key={label} className="rule-chip blue">{label}</span>
+                            ))}
+                            {c.minScore != null && strategyLabels.length > 0 && (
+                              <span className="rule-chip">评分 ≥ {c.minScore}</span>
+                            )}
+                          </div>
+                          <div className="rule-chip-row">
+                            {conditionTags.length > 0
+                              ? conditionTags.map(tag => (
+                                <span key={tag.label} className={`rule-chip ${tag.tone}`}>{tag.label}</span>
+                              ))
+                              : <span className="rule-chip muted">无自定义阈值</span>
+                            }
+                          </div>
+                        </div>
+
+                        <div className="rule-card-side">
+                          <div className="rule-card-stats">
+                            {c.fireCount > 0
+                              ? <span title={c.lastFiredAt ? `最后: ${new Date(c.lastFiredAt).toLocaleString('zh-CN')}` : ''}>
+                                  触发 {c.fireCount} 次
+                                </span>
+                              : <span>尚未触发</span>
+                            }
+                          </div>
+                          <label className="toggle-switch" title={c.enabled ? '禁用规则' : '启用规则'}>
                             <input type="checkbox" checked={c.enabled} onChange={() => toggle(c.id)} />
                             <span className="toggle-track" />
                           </label>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                          <button className="rule-test-btn" onClick={() => testAlert(c)} title="模拟触发一次提醒">测试</button>
+                          <button className="rule-edit-btn" onClick={() => { handleEdit(c); setPendingDelete(null) }}>编辑</button>
+                          {pendingDelete === c.id ? (
+                            <>
+                              <button className="rule-del-btn" onClick={() => { remove(c.id); setPendingDelete(null) }}>确认</button>
+                              <button className="zone-btn rule-cancel-btn" onClick={() => setPendingDelete(null)}>取消</button>
+                            </>
+                          ) : (
+                            <button className="rule-del-btn" onClick={() => setPendingDelete(c.id)}>删除</button>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
                 )
               })()
             }

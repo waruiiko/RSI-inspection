@@ -1,16 +1,46 @@
-import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+﻿import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import useMarketStore   from '../store/marketStore'
 import useSettingsStore from '../store/settingsStore'
 import useGroupsStore   from '../store/groupsStore'
 import { getRsiColor, getRsiZone, formatPrice } from '../utils/rsi'
 import ChartModal from './ChartModal'
+import { applyLiquidityLimit, formatTurnover, getQuoteVolume } from '../utils/liquidity'
+import { assetKey, matchesAssetRef } from '../utils/assetKey'
 
 const TIMEFRAMES = ['15m', '1h', '4h', '1d']
 const ROW_HEIGHT = 38
+const SIGNAL_FILTERS = [
+  { key: 'all', label: '全部信号' },
+  { key: 'breakout', label: '突破' },
+  { key: 'breakdown', label: '破位' },
+  { key: 'divergence', label: '背离' },
+  { key: 'strong', label: '强信号' },
+]
+const SIGNAL_DESCRIPTIONS = {
+  breakout_confirmed: '收盘价突破近期高点，且成交量明显高于均值。',
+  breakout_attempt: '价格接近突破区，但确认强度不足，适合继续观察。',
+  breakdown_confirmed: '收盘价跌破近期低点，且成交量放大。',
+  breakdown_attempt: '价格接近破位区，但确认强度不足，适合继续观察。',
+  bearish_volume_divergence: '价格创新高，但量能没有同步放大。',
+  bullish_seller_exhaustion: '价格创新低，但抛压和量能在减弱。',
+  volume_rebound_up: '下跌后出现放量反弹，但还不是突破确认。',
+  volume_selloff: '上涨或横盘后出现放量回落。',
+}
 
-/* ── Score helpers ─────────────────────────────────────────── */
-function getScore(asset, ob, os) {
+function signalMatches(signal, score, filter) {
+  if (filter === 'all') return true
+  if (!signal) return false
+  if (filter === 'breakout') return ['breakout_confirmed', 'breakout_attempt', 'volume_rebound_up'].includes(signal.type)
+  if (filter === 'breakdown') return ['breakdown_confirmed', 'breakdown_attempt', 'volume_selloff'].includes(signal.type)
+  if (filter === 'divergence') return ['bearish_volume_divergence', 'bullish_seller_exhaustion'].includes(signal.type)
+  if (filter === 'strong') return Math.abs(score ?? 0) >= 4
+  return true
+}
+
+/* 鈹€鈹€ Score helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
+function getScore(asset, ob, os, tf = '4h') {
+  if (asset.signalScore?.[tf] != null) return asset.signalScore[tf]
   return TIMEFRAMES.reduce((sum, tf) => {
     const rsi = asset.rsi[tf]
     if (rsi == null) return sum
@@ -28,13 +58,13 @@ function scoreColor(s) {
   return '#22c55e'
 }
 
-/* ── Sort icon ─────────────────────────────────────────────── */
+/* 鈹€鈹€ Sort icon 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function SortIcon({ col, sortCol, sortDir }) {
   if (sortCol !== col) return <span className="sort-icon dim">↕</span>
   return <span className="sort-icon active">{sortDir === 'desc' ? '↓' : '↑'}</span>
 }
 
-/* ── Gradient sparkline ────────────────────────────────────── */
+/* 鈹€鈹€ Gradient sparkline 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function Sparkline({ closes }) {
   if (!closes || closes.length < 2) return null
   const W = 56, H = 20
@@ -67,12 +97,11 @@ function Sparkline({ closes }) {
     </svg>
   )
 }
-
-/* ── RSI cell: value + mini progress bar ───────────────────── */
+/* 鈹€鈹€ RSI cell: value + mini progress bar 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function RsiCell({ value, isActive, arrow, arrowColor, div }) {
   if (value == null) return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-      <span style={{ color: 'var(--dim)', fontSize: 12 }}>—</span>
+      <span style={{ color: 'var(--dim)', fontSize: 12 }}>-</span>
     </div>
   )
   const color = getRsiColor(value)
@@ -93,9 +122,9 @@ function RsiCell({ value, isActive, arrow, arrowColor, div }) {
   )
 }
 
-/* ── Change badge ──────────────────────────────────────────── */
+/* 鈹€鈹€ Change badge 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function ChangeBadge({ value }) {
-  if (value == null) return <span style={{ color: 'var(--dim)', fontSize: 12 }}>—</span>
+  if (value == null) return <span style={{ color: 'var(--dim)', fontSize: 12 }}>-</span>
   const up = value > 0
   return (
     <span style={{
@@ -114,16 +143,54 @@ function ChangeBadge({ value }) {
   )
 }
 
-/* ── CSV export ────────────────────────────────────────────── */
+function VolumeSignalBadge({ signal, score }) {
+  if (!signal) return <span style={{ color: 'var(--dim)', fontSize: 11 }}>-</span>
+  const color = signal.direction === 'bullish' ? '#22c55e'
+    : signal.direction === 'bearish' ? '#ef4444'
+    : signal.direction === 'caution' ? '#f97316'
+    : '#8b949e'
+  return (
+    <span title={`${SIGNAL_DESCRIPTIONS[signal.type] ?? '量价结构信号'} 评分 ${score ?? 0}，量能 ${signal.volumeRatio ?? '-'}x`}
+      style={{
+        display: 'inline-block',
+        maxWidth: 84,
+        padding: '1px 6px',
+        borderRadius: 4,
+        fontSize: 11,
+        color,
+        background: `${color}18`,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}>
+      {signal.label}
+    </span>
+  )
+}
+
+function getDataIssue(asset) {
+  const turnover = getQuoteVolume(asset)
+  if (!turnover) return '成交额缺失'
+  if (asset.type === 'crypto' && turnover < 1_000_000) return '成交额偏低'
+  if (asset.price == null) return '价格缺失'
+  const rsiCount = TIMEFRAMES.filter(tf => asset.rsi?.[tf] != null).length
+  if (rsiCount < 2) return 'K线数据不足'
+  return null
+}
+
+/* 鈹€鈹€ CSV export 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function exportCsv(visible, timeframe) {
-  const headers = ['#', '品种', '类型', '价格', '24h%', ...TIMEFRAMES.map(tf => `RSI ${tf}`)]
+  const headers = ['#', '品种', '类型', '价格', '成交额', '24h%', ...TIMEFRAMES.map(tf => `RSI ${tf}`), '量价信号', '评分']
   const rows = visible.map((a, i) => [
     i + 1,
     a.symbol,
     a.type,
     a.price ?? '',
+    getQuoteVolume(a) || '',
     a.change24h != null ? a.change24h.toFixed(2) : '',
     ...TIMEFRAMES.map(tf => a.rsi[tf] != null ? a.rsi[tf].toFixed(1) : ''),
+    a.volumeSignal?.[timeframe]?.label ?? '',
+    a.signalScore?.[timeframe] ?? '',
   ])
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n')
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
@@ -135,7 +202,7 @@ function exportCsv(visible, timeframe) {
   URL.revokeObjectURL(url)
 }
 
-/* ── Main component ────────────────────────────────────────── */
+/* 鈹€鈹€ Main component 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 export default function StatsTable() {
   const rsiOverbought = useSettingsStore(s => s.rsiOverbought)
   const rsiOversold   = useSettingsStore(s => s.rsiOversold)
@@ -143,6 +210,7 @@ export default function StatsTable() {
   const groupFilter   = useGroupsStore(s => s.groupFilter)
   const assets        = useMarketStore(s => s.assets)
   const filter        = useMarketStore(s => s.filter)
+  const liquidityLimit = useMarketStore(s => s.liquidityLimit)
   const timeframe     = useMarketStore(s => s.timeframe)
   const pinnedSymbols = useMarketStore(s => s.pinnedSymbols)
   const flashSymbol   = useMarketStore(s => s.flashSymbol)
@@ -155,6 +223,7 @@ export default function StatsTable() {
   const [highlighted, setHighlighted] = useState(null)
   const [sortCol,     setSortCol]     = useState(null)
   const [sortDir,     setSortDir]     = useState(null)
+  const [signalFilter, setSignalFilter] = useState('all')
   const [chartAsset,  setChartAsset]  = useState(null)
 
   const searchFocusTick = useMarketStore(s => s.searchFocusTick)
@@ -189,20 +258,25 @@ export default function StatsTable() {
 
   const visible = useMemo(() => {
     const groupSet = groupFilter ? new Set(groups[groupFilter] ?? []) : null
-    const base = (filter === 'all'    ? assets
+    const base = applyLiquidityLimit((filter === 'all'    ? assets
       : filter === 'crypto'           ? assets.filter(a => a.type === 'crypto')
       : assets.filter(a => a.type !== 'crypto'))
       .filter(a => a.rsi[timeframe] != null)
       .filter(a => !groupSet || groupSet.has(a.apiSymbol))
+      .filter(a => signalMatches(a.volumeSignal?.[timeframe], a.signalScore?.[timeframe], signalFilter)), liquidityLimit)
 
     let sorted
     if (sortCol && sortDir) {
       sorted = [...base].sort((a, b) => {
-        const va = sortCol === '24h'   ? (a.change24h ?? -Infinity)
-                 : sortCol === 'score' ? getScore(a, rsiOverbought, rsiOversold)
+        const va = sortCol === 'turnover' ? (getQuoteVolume(a) ?? -Infinity)
+                 : sortCol === '24h'      ? (a.change24h ?? -Infinity)
+                 : sortCol === 'score'    ? getScore(a, rsiOverbought, rsiOversold, timeframe)
+                 : sortCol === 'signal'   ? Math.abs(getScore(a, rsiOverbought, rsiOversold, timeframe))
                  : (a.rsi[sortCol] ?? -Infinity)
-        const vb = sortCol === '24h'   ? (b.change24h ?? -Infinity)
-                 : sortCol === 'score' ? getScore(b, rsiOverbought, rsiOversold)
+        const vb = sortCol === 'turnover' ? (getQuoteVolume(b) ?? -Infinity)
+                 : sortCol === '24h'      ? (b.change24h ?? -Infinity)
+                 : sortCol === 'score'    ? getScore(b, rsiOverbought, rsiOversold, timeframe)
+                 : sortCol === 'signal'   ? Math.abs(getScore(b, rsiOverbought, rsiOversold, timeframe))
                  : (b.rsi[sortCol] ?? -Infinity)
         return sortDir === 'desc' ? vb - va : va - vb
       })
@@ -211,10 +285,10 @@ export default function StatsTable() {
     }
 
     if (pinnedSymbols.size === 0) return sorted
-    const pinned   = sorted.filter(a =>  pinnedSymbols.has(a.symbol))
-    const unpinned = sorted.filter(a => !pinnedSymbols.has(a.symbol))
+    const pinned   = sorted.filter(a =>  pinnedSymbols.has(assetKey(a)) || pinnedSymbols.has(a.symbol))
+    const unpinned = sorted.filter(a => !pinnedSymbols.has(assetKey(a)) && !pinnedSymbols.has(a.symbol))
     return [...pinned, ...unpinned]
-  }, [assets, filter, timeframe, sortCol, sortDir, pinnedSymbols, groupFilter, groups])
+  }, [assets, filter, timeframe, sortCol, sortDir, pinnedSymbols, groupFilter, groups, liquidityLimit, signalFilter, rsiOverbought, rsiOversold])
 
   const virtualizer = useVirtualizer({
     count: visible.length,
@@ -230,7 +304,7 @@ export default function StatsTable() {
 
   useEffect(() => {
     if (!flashSymbol?.symbol) return
-    const idx = visible.findIndex(a => a.symbol === flashSymbol.symbol)
+    const idx = visible.findIndex(a => matchesAssetRef(a, flashSymbol.symbol))
     if (idx >= 0) { scrollToIndex(idx); setHighlighted(flashSymbol.symbol) }
   }, [flashSymbol])
 
@@ -252,25 +326,32 @@ export default function StatsTable() {
     <div className="table-section">
       {chartAsset && <ChartModal asset={chartAsset} onClose={() => setChartAsset(null)} />}
 
-      {/* ── Search bar ── */}
+      {/* 鈹€鈹€ Search bar 鈹€鈹€ */}
       <div className="table-search">
         <input
           ref={searchRef}
           type="search"
           className="search-input"
-          placeholder="搜索品种…  (Ctrl+F)"
+          placeholder="搜索品种... (Ctrl+F)"
           value={query}
           onChange={e => setQuery(e.target.value)}
           onKeyDown={e => e.key === 'Enter' && doSearch()}
         />
         <button className="search-btn" onClick={doSearch}>确认</button>
-        <button className="search-btn export-btn" onClick={() => exportCsv(visible, timeframe)} title="导出CSV">↓ CSV</button>
+        <button className="search-btn export-btn" onClick={() => exportCsv(visible, timeframe)} title="导出 CSV">导出 CSV</button>
+        <div className="btn-group">
+          {SIGNAL_FILTERS.map(f => (
+            <button key={f.key} className={signalFilter === f.key ? 'active' : ''} onClick={() => setSignalFilter(f.key)}>
+              {f.label}
+            </button>
+          ))}
+        </div>
         <span style={{ fontSize: 11, color: 'var(--dim)', alignSelf: 'center', marginLeft: 4 }}>
           {visible.length} 个品种
         </span>
       </div>
 
-      {/* ── Table ── */}
+      {/* 鈹€鈹€ Table 鈹€鈹€ */}
       <div className="table-wrapper" ref={wrapperRef}>
         <table className="stats-table">
           <thead>
@@ -278,6 +359,9 @@ export default function StatsTable() {
               <th style={{ width: 32 }}>#</th>
               <th>品种</th>
               <th>价格</th>
+              <th className="th-sort" onClick={() => handleSort('turnover')}>
+                成交额 <SortIcon col="turnover" sortCol={sortCol} sortDir={sortDir} />
+              </th>
               <th className="th-sort" onClick={() => handleSort('24h')}>
                 24h% <SortIcon col="24h" sortCol={sortCol} sortDir={sortDir} />
               </th>
@@ -286,44 +370,50 @@ export default function StatsTable() {
                   RSI {tf} <SortIcon col={tf} sortCol={sortCol} sortDir={sortDir} />
                 </th>
               ))}
-              <th className="th-sort" onClick={() => handleSort('score')} title="4个周期综合评分 (−4 到 +4)">
-                综合 <SortIcon col="score" sortCol={sortCol} sortDir={sortDir} />
+              <th className="th-sort" onClick={() => handleSort('score')} title="量价结构优先的综合评分（-6 到 +6）">
+                评分 <SortIcon col="score" sortCol={sortCol} sortDir={sortDir} />
+              </th>
+              <th className="th-sort" onClick={() => handleSort('signal')} style={{ width: 94 }}>
+                量价 <SortIcon col="signal" sortCol={sortCol} sortDir={sortDir} />
               </th>
               <th style={{ width: 72 }}>走势</th>
             </tr>
           </thead>
           <tbody onMouseLeave={handleBodyLeave}>
-            {padTop > 0 && <tr><td colSpan={10} style={{ height: padTop, padding: 0, border: 'none' }} /></tr>}
+            {padTop > 0 && <tr><td colSpan={11} style={{ height: padTop, padding: 0, border: 'none' }} /></tr>}
             {vItems.map(vItem => {
               const i = vItem.index
               const a = visible[i]
-              const isPinned      = pinnedSymbols.has(a.symbol)
-              const isPinBoundary = isPinned && (i === visible.length - 1 || !pinnedSymbols.has(visible[i + 1]?.symbol))
+              const key = assetKey(a)
+              const dataIssue = getDataIssue(a)
+              const isPinned      = pinnedSymbols.has(key) || pinnedSymbols.has(a.symbol)
+              const nextKey       = visible[i + 1] ? assetKey(visible[i + 1]) : ''
+              const isPinBoundary = isPinned && (i === visible.length - 1 || (!pinnedSymbols.has(nextKey) && !pinnedSymbols.has(visible[i + 1]?.symbol)))
 
               return (
                 <tr
-                  key={a.symbol}
+                  key={key}
                   style={{ height: ROW_HEIGHT }}
                   className={[
-                    highlighted === a.symbol ? 'highlighted' : '',
+                    highlighted === a.symbol || highlighted === key ? 'highlighted' : '',
                     isPinned      ? 'row-pinned'  : '',
                     isPinBoundary ? 'row-pin-end' : '',
                   ].filter(Boolean).join(' ')}
-                  onMouseEnter={() => handleRowEnter(a.symbol)}
-                  onClick={() => setFlash(a.symbol)}
+                  onMouseEnter={() => handleRowEnter(key)}
+                  onClick={() => setFlash(key)}
                   onDoubleClick={() => setChartAsset(a)}
                 >
                   {/* # */}
                   <td className="dim" style={{ fontSize: 11 }}>{i + 1}</td>
 
-                  {/* 品种 */}
+                  {/* 鍝佺 */}
                   <td>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                       <button
                         className={`pin-btn ${isPinned ? 'active' : ''}`}
                         title={isPinned ? '取消置顶' : '置顶'}
-                        onClick={e => { e.stopPropagation(); togglePin(a.symbol) }}
-                      >▲</button>
+                        onClick={e => { e.stopPropagation(); togglePin(key) }}
+                      >◆</button>
                       {/* Zone accent bar */}
                       <div style={{
                         width: 3, height: 22, borderRadius: 2, flexShrink: 0,
@@ -334,14 +424,23 @@ export default function StatsTable() {
                         {a.type === 'crypto' ? 'C' : a.type === 'tradfi' ? 'T' : 'S'}
                       </span>
                       <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
-                        <span style={{ fontWeight: 600, fontSize: 12 }}>{a.symbol}</span>
+                        <span style={{ fontWeight: 600, fontSize: 12 }}>
+                          {a.symbol}
+                          {dataIssue && (
+                            <span className="data-issue-badge" title={dataIssue}>!</span>
+                          )}
+                        </span>
                       </div>
                     </div>
                   </td>
 
-                  {/* 价格 */}
+                  {/* 浠锋牸 */}
                   <td className="mono" style={{ fontSize: 12, color: 'var(--muted)' }}>
                     {formatPrice(a.price)}
+                  </td>
+
+                  <td className="mono" style={{ fontSize: 11, color: 'var(--dim)' }}>
+                    {formatTurnover(getQuoteVolume(a))}
                   </td>
 
                   {/* 24h% */}
@@ -352,7 +451,7 @@ export default function StatsTable() {
                   {/* RSI per timeframe */}
                   {TIMEFRAMES.map(tf => {
                     const cur   = a.rsi[tf]
-                    const prev  = prevRsi[a.symbol]?.[tf]
+                    const prev  = prevRsi[key]?.[tf]
                     const delta = (cur != null && prev != null) ? cur - prev : null
                     const arrow = delta == null ? '' : delta > 0.05 ? '↑' : delta < -0.05 ? '↓' : ''
                     const arrowColor = delta > 0.05 ? '#f97316' : '#38bdf8'
@@ -370,9 +469,9 @@ export default function StatsTable() {
                     )
                   })}
 
-                  {/* 综合评分 */}
+                  {/* 缁煎悎璇勫垎 */}
                   {(() => {
-                    const s = getScore(a, rsiOverbought, rsiOversold)
+                    const s = getScore(a, rsiOverbought, rsiOversold, timeframe)
                     return (
                       <td key="score">
                         <span style={{
@@ -391,14 +490,18 @@ export default function StatsTable() {
                     )
                   })()}
 
-                  {/* 走势 sparkline */}
+                  <td>
+                    <VolumeSignalBadge signal={a.volumeSignal?.[timeframe]} score={a.signalScore?.[timeframe]} />
+                  </td>
+
+                  {/* 璧板娍 sparkline */}
                   <td style={{ padding: '6px 12px' }}>
                     <Sparkline closes={a.sparkline} />
                   </td>
                 </tr>
               )
             })}
-            {padBot > 0 && <tr><td colSpan={10} style={{ height: padBot, padding: 0, border: 'none' }} /></tr>}
+            {padBot > 0 && <tr><td colSpan={11} style={{ height: padBot, padding: 0, border: 'none' }} /></tr>}
           </tbody>
         </table>
       </div>

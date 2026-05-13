@@ -129,14 +129,16 @@ function findDivergencePoints(candles, rsiVals) {
   return null
 }
 
-export default function ChartModal({ asset, onClose }) {
+export default function ChartModal({ asset, onClose, alertItem = null }) {
   const rsiPeriod     = useSettingsStore(s => s.rsiPeriod)
   const rsiOverbought = useSettingsStore(s => s.rsiOverbought)
   const rsiOversold   = useSettingsStore(s => s.rsiOversold)
   const rsiMaType     = useSettingsStore(s => s.rsiMaType)
   const rsiMaLength   = useSettingsStore(s => s.rsiMaLength)
   const rsiBbMult     = useSettingsStore(s => s.rsiBbMult)
-  const [tf, setTf]         = useState('4h')
+  const [tf, setTf]         = useState(() =>
+    alertItem?.timeframe && TIMEFRAMES.includes(alertItem.timeframe) ? alertItem.timeframe : '4h'
+  )
   const [ohlcv, setOhlcv]   = useState({})
   const [loading, setLoading] = useState(true)
   const candleRef = useRef(null)
@@ -172,6 +174,10 @@ export default function ChartModal({ asset, onClose }) {
     const rsiVals = computeRsi(candles, rsiPeriod)
     const divPts  = findDivergencePoints(candles, rsiVals)
     const divColor = divPts?.type === 'bearish' ? '#f97316' : '#22c55e'
+    const alertIndex = alertItem?.ts && candles.length
+      ? candles.reduce((best, c, i) => Math.abs(c.time - alertItem.ts) < Math.abs(candles[best].time - alertItem.ts) ? i : best, 0)
+      : -1
+    const zoomStart = alertIndex >= 0 ? Math.max(0, Math.floor((alertIndex - 40) / candles.length * 100)) : 40
 
     // Helper: build a 2-point line series for divergence annotation
     const divLineSeries = (yPivot, yCurrent) => divPts ? [{
@@ -209,7 +215,7 @@ export default function ChartModal({ asset, onClose }) {
           min: 0,
         },
       ],
-      dataZoom: [{ type: 'inside', start: 40, end: 100 }],
+      dataZoom: [{ type: 'inside', start: zoomStart, end: 100 }],
       tooltip: {
         trigger: 'axis', axisPointer: { type: 'cross' },
         backgroundColor: '#161b22', borderColor: '#30363d',
@@ -242,6 +248,13 @@ export default function ChartModal({ asset, onClose }) {
             color: '#3fb950', color0: '#f85149',
             borderColor: '#3fb950', borderColor0: '#f85149',
           },
+          markLine: alertIndex >= 0 ? {
+            silent: true,
+            symbol: 'none',
+            lineStyle: { color: '#eab308', type: 'dotted', width: 1.2 },
+            label: { formatter: '提醒', color: '#eab308', fontSize: 10 },
+            data: [{ xAxis: times[alertIndex] }],
+          } : undefined,
         },
         {
           type: 'bar',
@@ -279,7 +292,7 @@ export default function ChartModal({ asset, onClose }) {
         splitLine: { lineStyle: { color: '#1f2937', type: 'dashed' } },
         axisLabel: { color: '#6b7280', fontSize: 10 },
       },
-      dataZoom: [{ type: 'inside', start: 40, end: 100 }],
+      dataZoom: [{ type: 'inside', start: zoomStart, end: 100 }],
       tooltip: {
         trigger: 'axis',
         backgroundColor: '#161b22', borderColor: '#30363d',
@@ -308,6 +321,7 @@ export default function ChartModal({ asset, onClose }) {
             data: [
               { yAxis: rsiOverbought, lineStyle: { color: 'rgba(239,68,68,0.4)', type: 'dashed' }, label: { formatter: String(rsiOverbought), color: '#ef4444', fontSize: 9 } },
               { yAxis: rsiOversold,   lineStyle: { color: 'rgba(34,197,94,0.4)',  type: 'dashed' }, label: { formatter: String(rsiOversold),   color: '#22c55e',  fontSize: 9 } },
+              ...(alertIndex >= 0 ? [{ xAxis: times[alertIndex], lineStyle: { color: '#eab308', type: 'dotted' }, label: { formatter: '提醒', color: '#eab308', fontSize: 9 } }] : []),
             ],
           },
           markArea: {
@@ -350,7 +364,7 @@ export default function ChartModal({ asset, onClose }) {
     ro1.observe(candleRef.current)
     ro2.observe(rsiRef.current)
     return () => { ro1.disconnect(); ro2.disconnect() }
-  }, [ohlcv, tf, loading, rsiPeriod, rsiOverbought, rsiOversold, rsiMaType, rsiMaLength, rsiBbMult])
+  }, [ohlcv, tf, loading, rsiPeriod, rsiOverbought, rsiOversold, rsiMaType, rsiMaLength, rsiBbMult, alertItem])
 
   useEffect(() => () => {
     candleChart.current?.dispose(); candleChart.current = null
