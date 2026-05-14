@@ -81,6 +81,7 @@ export default function AlertPage() {
   const remove       = useAlertStore(s => s.remove)
   const toggle       = useAlertStore(s => s.toggle)
   const addFeedItems = useAlertStore(s => s.addFeedItems)
+  const bulkSetTimeframes = useAlertStore(s => s.bulkSetTimeframes)
 
   // ── Data ──────────────────────────────────────────────────
   const spotPairs    = usePairsStore(s => s.spot)
@@ -236,6 +237,12 @@ export default function AlertPage() {
     setPriceMode('absolute')
     setError('')
   }, [spotPairs, futuresPairs, knownStocks])
+
+  const handleCopy = useCallback(c => {
+    handleEdit(c)
+    setEditingId(null)
+    setError('已复制到左侧表单，选择品种后保存即可生成新规则')
+  }, [handleEdit])
 
   const handleSave = () => {
     if (selected.size === 0) { setError('请先勾选品种'); return }
@@ -695,6 +702,10 @@ export default function AlertPage() {
               {configs.length > 0 && (
                 <>
                   <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
+                    onClick={() => bulkSetTimeframes(['1h', '4h'])}>批量1h/4h</button>
+                  <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
+                    onClick={() => bulkSetTimeframes(['4h', '1d'])}>批量4h/1d</button>
+                  <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
                     onClick={() => setAllEnabled(true)}>全部启用</button>
                   <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
                     onClick={() => setAllEnabled(false)}>全部禁用</button>
@@ -782,6 +793,7 @@ export default function AlertPage() {
                             <span className="toggle-track" />
                           </label>
                           <button className="rule-test-btn" onClick={() => testAlert(c)} title="模拟触发一次提醒">测试</button>
+                          <button className="rule-edit-btn" onClick={() => handleCopy(c)}>复制</button>
                           <button className="rule-edit-btn" onClick={() => { handleEdit(c); setPendingDelete(null) }}>编辑</button>
                           {pendingDelete === c.id ? (
                             <>

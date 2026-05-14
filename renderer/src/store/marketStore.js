@@ -46,6 +46,18 @@ const _loadPinned = () => {
   catch { return new Set() }
 }
 
+const _loadLayoutPrefs = () => {
+  try { return JSON.parse(localStorage.getItem('rsi:layoutPrefs') ?? '{}') }
+  catch { return {} }
+}
+
+const _saveLayoutPref = (key, value) => {
+  const next = { ..._loadLayoutPrefs(), [key]: value }
+  localStorage.setItem('rsi:layoutPrefs', JSON.stringify(next))
+}
+
+const _prefs = _loadLayoutPrefs()
+
 let _unsubChunk = null
 let _unsubDone  = null
 let _chunkBuffer = []
@@ -73,11 +85,11 @@ function _scheduleChunkFlush(set, delay = 180) {
   }, delay)
 }
 
-function _finishFetch(set, requestId, updatedAt) {
+function _finishFetch(set, requestId, updatedAt, meta = null) {
   if (requestId !== _activeRequestId) return
   if (_flushTimer) { clearTimeout(_flushTimer); _flushTimer = null }
   _flushChunks(set)
-  set({ loading: false, updatedAt, completedAt: updatedAt })
+  set({ loading: false, updatedAt, completedAt: updatedAt, completedMeta: meta })
   _cleanupSubs()
 }
 
@@ -89,11 +101,12 @@ const useMarketStore = create((set, get) => ({
   statusEvents:  [],
   updatedAt:     null,
   completedAt:   null,
-  filter:        'all',
-  liquidityLimit: 100,
-  timeframe:     '4h',
-  layout:        'random',
-  rsiZones:      ALL_ZONES,      // visible RSI zones
+  completedMeta: null,
+  filter:        _prefs.filter ?? 'all',
+  liquidityLimit: _prefs.liquidityLimit ?? 100,
+  timeframe:     _prefs.timeframe ?? '4h',
+  layout:        _prefs.layout ?? 'random',
+  rsiZones:      _prefs.rsiZones ?? ALL_ZONES,      // visible RSI zones
   hoveredSymbol: null,           // table row hover → chart highlight
   flashSymbol:   null,           // table row click  → chart flash { symbol, ts }
   pinnedSymbols: _loadPinned(),  // Set<string>, persisted to localStorage
@@ -101,11 +114,11 @@ const useMarketStore = create((set, get) => ({
   searchFocusTick: 0,
   focusSearch: () => set(s => ({ searchFocusTick: s.searchFocusTick + 1 })),
 
-  setFilter:    (filter)    => set({ filter }),
-  setLiquidityLimit: (liquidityLimit) => set({ liquidityLimit }),
-  setTimeframe: (timeframe) => set({ timeframe }),
-  setLayout:    (layout)    => set({ layout }),
-  setRsiZones:  (zones)     => set({ rsiZones: zones }),
+  setFilter:    (filter)    => { _saveLayoutPref('filter', filter); set({ filter }) },
+  setLiquidityLimit: (liquidityLimit) => { _saveLayoutPref('liquidityLimit', liquidityLimit); set({ liquidityLimit }) },
+  setTimeframe: (timeframe) => { _saveLayoutPref('timeframe', timeframe); set({ timeframe }) },
+  setLayout:    (layout)    => { _saveLayoutPref('layout', layout); set({ layout }) },
+  setRsiZones:  (zones)     => { _saveLayoutPref('rsiZones', zones); set({ rsiZones: zones }) },
   setHovered:   (symbol)    => set({ hoveredSymbol: symbol }),
   setFlash:     (symbol)    => set({ flashSymbol: symbol ? { symbol, ts: Date.now() } : null }),
   clearStatus:  ()          => set({ statusEvents: [] }),
@@ -116,7 +129,7 @@ const useMarketStore = create((set, get) => ({
     set({ pinnedSymbols: next })
   },
 
-  async fetchData() {
+  async fetchData(options = {}) {
     if (!window.api) {
       set({ error: '请在 Electron 应用中运行，而非浏览器', loading: false })
       return
@@ -139,8 +152,8 @@ const useMarketStore = create((set, get) => ({
       _scheduleChunkFlush(set)
     })
 
-    _unsubDone = window.api.onMarketDone(({ requestId: doneRequestId, updatedAt }) => {
-      _finishFetch(set, doneRequestId, updatedAt)
+    _unsubDone = window.api.onMarketDone(({ requestId: doneRequestId, updatedAt, meta }) => {
+      _finishFetch(set, doneRequestId, updatedAt, meta)
     })
 
     const unsubStatus = window.api.onMarketStatus?.(({ requestId: statusRequestId, item }) => {
@@ -150,8 +163,15 @@ const useMarketStore = create((set, get) => ({
 
     try {
       const { rsiPeriod } = useSettingsStore.getState()
-      const result = await window.api.fetchMarketData({ timeframes: ['15m', '1h', '4h', '1d'], rsiPeriod, requestId })
-      if (get().loading && result?.ok) _finishFetch(set, result.requestId, result.updatedAt ?? Date.now())
+      const result = await window.api.fetchMarketData({
+        timeframes: options.timeframes ?? ['15m', '1h', '4h', '1d'],
+        rsiPeriod,
+        requestId,
+        limit: options.limit ?? null,
+        scope: options.scope ?? 'manual',
+        suppressAlerts: !!options.suppressAlerts,
+      })
+      if (get().loading && result?.ok) _finishFetch(set, result.requestId, result.updatedAt ?? Date.now(), result.meta)
     } catch (err) {
       set({ loading: false, error: err.message })
       _cleanupSubs()

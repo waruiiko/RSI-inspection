@@ -1,17 +1,18 @@
 const { app, BrowserWindow, dialog, shell } = require('electron')
+const { Worker } = require('worker_threads')
 const fs             = require('fs')
+const path           = require('path')
 const { fetchOHLCV } = require('./data/provider')
 const binance        = require('./data/binance')
 const yahoo          = require('./data/yahoo')
-const { computeAll } = require('./indicators')
-const rsiIndicator   = require('./indicators/rsi')
 const { getAll, getCrypto, getStocks, getRuntimeAll } = require('./assets')
 const config         = require('./config')
 const { isUSMarketOpen } = require('./marketHours')
 
 const DEFAULT_TIMEFRAMES = ['15m', '1h', '4h', '1d']
-let _marketCache = null
-let _marketCacheDirty = false
+let _indicatorWorker = null
+let _indicatorSeq = 0
+const _indicatorPending = new Map()
 exports.register = (ipcMain) => {
 
   // Asset config management
@@ -63,6 +64,12 @@ exports.register = (ipcMain) => {
 
   ipcMain.handle('settings:get',  ()     => config.loadSettings())
   ipcMain.handle('settings:save', (_, s) => { config.saveSettings(s); return { ok: true } })
+  ipcMain.handle('settings:diagnostics', () => config.getDiagnostics())
+  ipcMain.handle('settings:cacheStats', () => config.getMarketCacheStats())
+  ipcMain.handle('settings:clearCache', () => {
+    return config.clearMarketCache()
+  })
+  ipcMain.handle('settings:cleanupInstallers', () => cleanupOldInstallers())
 
   ipcMain.handle('settings:exportConfig', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -108,12 +115,19 @@ exports.register = (ipcMain) => {
   })
 
   // Streaming: returns immediately, pushes chunks via event as each asset finishes
-  ipcMain.handle('market:fetch', async (event, { timeframes = DEFAULT_TIMEFRAMES, rsiPeriod = 14, requestId = Date.now() } = {}) => {
+  ipcMain.handle('market:fetch', async (event, {
+    timeframes = DEFAULT_TIMEFRAMES,
+    rsiPeriod = 14,
+    requestId = Date.now(),
+    limit = null,
+    scope = 'full',
+    suppressAlerts = false,
+  } = {}) => {
     const assets        = getRuntimeAll()
     const normalizedAssets = assets.map(normalizeAsset)
-    const cryptoAssets  = normalizedAssets.filter(a => a.source === 'binance')
-    const futuresAssets = normalizedAssets.filter(a => a.source === 'binance-futures')
-    const stockAssets   = normalizedAssets.filter(a => a.source === 'yahoo')
+    let cryptoAssets  = normalizedAssets.filter(a => a.source === 'binance')
+    let futuresAssets = normalizedAssets.filter(a => a.source === 'binance-futures')
+    let stockAssets   = normalizedAssets.filter(a => a.source === 'yahoo')
 
     const status = []
     const push = (data) => {
@@ -142,6 +156,21 @@ exports.register = (ipcMain) => {
       const message = futuresTickerResult.reason?.message ?? String(futuresTickerResult.reason)
       console.warn('[ipc] futures ticker fetch failed:', message)
       pushStatus({ level: 'warn', scope: 'Binance futures ticker', message })
+    }
+
+    if (limit && Number.isFinite(limit)) {
+      const ranked = [...cryptoAssets, ...futuresAssets]
+        .map(asset => ({
+          asset,
+          volume: tickerVolume(resolveTicker(asset.source === 'binance' ? spotTickers : futuresTickers, asset)),
+        }))
+        .sort((a, b) => b.volume - a.volume)
+        .slice(0, limit)
+        .map(x => x.asset)
+      const top = new Set(ranked.map(a => `${a.source}:${a.apiSymbol}`))
+      cryptoAssets = cryptoAssets.filter(a => top.has(`${a.source}:${a.apiSymbol}`))
+      futuresAssets = futuresAssets.filter(a => top.has(`${a.source}:${a.apiSymbol}`))
+      stockAssets = []
     }
 
     const cryptoJob = runWithConcurrency(cryptoAssets, 4, async asset => {
@@ -183,10 +212,10 @@ exports.register = (ipcMain) => {
 
     const updatedAt = Date.now()
     if (!event.sender.isDestroyed()) {
-      event.sender.send('market:done', { requestId, updatedAt, status })
+      event.sender.send('market:done', { requestId, updatedAt, status, meta: { scope, limit, timeframes, suppressAlerts } })
     }
 
-    return { ok: true, requestId, updatedAt }
+    return { ok: true, requestId, updatedAt, meta: { scope, limit, timeframes, suppressAlerts } }
   })
 
   // Raw OHLCV for future use (candlestick charts, custom indicators, etc.)
@@ -201,6 +230,31 @@ exports.register = (ipcMain) => {
   })
 }
 
+function cleanupOldInstallers() {
+  const distDir = path.join(__dirname, '..', 'dist')
+  if (!fs.existsSync(distDir)) return { ok: true, removed: [], kept: null }
+  const installers = fs.readdirSync(distDir)
+    .filter(name => /^市场RSI热力图 Setup .*\.exe$/.test(name))
+    .map(name => {
+      const file = path.join(distDir, name)
+      return { name, file, mtime: fs.statSync(file).mtimeMs }
+    })
+    .sort((a, b) => b.mtime - a.mtime)
+  const kept = installers[0] ?? null
+  const removed = []
+  for (const item of installers.slice(1)) {
+    for (const file of [item.file, `${item.file}.blockmap`]) {
+      try {
+        if (fs.existsSync(file)) {
+          fs.rmSync(file, { force: true })
+          removed.push(path.basename(file))
+        }
+      } catch {}
+    }
+  }
+  return { ok: true, kept: kept?.name ?? null, removed }
+}
+
 async function runWithConcurrency(items, concurrency, worker) {
   let nextIndex = 0
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
@@ -210,6 +264,42 @@ async function runWithConcurrency(items, concurrency, worker) {
     }
   })
   await Promise.all(workers)
+}
+
+function getIndicatorWorker() {
+  if (_indicatorWorker) return _indicatorWorker
+  const workerPath = path.join(__dirname, 'indicatorWorker.js')
+  const resolvedWorkerPath = app.isPackaged
+    ? workerPath.replace('app.asar', 'app.asar.unpacked')
+    : workerPath
+  _indicatorWorker = new Worker(resolvedWorkerPath)
+  _indicatorWorker.on('message', msg => {
+    const pending = _indicatorPending.get(msg.id)
+    if (!pending) return
+    _indicatorPending.delete(msg.id)
+    msg.ok ? pending.resolve(msg.result) : pending.reject(new Error(msg.error || 'indicator worker failed'))
+  })
+  _indicatorWorker.on('error', err => {
+    for (const pending of _indicatorPending.values()) pending.reject(err)
+    _indicatorPending.clear()
+    _indicatorWorker = null
+  })
+  _indicatorWorker.on('exit', code => {
+    if (code !== 0) {
+      for (const pending of _indicatorPending.values()) pending.reject(new Error(`indicator worker exited: ${code}`))
+      _indicatorPending.clear()
+    }
+    _indicatorWorker = null
+  })
+  return _indicatorWorker
+}
+
+function computeIndicatorData(payload) {
+  const id = ++_indicatorSeq
+  return new Promise((resolve, reject) => {
+    _indicatorPending.set(id, { resolve, reject })
+    getIndicatorWorker().postMessage({ id, payload })
+  })
 }
 
 async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
@@ -226,12 +316,11 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
     }
   }
 
-  const rsi = {}
-  for (const tf of timeframes) {
-    if (closedCandlesByTf[tf]?.length > rsiPeriod + 1) {
-      rsi[tf] = computeAll(closedCandlesByTf[tf], ['rsi'], { rsi: { period: rsiPeriod } }).rsi
-    }
-  }
+  const { rsi, sparkline, divergence, volumeSignal, signalScore } = await computeIndicatorData({
+    closedCandlesByTf,
+    timeframes,
+    rsiPeriod,
+  })
   if (Object.keys(rsi).length === 0) return null
 
   // Price from ticker (crypto) or last candle (stocks)
@@ -249,46 +338,13 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
 
   if (quoteVolume24h == null) quoteVolume24h = estimateTurnover(closedCandlesByTf)
 
-  // Sparkline: last 20 closes from longest available timeframe
-  let sparkline = []
-  for (const tf of ['1d', '4h', '1h', '15m']) {
-    const candles = closedCandlesByTf[tf]
-    if (candles?.length >= 10) {
-      sparkline = candles.slice(-20).map(c => c.close)
-      break
-    }
-  }
-
-  // RSI divergence per timeframe (last 30 bars)
-  const divergence = {}
-  const volumeSignal = {}
-  const signalScore = {}
-  for (const tf of timeframes) {
-    const candles = closedCandlesByTf[tf]
-    if (!candles || candles.length < rsiPeriod + 50) continue
-    const rsiSeries = rsiIndicator.computeSeriesFromCandles(candles, { period: rsiPeriod })
-    if (rsiSeries.length < 40) continue
-    divergence[tf] = detectDivergence(candles.slice(-50).map(c => c.close), rsiSeries.slice(-50))
-  }
-
-  for (const tf of timeframes) {
-    volumeSignal[tf] = detectVolumePriceSignal(closedCandlesByTf[tf])
-    signalScore[tf] = computeSignalScore({
-      rsi: rsi[tf],
-      divergence: divergence[tf],
-      volumeSignal: volumeSignal[tf],
-      higherTfTrend: tf !== '1d' ? detectTrend(closedCandlesByTf['1d']) : null,
-    })
-  }
-
   return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore }
 }
 
 async function fetchOHLCVWithRetry(asset, timeframe, attempts = 3) {
   const cacheKey = `${asset.source}:${asset.apiSymbol}:${timeframe}`
   const ttlMs = cacheTtlMs(timeframe)
-  const marketCache = getMarketCache()
-  const cached = marketCache[cacheKey]
+  const cached = config.loadMarketCacheEntry(cacheKey)
   if (cached?.candles?.length && Date.now() - (cached.savedAt ?? 0) < ttlMs) {
     return cached.candles
   }
@@ -297,8 +353,7 @@ async function fetchOHLCVWithRetry(asset, timeframe, attempts = 3) {
   for (let i = 0; i < attempts; i++) {
     try {
       const candles = await fetchOHLCV(asset, timeframe)
-      marketCache[cacheKey] = { savedAt: Date.now(), candles }
-      saveMarketCacheSoon()
+      config.saveMarketCacheEntry(cacheKey, { savedAt: Date.now(), candles })
       return candles
     } catch (err) {
       lastError = err
@@ -310,20 +365,6 @@ async function fetchOHLCVWithRetry(asset, timeframe, attempts = 3) {
   }
   if (cached?.candles?.length) return cached.candles
   throw lastError
-}
-
-function getMarketCache() {
-  if (!_marketCache) _marketCache = config.loadMarketCache()
-  return _marketCache
-}
-
-function saveMarketCacheSoon() {
-  if (_marketCacheDirty) return
-  _marketCacheDirty = true
-  setTimeout(() => {
-    _marketCacheDirty = false
-    config.saveMarketCache(_marketCache)
-  }, 500)
 }
 
 function cacheTtlMs(timeframe) {
@@ -356,6 +397,10 @@ function resolveTicker(tickers, asset) {
     || tickers[asset.symbol]
     || tickers[`${asset.symbol}USDT`]
     || null
+}
+
+function tickerVolume(ticker) {
+  return toNumber(ticker?.quoteVolume24h ?? ticker?.volume24h ?? ticker?.quoteVolume ?? ticker?.volume) ?? 0
 }
 
 function onlyClosedCandles(candles) {
@@ -613,18 +658,30 @@ function detectDivergence(closes, rsiSeries) {
   const r = rsiSeries.slice(-n)
   const last = n - 1
   const curPrice = c[last], curRsi = r[last]
+  if (curPrice == null || curRsi == null) return null
 
   const { peaks, troughs } = findLocalPivots(c)
 
-  // Bearish: last pivot peak where price < curPrice (higher price now) but RSI was higher then
+  const valid = i => c[i] != null && r[i] != null
+
+  // Bearish: price makes a higher high while RSI makes a lower high.
+  if (peaks.length >= 2) {
+    const [p1, p2] = peaks.slice(-2)
+    if (valid(p1) && valid(p2) && c[p2] > c[p1] * 0.997 && r[p2] < r[p1] - 3) return 'bearish'
+  }
   if (peaks.length >= 1) {
     const pk = peaks[peaks.length - 1]
-    if (curPrice > c[pk] * 0.997 && curRsi < r[pk] - 3) return 'bearish'
+    if (valid(pk) && curPrice > c[pk] * 0.997 && curRsi < r[pk] - 3) return 'bearish'
   }
-  // Bullish: last pivot trough where price > curPrice (lower price now) but RSI was lower then
+
+  // Bullish: price makes a lower low while RSI makes a higher low.
+  if (troughs.length >= 2) {
+    const [t1, t2] = troughs.slice(-2)
+    if (valid(t1) && valid(t2) && c[t2] < c[t1] * 1.003 && r[t2] > r[t1] + 3) return 'bullish'
+  }
   if (troughs.length >= 1) {
     const tr = troughs[troughs.length - 1]
-    if (curPrice < c[tr] * 1.003 && curRsi > r[tr] + 3) return 'bullish'
+    if (valid(tr) && curPrice < c[tr] * 1.003 && curRsi > r[tr] + 3) return 'bullish'
   }
   return null
 }

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { Fragment, useState, useMemo } from 'react'
 import useAlertStore  from '../store/alertStore'
 import useMarketStore from '../store/marketStore'
 import ChartModal from './ChartModal'
@@ -72,6 +72,38 @@ function itemColor(item) {
   return item.value > 0 ? 'feed-green' : 'feed-red'
 }
 
+function exportFeedCsv(items, assets) {
+  const rows = items.map(item => {
+    const a = assets.find(x => x.symbol === item.symbol || x.apiSymbol === item.symbol)
+    const current = a?.price ?? ''
+    const move = item.price && a?.price ? ((a.price - item.price) / item.price).toFixed(2) : ''
+    return [
+      new Date(item.ts).toLocaleString('zh-CN'),
+      item.symbol,
+      item.type,
+      item.timeframe ?? '',
+      item.condition ?? '',
+      item.threshold ?? '',
+      item.value ?? '',
+      item.price ?? '',
+      current,
+      move,
+      item.outcomes?.['1h']?.changePct?.toFixed(2) ?? '',
+      item.outcomes?.['4h']?.changePct?.toFixed(2) ?? '',
+      item.outcomes?.['24h']?.changePct?.toFixed(2) ?? '',
+    ]
+  })
+  const headers = ['时间', '品种', '类型', '周期', '条件', '阈值', '触发值', '触发价', '当前价', '当前涨跌%', '1h%', '4h%', '24h%']
+  const csv = [headers, ...rows].map(r => r.map(v => `"${String(v).replaceAll('"', '""')}"`).join(',')).join('\n')
+  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `alert-feed-${new Date().toISOString().slice(0, 10)}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
 export default function AlertFeed() {
   const feed      = useAlertStore(s => s.feed)
   const clearFeed = useAlertStore(s => s.clearFeed)
@@ -131,6 +163,9 @@ export default function AlertFeed() {
           )}
           {feed.length > 0 && (
             <button className="feed-clear-btn" onClick={clearFeed}>清除</button>
+          )}
+          {feed.length > 0 && (
+            <button className="feed-clear-btn" onClick={() => exportFeedCsv(visible, assets)}>导出</button>
           )}
         </div>
       </div>
@@ -203,6 +238,19 @@ export default function AlertFeed() {
               <b style={{ color: currentMove == null ? 'var(--muted)' : currentMove >= 0 ? '#22c55e' : '#ef4444' }}>
                 {currentMove == null ? '-' : `${currentMove >= 0 ? '+' : ''}${currentMove.toFixed(2)}%`}
               </b>
+              {['1h', '4h', '24h'].map(key => {
+                const outcome = selectedItem.outcomes?.[key]
+                return (
+                  <Fragment key={key}>
+                    <span>{key}结果</span>
+                    <b style={{
+                      color: outcome == null ? 'var(--muted)' : outcome.changePct >= 0 ? '#22c55e' : '#ef4444',
+                    }}>
+                      {outcome == null ? '等待记录' : `${outcome.changePct >= 0 ? '+' : ''}${outcome.changePct.toFixed(2)}%`}
+                    </b>
+                  </Fragment>
+                )
+              })}
             </div>
             <div className="review-actions">
               <button className="zone-btn" onClick={() => setFlash(selectedItem.symbol)}>在首页定位</button>

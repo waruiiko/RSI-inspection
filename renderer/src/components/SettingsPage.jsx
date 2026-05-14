@@ -51,7 +51,7 @@ export default function SettingsPage() {
     refreshInterval, alertCooldown, popupEnabled, soundEnabled,
     startMinimized, rsiPeriod, rsiOverbought, rsiOversold,
     rsiMaType, rsiMaLength, rsiBbMult,
-    popupMinLevel, soundMinLevel, webhookMinLevel, autoCheckUpdates,
+    popupMinLevel, soundMinLevel, webhookMinLevel, levelCooldowns, autoCheckUpdates,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook,
     update,
@@ -60,10 +60,26 @@ export default function SettingsPage() {
   const [autoLaunch,     setAutoLaunch]     = useState(false)
   const [autoLaunchBusy, setAutoLaunchBusy] = useState(true)
   const [settingsMsg,    setSettingsMsg]    = useState('')
+  const [diagnostics,    setDiagnostics]    = useState(null)
+  const [cacheStats,     setCacheStats]     = useState(null)
 
   useEffect(() => {
     window.api.getAutoLaunch().then(v => { setAutoLaunch(v); setAutoLaunchBusy(false) })
+    refreshDiagnostics()
   }, [])
+
+  const refreshDiagnostics = async () => {
+    const [diag, cache] = await Promise.all([
+      window.api.getDiagnostics(),
+      window.api.getCacheStats(),
+    ])
+    setDiagnostics(diag)
+    setCacheStats(cache)
+  }
+
+  const updateLevelCooldown = (level, hours) => {
+    update('levelCooldowns', { ...(levelCooldowns ?? {}), [level]: hours })
+  }
 
   const handleAutoLaunch = async (e) => {
     const v = e.target.checked
@@ -85,7 +101,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.0.4
+          v1.0.5
         </span>
       </div>
 
@@ -94,6 +110,26 @@ export default function SettingsPage() {
         {/* ── 系统 ── */}
         <div className="settings-section">
           <SectionTitle>系统</SectionTitle>
+          <Row label="发布前体检" hint="检查配置、提醒、缓存和通知配置是否正常">
+            <button
+              className="zone-btn"
+              style={{ fontSize: 11, padding: '3px 10px' }}
+              onClick={refreshDiagnostics}
+            >
+              重新检查
+            </button>
+          </Row>
+          {diagnostics && (
+            <div className="diagnostics-grid">
+              {diagnostics.checks.map(c => (
+                <div key={c.key} className={`diagnostic-chip ${c.ok ? 'ok' : 'warn'}`}>
+                  <span>{c.ok ? '✓' : '!'}</span>
+                  <b>{c.label}</b>
+                  <em>{c.detail}</em>
+                </div>
+              ))}
+            </div>
+          )}
           <Row label="开机自动启动" hint="登录后自动在后台运行">
             <Toggle checked={autoLaunch} disabled={autoLaunchBusy} onChange={handleAutoLaunch} />
           </Row>
@@ -184,6 +220,25 @@ export default function SettingsPage() {
               format={v => `${v} 分钟`}
             />
           </Row>
+
+          <Row label="K线缓存" hint="缓存可减少重复请求；接口失败时也可回退到上次数据">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: 'var(--dim)', fontSize: 11 }}>
+                {cacheStats ? `${cacheStats.entries} 条 · ${formatBytes(cacheStats.sizeBytes)}` : '读取中'}
+              </span>
+              <button
+                className="zone-btn"
+                style={{ fontSize: 11, padding: '3px 10px' }}
+                onClick={async () => {
+                  const r = await window.api.clearCache()
+                  setCacheStats(r)
+                  setSettingsMsg('K线缓存已清理')
+                }}
+              >
+                清理缓存
+              </button>
+            </div>
+          </Row>
         </div>
 
         {/* ── 提醒 ── */}
@@ -258,6 +313,25 @@ export default function SettingsPage() {
             />
           </Row>
 
+          <Row label="分级冷却" hint="不同等级可使用不同冷却时间；未设置时使用全局冷却">
+            <div className="settings-btn-group">
+              {[1, 2, 3].map(level => (
+                <label key={level} className="level-cooldown">
+                  <span>{level}级</span>
+                  <input
+                    className="alert-num-input"
+                    type="number"
+                    min="0.25"
+                    step="0.25"
+                    value={levelCooldowns?.[level] ?? alertCooldown}
+                    onChange={e => updateLevelCooldown(level, Number(e.target.value) || alertCooldown)}
+                  />
+                  <span>小时</span>
+                </label>
+              ))}
+            </div>
+          </Row>
+
           <Row label="弹窗等级" hint="只对达到该等级的提醒弹窗">
             <BtnGroup options={LEVEL_OPTIONS} value={popupMinLevel} onChange={v => update('popupMinLevel', v)} format={v => `${v}级+`} />
           </Row>
@@ -298,6 +372,18 @@ export default function SettingsPage() {
               }}
             >
               导入
+            </button>
+          </Row>
+          <Row label="清理安装包" hint="删除 dist 目录中的旧安装包，仅保留最新版本">
+            <button
+              className="zone-btn"
+              style={{ fontSize: 11, padding: '3px 10px' }}
+              onClick={async () => {
+                const r = await window.api.cleanupInstallers()
+                setSettingsMsg(`已清理 ${r.removed?.length ?? 0} 个旧文件，保留：${r.kept ?? '无'}`)
+              }}
+            >
+              清理旧安装包
             </button>
           </Row>
           {settingsMsg && <div className="settings-note">{settingsMsg}</div>}
@@ -360,4 +446,11 @@ export default function SettingsPage() {
       </div>
     </div>
   )
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
 }

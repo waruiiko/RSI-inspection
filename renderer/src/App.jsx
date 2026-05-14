@@ -49,13 +49,34 @@ function matchesStrategy(cfg, sig) {
 function StatusBanner() {
   const events = useMarketStore(s => s.statusEvents)
   const clearStatus = useMarketStore(s => s.clearStatus)
+  const [open, setOpen] = useState(false)
   if (!events.length) return null
   const latest = events[0]
   return (
     <div className="status-banner">
       <span>数据状态：{latest.scope} - {latest.message}</span>
       {events.length > 1 && <span className="status-count">另有 {events.length - 1} 条</span>}
+      <button onClick={() => setOpen(true)}>详情</button>
       <button onClick={clearStatus}>清除</button>
+      {open && (
+        <div className="status-overlay" onClick={() => setOpen(false)}>
+          <div className="status-panel" onClick={e => e.stopPropagation()}>
+            <div className="review-head">
+              <strong>异常提醒中心</strong>
+              <button className="chart-modal-close" onClick={() => setOpen(false)}>×</button>
+            </div>
+            <div className="status-list">
+              {events.map((e, i) => (
+                <div key={`${e.ts}-${i}`} className="status-row">
+                  <b>{e.scope}</b>
+                  <span>{e.message}</span>
+                  <em>{new Date(e.ts).toLocaleTimeString('zh-CN')}</em>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -67,6 +88,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
+const APP_VERSION = 'v1.0.5'
 
 function SummaryBar({ assets, timeframe }) {
   const counts = useMemo(() => {
@@ -167,6 +189,7 @@ export default function App() {
   const assets     = useMarketStore(s => s.assets)
   const updatedAt  = useMarketStore(s => s.updatedAt)
   const completedAt = useMarketStore(s => s.completedAt)
+  const completedMeta = useMarketStore(s => s.completedMeta)
   const setFlash   = useMarketStore(s => s.setFlash)
   const filter     = useMarketStore(s => s.filter)
   const timeframe  = useMarketStore(s => s.timeframe)
@@ -175,11 +198,12 @@ export default function App() {
   const configs         = useAlertStore(s => s.configs)
   const updateLastFired = useAlertStore(s => s.updateLastFired)
   const addFeedItems    = useAlertStore(s => s.addFeedItems)
+  const updateFeed      = useAlertStore(s => s.updateFeed)
   const loadAlerts      = useAlertStore(s => s.load)
   const syncFollowTop   = useAlertStore(s => s.syncFollowTop)
 
   const {
-    refreshInterval, alertCooldown, popupEnabled, soundEnabled,
+    refreshInterval, alertCooldown, levelCooldowns, popupEnabled, soundEnabled,
     silentStart, silentEnd, telegramToken, telegramChatId, discordWebhook,
     popupMinLevel, soundMinLevel, webhookMinLevel, autoCheckUpdates,
     loaded: settingsLoaded, load: loadSettings,
@@ -189,6 +213,7 @@ export default function App() {
   const assetsRef     = useRef(assets)
   const prevAssetsRef = useRef(null)
   const cooldownRef   = useRef(alertCooldown * 60 * 60 * 1000)
+  const levelCooldownRef = useRef(levelCooldowns)
   const popupRef      = useRef(popupEnabled)
   const soundRef      = useRef(soundEnabled)
   const silentRef     = useRef({ start: silentStart, end: silentEnd })
@@ -197,6 +222,7 @@ export default function App() {
   configsRef.current  = configs
   assetsRef.current   = assets
   cooldownRef.current = alertCooldown * 60 * 60 * 1000
+  levelCooldownRef.current = levelCooldowns
   popupRef.current    = popupEnabled
   soundRef.current    = soundEnabled
   silentRef.current   = { start: silentStart, end: silentEnd }
@@ -206,6 +232,7 @@ export default function App() {
   const focusSearch  = useMarketStore(s => s.focusSearch)
   const setTimeframe = useMarketStore(s => s.setTimeframe)
   const [activeTab, setActiveTab] = useState('market')
+  const [updateInfo, setUpdateInfo] = useState(null)
 
   const loadGroups = useGroupsStore(s => s.load)
 
@@ -232,14 +259,31 @@ export default function App() {
 
   useEffect(() => {
     if (!settingsLoaded) return
-    fetchData()
-    const t = setInterval(fetchData, refreshInterval * 60 * 1000)
-    return () => clearInterval(t)
+    const fullFetch = () => fetchData({ scope: 'scheduled-full' })
+    const timers = []
+    fetchData({ timeframes: ['4h'], limit: 50, scope: 'startup-top50-4h', suppressAlerts: true })
+    timers.push(setTimeout(() => {
+      fetchData({ timeframes: ['15m', '1h', '1d'], limit: 50, scope: 'startup-top50-rest', suppressAlerts: true })
+    }, 2 * 60 * 1000))
+    timers.push(setTimeout(() => {
+      fetchData({ timeframes: ['15m', '1h', '4h', '1d'], scope: 'startup-full', suppressAlerts: true })
+    }, 5 * 60 * 1000))
+    const intervalDelay = Math.max(refreshInterval * 60 * 1000, 6 * 60 * 1000)
+    timers.push(setTimeout(() => {
+      fullFetch()
+      const interval = setInterval(fullFetch, refreshInterval * 60 * 1000)
+      timers.push(interval)
+    }, intervalDelay))
+    return () => timers.forEach(clearTimeout)
   }, [refreshInterval, settingsLoaded])
 
   useEffect(() => {
     if (!settingsLoaded || !autoCheckUpdates) return
-    window.api.checkForUpdates?.(false).catch(err => console.warn('[update-check]', err))
+    window.api.checkForUpdates?.(false)
+      .then(info => {
+        if (info?.tag && info.tag !== APP_VERSION) setUpdateInfo(info)
+      })
+      .catch(err => console.warn('[update-check]', err))
   }, [settingsLoaded, autoCheckUpdates])
 
   useEffect(() => {
@@ -251,6 +295,10 @@ export default function App() {
 
   useEffect(() => {
     if (!completedAt) return
+    if (completedMeta?.suppressAlerts) {
+      prevAssetsRef.current = [...assetsRef.current]
+      return
+    }
     if (!prevAssetsRef.current) {
       prevAssetsRef.current = [...assetsRef.current]
       return
@@ -260,7 +308,11 @@ export default function App() {
     const fired = []
     const firedBatchKeys = new Set()
     const marketOpen = isUSMarketOpen()
-    const COOLDOWN_MS = cooldownRef.current
+    const cooldownFor = cfg => {
+      const level = cfg.alertLevel ?? (cfg.special ? 3 : 1)
+      const hours = levelCooldownRef.current?.[level] ?? alertCooldown
+      return hours * 60 * 60 * 1000
+    }
 
     const followLimit = configsRef.current.find(c => c.followTop)?.followTopLimit
     if (followLimit) {
@@ -279,7 +331,7 @@ export default function App() {
         notifData.signal ?? notifData.condition ?? key,
       ].join('|')
       if (firedBatchKeys.has(batchKey)) return
-      if (now - (cfg.lastFired?.[key] ?? 0) < COOLDOWN_MS) return
+      if (now - (cfg.lastFired?.[key] ?? 0) < cooldownFor(cfg)) return
       updateLastFired(cfg.id, key)
       firedBatchKeys.add(batchKey)
       const level = cfg.alertLevel ?? (cfg.special ? 3 : 1)
@@ -384,6 +436,29 @@ export default function App() {
       if (!silent && soundRef.current && soundItems.length) playAlertSound()
       if (webhookItems.length) sendWebhooks(webhookItems, webhookRef.current)
     }
+
+    updateFeed(feed => {
+      let changed = false
+      const next = feed.map(item => {
+        if (!item.price || !item.ts) return item
+        const asset = assetsRef.current.find(a => matchesAssetRef(a, item.symbol))
+        if (!asset?.price) return item
+        const outcomes = { ...(item.outcomes ?? {}) }
+        let itemChanged = false
+        for (const [key, ms] of Object.entries({ '1h': 60 * 60 * 1000, '4h': 4 * 60 * 60 * 1000, '24h': 24 * 60 * 60 * 1000 })) {
+          if (outcomes[key] || now - item.ts < ms) continue
+          outcomes[key] = {
+            price: asset.price,
+            changePct: ((asset.price - item.price) / item.price) * 100,
+            ts: now,
+          }
+          itemChanged = true
+          changed = true
+        }
+        return itemChanged ? { ...item, outcomes } : item
+      })
+      return changed ? next : feed
+    })
   }, [completedAt])
 
   /* 鈹€鈹€ Filtered assets for summary bar 鈹€鈹€ */
@@ -396,6 +471,13 @@ export default function App() {
   return (
     <div className="app">
       <Toolbar activeTab={activeTab} setActiveTab={setActiveTab} />
+      {updateInfo && (
+        <div className="update-banner">
+          <span>发现新版本：{updateInfo.tag}</span>
+          <button onClick={() => window.api.checkForUpdates(true)}>查看发布页</button>
+          <button onClick={() => setUpdateInfo(null)}>忽略</button>
+        </div>
+      )}
 
       {activeTab === 'manage' ? (
         <ManagePage onSaved={() => { setActiveTab('market'); fetchData() }} />

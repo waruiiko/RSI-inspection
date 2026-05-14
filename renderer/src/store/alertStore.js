@@ -74,6 +74,12 @@ const useAlertStore = create((set, get) => ({
     _persist(configs)
   },
 
+  bulkSetTimeframes: (timeframes) => {
+    const configs = get().configs.map(c => ({ ...c, timeframes }))
+    set({ configs })
+    _persist(configs)
+  },
+
   syncFollowTop: (symbols) => {
     const current = normalizeAlertConfigs(get().configs)
     const template = current.find(c => c.followTop)
@@ -132,6 +138,14 @@ const useAlertStore = create((set, get) => ({
   clearFeed: () => {
     set({ feed: [] })
     window.api.saveFeed([])
+  },
+
+  updateFeed: (updater) => {
+    const current = get().feed
+    const next = typeof updater === 'function' ? updater(current) : updater
+    if (next === current) return
+    set({ feed: next })
+    window.api.saveFeed(next)
   },
 
   updateLastFired: (id, key) => {

@@ -50,6 +50,10 @@ contextBridge.exposeInMainWorld('api', {
   // Settings
   getSettings:     ()        => ipcRenderer.invoke('settings:get'),
   saveSettings:    (s)       => ipcRenderer.invoke('settings:save', s),
+  getDiagnostics:  ()        => ipcRenderer.invoke('settings:diagnostics'),
+  getCacheStats:   ()        => ipcRenderer.invoke('settings:cacheStats'),
+  clearCache:      ()        => ipcRenderer.invoke('settings:clearCache'),
+  cleanupInstallers: ()      => ipcRenderer.invoke('settings:cleanupInstallers'),
   exportConfig:    ()        => ipcRenderer.invoke('settings:exportConfig'),
   importConfig:    ()        => ipcRenderer.invoke('settings:importConfig'),
   checkForUpdates: (openRelease = true) => ipcRenderer.invoke('settings:checkUpdates', openRelease),

@@ -109,19 +109,36 @@ function findDivergencePoints(candles, rsiVals) {
   if (rsi.some(v => v == null)) return null
   const last = WINDOW - 1
   const curPrice = closes[last], curRsi = rsi[last]
+  if (curPrice == null || curRsi == null) return null
 
   const { peaks, troughs } = findLocalPivots(closes)
+  const valid = i => closes[i] != null && rsi[i] != null
 
+  if (peaks.length >= 2) {
+    const [p1, p2] = peaks.slice(-2)
+    if (valid(p1) && valid(p2) && closes[p2] > closes[p1] * 0.997 && rsi[p2] < rsi[p1] - 3)
+      return { type: 'bearish', pivotIdx: startIdx + p1, currentIdx: startIdx + p2,
+               pivotPrice: closes[p1], currentPrice: closes[p2],
+               pivotRsi: rsi[p1], currentRsi: rsi[p2] }
+  }
   if (peaks.length >= 1) {
     const pk = peaks[peaks.length - 1]
-    if (curPrice > closes[pk] * 0.997 && curRsi < rsi[pk] - 3)
+    if (valid(pk) && curPrice > closes[pk] * 0.997 && curRsi < rsi[pk] - 3)
       return { type: 'bearish', pivotIdx: startIdx + pk, currentIdx: candles.length - 1,
                pivotPrice: closes[pk], currentPrice: curPrice,
                pivotRsi: rsi[pk], currentRsi: curRsi }
   }
+
+  if (troughs.length >= 2) {
+    const [t1, t2] = troughs.slice(-2)
+    if (valid(t1) && valid(t2) && closes[t2] < closes[t1] * 1.003 && rsi[t2] > rsi[t1] + 3)
+      return { type: 'bullish', pivotIdx: startIdx + t1, currentIdx: startIdx + t2,
+               pivotPrice: closes[t1], currentPrice: closes[t2],
+               pivotRsi: rsi[t1], currentRsi: rsi[t2] }
+  }
   if (troughs.length >= 1) {
     const tr = troughs[troughs.length - 1]
-    if (curPrice < closes[tr] * 1.003 && curRsi > rsi[tr] + 3)
+    if (valid(tr) && curPrice < closes[tr] * 1.003 && curRsi > rsi[tr] + 3)
       return { type: 'bullish', pivotIdx: startIdx + tr, currentIdx: candles.length - 1,
                pivotPrice: closes[tr], currentPrice: curPrice,
                pivotRsi: rsi[tr], currentRsi: curRsi }
