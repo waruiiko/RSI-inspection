@@ -1,17 +1,12 @@
-/* ============================================================
-   index_v2.css — 市场RSI热力图 升级版样式
-   改动：
-   1. 精炼配色 — 深海蓝调，蓝色光晕，更高对比度
-   2. 字体层级 — 6档 (10/11/12/13/14/16px) + uppercase section labels
-   3. 卡片系统 — 10px 圆角，subtle fills，更清晰的层次
-   4. 组件细节 — 下划线标签、进度条、badge 等
-   ============================================================ */
+﻿/* ============================================================
+   index_v2.css 鈥?甯傚満RSI鐑姏鍥?鍗囩骇鐗堟牱寮?   鏀瑰姩锛?   1. 绮剧偧閰嶈壊 鈥?娣辨捣钃濊皟锛岃摑鑹插厜鏅曪紝鏇撮珮瀵规瘮搴?   2. 瀛椾綋灞傜骇 鈥?6妗?(10/11/12/13/14/16px) + uppercase section labels
+   3. 鍗＄墖绯荤粺 鈥?10px 鍦嗚锛宻ubtle fills锛屾洿娓呮櫚鐨勫眰娆?   4. 缁勪欢缁嗚妭 鈥?涓嬪垝绾挎爣绛俱€佽繘搴︽潯銆乥adge 绛?   ============================================================ */
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-/* ── Color tokens ──────────────────────────────────────────── */
+/* 鈹€鈹€ Color tokens 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 :root {
-  /* Backgrounds — deeper blue-tinted darks */
+  /* Backgrounds 鈥?deeper blue-tinted darks */
   --bg:      #080d13;
   --bg2:     #0d1421;
   --bg3:     #131d2e;
@@ -85,7 +80,7 @@ body {
   overflow: hidden;
 }
 
-/* ── Layout ────────────────────────────────────────────────── */
+/* 鈹€鈹€ Layout 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .app {
   display: flex;
   flex-direction: column;
@@ -102,13 +97,45 @@ body {
   min-height: 0;
 }
 
+.market-layout {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 340px);
+  gap: 10px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.market-main-column {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
 .heatmap-wrapper {
   flex: 0 0 200px;
   min-height: 0;
   overflow: hidden;
 }
 
-/* ── Toolbar ────────────────────────────────────────────────── */
+.market-table-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.market-table-wrap > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 鈹€鈹€ Toolbar 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .toolbar {
   display: flex;
   flex-direction: column;
@@ -126,7 +153,7 @@ body {
   gap: 8px;
 }
 
-/* Row 1: brand + underline tabs — full height for tab border flush */
+/* Row 1: brand + underline tabs 鈥?full height for tab border flush */
 .toolbar-top {
   gap: 0;
   height: 44px;
@@ -142,7 +169,7 @@ body {
   margin-right: 6px;
 }
 
-/* ── Underline tab nav (replaces .tab-group) ─────────────────── */
+/* 鈹€鈹€ Underline tab nav (replaces .tab-group) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .tab-group {
   display: flex;
   align-self: stretch;
@@ -166,14 +193,14 @@ body {
 .tab-group button:hover    { color: var(--text); }
 .tab-group button.active   { color: var(--blue-link); font-weight: 600; border-bottom-color: var(--blue); }
 
-/* ── Controls row ──────────────────────────────────────────── */
+/* 鈹€鈹€ Controls row 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .toolbar-controls {
   gap: 8px;
   padding: 0 0 6px;
   align-items: center;
 }
 
-/* ── Btn group (pill selector) ─────────────────────────────── */
+/* 鈹€鈹€ Btn group (pill selector) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .btn-group {
   display: flex;
   background: var(--bg3);
@@ -204,7 +231,7 @@ body {
   font-weight: 600;
 }
 
-/* ── Refresh button ─────────────────────────────────────────── */
+/* 鈹€鈹€ Refresh button 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .refresh-btn {
   width: 30px;
   height: 30px;
@@ -237,7 +264,7 @@ body {
   cursor: default;
 }
 
-/* ── Market status dot ─────────────────────────────────────── */
+/* 鈹€鈹€ Market status dot 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .market-status {
   display: flex;
   align-items: center;
@@ -265,7 +292,7 @@ body {
   50%       { box-shadow: 0 0 8px var(--green); }
 }
 
-/* ── Sentiment bar ─────────────────────────────────────────── */
+/* 鈹€鈹€ Sentiment bar 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .sentiment-bar-wrap {
   display: flex;
   flex-direction: column;
@@ -290,7 +317,7 @@ body {
   white-space: nowrap;
 }
 
-/* ── Chart RSI stats ──────────────────────────────────────── */
+/* 鈹€鈹€ Chart RSI stats 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .chart-rsi-stats {
   flex-shrink: 0;
   display: flex;
@@ -302,7 +329,7 @@ body {
   border-top: 1px solid var(--border);
 }
 
-/* ── Alert test button ────────────────────────────────────── */
+/* 鈹€鈹€ Alert test button 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .rule-test-btn {
   padding: 2px 7px;
   font-size: var(--text-sm);
@@ -315,7 +342,7 @@ body {
 }
 .rule-test-btn:hover { background: rgba(59,130,246,0.25); }
 
-/* ── Splash / loading ─────────────────────────────────────── */
+/* 鈹€鈹€ Splash / loading 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .splash {
   flex: 1;
   display: flex;
@@ -338,11 +365,12 @@ body {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Table section ────────────────────────────────────────── */
+/* 鈹€鈹€ Table section 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .table-section {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 0;
   gap: 8px;
 }
@@ -350,6 +378,7 @@ body {
 .table-search {
   display: flex;
   gap: 6px;
+  flex-wrap: wrap;
   flex-shrink: 0;
   align-items: center;
 }
@@ -395,7 +424,7 @@ body {
 }
 .search-btn:hover { background: var(--blue); color: #fff; border-color: var(--blue); }
 
-/* ── Table wrapper (card style) ──────────────────────────── */
+/* 鈹€鈹€ Table wrapper (card style) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .table-wrapper {
   flex: 1;
   overflow-y: auto;
@@ -440,7 +469,7 @@ body {
   background: rgba(37, 99, 235, 0.18);
 }
 
-/* Pinned rows — amber accent */
+/* Pinned rows 鈥?amber accent */
 .stats-table tr.row-pinned td {
   background: rgba(245, 158, 11, 0.04);
 }
@@ -482,7 +511,7 @@ body {
 
 .export-btn { margin-left: 2px; }
 
-/* ── Pin button ───────────────────────────────────────────── */
+/* 鈹€鈹€ Pin button 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .pin-btn {
   display: inline-flex;
   align-items: center;
@@ -503,7 +532,7 @@ body {
 .stats-table tr:hover .pin-btn { opacity: 1; }
 .pin-btn:hover { background: var(--bg4); color: var(--amber); }
 
-/* ── Type badges ──────────────────────────────────────────── */
+/* 鈹€鈹€ Type badges 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .badge {
   display: inline-block;
   padding: 1px 5px;
@@ -517,27 +546,20 @@ body {
 .badge-stock  { background: rgba(34, 197, 94, 0.15);  color: var(--green); }
 .badge-tradfi { background: rgba(245, 158, 11, 0.15); color: var(--amber); }
 
-/* ── Sort icons ───────────────────────────────────────────── */
+/* 鈹€鈹€ Sort icons 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .th-sort { cursor: pointer; user-select: none; white-space: nowrap; }
 .th-sort:hover { color: var(--text); }
 .sort-icon        { margin-left: 3px; font-size: 10px; }
 .sort-icon.dim    { color: var(--border2); }
 .sort-icon.active { color: var(--blue); }
 
-/* ── Market bottom (table + feed) ────────────────────────── */
-.market-bottom {
-  flex: 1;
-  display: flex;
-  gap: 10px;
-  min-height: 0;
-  overflow: hidden;
-}
-
-/* ── Alert Feed ───────────────────────────────────────────── */
+/* 鈹€鈹€ Market bottom (table + feed) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
+/* Alert Feed */
 .alert-feed {
-  flex: 0 0 260px;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
@@ -548,6 +570,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
   padding: 9px 12px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -576,14 +600,19 @@ body {
 
 .feed-filters {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 6px;
-  padding: 5px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 
-.feed-type-btns { display: flex; gap: 2px; }
+.feed-type-btns {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
 
 .feed-type-btn {
   padding: 2px 7px;
@@ -601,10 +630,10 @@ body {
 .feed-type-btn.active { background: var(--bg3); color: var(--text); border-color: var(--blue); }
 
 .feed-sym-search {
-  flex: 1;
+  width: 100%;
   min-width: 0;
-  max-width: 80px;
-  padding: 2px 7px;
+  max-width: none;
+  padding: 6px 8px;
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -635,7 +664,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 7px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid rgba(30, 45, 69, 0.6);
   border-left: 3px solid transparent;
   font-size: var(--text-sm);
@@ -654,6 +683,12 @@ body {
 }
 
 .feed-msg { color: var(--muted); }
+
+@media (max-width: 1380px) {
+  .market-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(290px, 310px);
+  }
+}
 
 .feed-item.feed-red    .feed-msg { color: #ef4444; }
 .feed-item.feed-green  .feed-msg { color: #22c55e; }
@@ -676,6 +711,7 @@ body {
   text-decoration-color: var(--border2);
 }
 .feed-symbol:hover { opacity: 0.75; }
+
 
 .review-overlay {
   position: fixed;
@@ -801,7 +837,7 @@ body {
 }
 .update-banner button:hover { color: var(--text); }
 
-/* ── Zone filter ──────────────────────────────────────────── */
+/* 鈹€鈹€ Zone filter 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .zone-filter { position: relative; }
 
 .zone-btn {
@@ -868,7 +904,7 @@ body {
 }
 .zone-actions button:hover { color: var(--text); }
 
-/* ── Toggle switch ────────────────────────────────────────── */
+/* 鈹€鈹€ Toggle switch 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .toggle-switch { display: inline-flex; align-items: center; cursor: pointer; }
 .toggle-switch input { display: none; }
 .toggle-track {
@@ -894,7 +930,7 @@ body {
 .toggle-switch input:checked + .toggle-track { background: var(--blue); }
 .toggle-switch input:checked + .toggle-track::after { transform: translateX(14px); }
 
-/* ── Alert Page ───────────────────────────────────────────── */
+/* 鈹€鈹€ Alert Page 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .alert-page {
   flex: 1;
   display: flex;
@@ -1226,7 +1262,7 @@ body {
 .feed-item.feed-special { border-left: 3px solid var(--amber); }
 .feed-star { color: var(--amber); font-size: var(--text-xs); margin-right: 3px; }
 
-/* ── Alert exists badge / tf tags ────────────────────────── */
+/* 鈹€鈹€ Alert exists badge / tf tags 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .pair-item.has-alert {
   background: rgba(245, 158, 11, 0.06);
   border-left: 2px solid rgba(245, 158, 11, 0.45);
@@ -1256,7 +1292,7 @@ body {
   letter-spacing: 0.02em;
 }
 
-/* ── Manage Page ──────────────────────────────────────────── */
+/* 鈹€鈹€ Manage Page 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .manage-page {
   flex: 1;
   display: flex;
@@ -1438,7 +1474,7 @@ body {
 }
 .time-input:focus { border-color: var(--blue); }
 
-/* ── Settings Page ────────────────────────────────────────── */
+/* 鈹€鈹€ Settings Page 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .settings-page {
   flex: 1;
   display: flex;
@@ -1556,7 +1592,7 @@ body {
 .settings-btn-group button:hover  { background: var(--bg4); color: var(--text); }
 .settings-btn-group button.active { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 600; }
 
-/* ── Chart Modal ──────────────────────────────────────────── */
+/* 鈹€鈹€ Chart Modal 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 .chart-modal-overlay {
   position: fixed;
   inset: 0;
@@ -1634,7 +1670,7 @@ body {
   font-size: var(--text-body);
 }
 
-/* ── Scrollbar ────────────────────────────────────────────── */
+/* 鈹€鈹€ Scrollbar 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 ::-webkit-scrollbar       { width: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }

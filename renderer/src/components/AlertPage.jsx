@@ -19,6 +19,7 @@ const RULE_TEMPLATES = [
   { name: '量价突破', timeframes: ['4h', '1d'], customMode: false, strategies: ['breakout'], minScore: 4, alertLevel: 2 },
 ]
 const ALERT_LEVELS = [
+  { value: 'auto', label: '按周期' },
   { value: 1, label: '一级提醒' },
   { value: 2, label: '二级提醒' },
   { value: 3, label: '三级提醒' },
@@ -60,6 +61,12 @@ function getLevelLabel(rule) {
   return ALERT_LEVELS.find(l => l.value === level)?.label ?? '一级提醒'
 }
 
+function inferAlertLevel(timeframes = []) {
+  if (timeframes.includes('1d')) return 3
+  if (timeframes.includes('4h')) return 2
+  return 1
+}
+
 function describeRule(rule, selectedSize = 1) {
   const scope = rule.followTop ? `成交额 Top${rule.followTopLimit ?? 50}` : selectedSize > 1 ? `${selectedSize} 个品种` : rule.symbol
   const parts = [
@@ -97,7 +104,7 @@ export default function AlertPage() {
   const [selected,    setSelected]    = useState(new Set())
   const [timeframes,    setTimeframes]    = useState(new Set(['1h', '4h', '1d']))
   const [requireAllTf, setRequireAllTf]  = useState(false)
-  const [alertLevel,   setAlertLevel]    = useState(1)
+  const [alertLevel,   setAlertLevel]    = useState('auto')
   const [followTop,    setFollowTop]     = useState(false)
   const [editingId,    setEditingId]     = useState(null)
   const [rsiAbove,     setRsiAbove]      = useState('')
@@ -121,7 +128,7 @@ export default function AlertPage() {
   const applyTemplate = (tpl) => {
     setTimeframes(new Set(tpl.timeframes))
     setRequireAllTf(!!tpl.requireAllTf)
-    setAlertLevel(tpl.alertLevel ?? 1)
+    setAlertLevel(tpl.alertLevel ?? 'auto')
     setCustomMode(!!tpl.customMode)
     setRsiAbove(tpl.rsiAbove ?? '')
     setRsiBelow(tpl.rsiBelow ?? '')
@@ -201,7 +208,7 @@ export default function AlertPage() {
     setCustomMode(false)
     setStrategies(DEFAULT_STRATEGIES)
     setMinScore(4)
-    setAlertLevel(2)
+    setAlertLevel('auto')
     setFollowTop(true)
     setError(top.length ? '' : '当前没有可用于 Top50 的市场数据，请先刷新')
   }
@@ -277,11 +284,12 @@ export default function AlertPage() {
     if (pb != null && (isNaN(pb) || pb <= 0))             { setError('价格跌破：请输入正数'); return }
 
     setError('')
+    const resolvedLevel = alertLevel === 'auto' ? inferAlertLevel([...timeframes]) : alertLevel
     const fields = {
       timeframes: [...timeframes],
       requireAllTf,
-      alertLevel,
-      special: alertLevel >= 2,
+      alertLevel: resolvedLevel,
+      special: resolvedLevel >= 2,
       followTop,
       followTopLimit: followTop ? 50 : null,
       rsiAbove: ra, rsiBelow: rb,
@@ -301,7 +309,7 @@ export default function AlertPage() {
       upsert([...selected], fields)
     }
     setSelected(new Set())
-    setAlertLevel(1)
+    setAlertLevel('auto')
     setFollowTop(false)
     setVolumeSignal(false)
     setStrategies(DEFAULT_STRATEGIES)
@@ -344,8 +352,8 @@ export default function AlertPage() {
     symbol: [...selected][0] ?? '未选品种',
     timeframes: [...timeframes],
     requireAllTf,
-    alertLevel,
-    special: alertLevel >= 2,
+    alertLevel: alertLevel === 'auto' ? inferAlertLevel([...timeframes]) : alertLevel,
+    special: (alertLevel === 'auto' ? inferAlertLevel([...timeframes]) : alertLevel) >= 2,
     followTop,
     followTopLimit: 50,
     rsiAbove: rsiAbove === '' ? null : rsiAbove,
@@ -631,7 +639,7 @@ export default function AlertPage() {
               </button>
               {editingId && (
                 <button className="zone-btn" style={{ fontSize: 11 }}
-                  onClick={() => { setEditingId(null); setSelected(new Set()); setAlertLevel(1); setFollowTop(false) }}>
+                  onClick={() => { setEditingId(null); setSelected(new Set()); setAlertLevel('auto'); setFollowTop(false) }}>
                   取消编辑
                 </button>
               )}

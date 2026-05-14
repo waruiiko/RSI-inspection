@@ -27,8 +27,9 @@ function isSilentHours(start, end) {
   return s <= e ? cur >= s && cur < e : cur >= s || cur < e
 }
 
-function matchesStrategy(cfg, sig) {
+function matchesStrategy(cfg, sig, observation = false) {
   if (!sig || sig.direction === 'neutral') return false
+  if (observation) return true
   const strategies = Array.isArray(cfg.strategies)
     ? cfg.strategies
     : cfg.strategy
@@ -44,6 +45,25 @@ function matchesStrategy(cfg, sig) {
     if (strategy === 'volume_divergence') return ['bearish_volume_divergence', 'bullish_seller_exhaustion'].includes(sig.type)
     return false
   })
+}
+
+function rsiMargin(mode) {
+  if (mode === 'strict') return 2
+  if (mode === 'loose') return -2
+  return 0
+}
+
+function defaultLevelForTimeframe(tf) {
+  if (tf === '1d') return 3
+  if (tf === '4h') return 2
+  return 1
+}
+
+function observationTimeframes(tfs, enabled) {
+  if (!enabled) return tfs
+  const next = new Set(tfs)
+  next.add('1h')
+  return [...next]
 }
 
 function StatusBanner() {
@@ -88,7 +108,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.0.5'
+const APP_VERSION = 'v1.0.6'
 
 function SummaryBar({ assets, timeframe }) {
   const counts = useMemo(() => {
@@ -206,6 +226,7 @@ export default function App() {
     refreshInterval, alertCooldown, levelCooldowns, popupEnabled, soundEnabled,
     silentStart, silentEnd, telegramToken, telegramChatId, discordWebhook,
     popupMinLevel, soundMinLevel, webhookMinLevel, autoCheckUpdates,
+    observationEnabled, rsiSensitivity, startupStateAlerts,
     loaded: settingsLoaded, load: loadSettings,
   } = useSettingsStore()
 
@@ -219,6 +240,7 @@ export default function App() {
   const silentRef     = useRef({ start: silentStart, end: silentEnd })
   const webhookRef    = useRef({ telegramToken, telegramChatId, discordWebhook })
   const minLevelRef   = useRef({ popup: popupMinLevel, sound: soundMinLevel, webhook: webhookMinLevel })
+  const alertModeRef  = useRef({ observationEnabled, rsiSensitivity, startupStateAlerts })
   configsRef.current  = configs
   assetsRef.current   = assets
   cooldownRef.current = alertCooldown * 60 * 60 * 1000
@@ -228,6 +250,7 @@ export default function App() {
   silentRef.current   = { start: silentStart, end: silentEnd }
   webhookRef.current  = { telegramToken, telegramChatId, discordWebhook }
   minLevelRef.current = { popup: popupMinLevel, sound: soundMinLevel, webhook: webhookMinLevel }
+  alertModeRef.current = { observationEnabled, rsiSensitivity, startupStateAlerts }
 
   const focusSearch  = useMarketStore(s => s.focusSearch)
   const setTimeframe = useMarketStore(s => s.setTimeframe)
@@ -295,7 +318,8 @@ export default function App() {
 
   useEffect(() => {
     if (!completedAt) return
-    if (completedMeta?.suppressAlerts) {
+    const startupStateCheck = completedMeta?.scope === 'startup-full' && alertModeRef.current.startupStateAlerts
+    if (completedMeta?.suppressAlerts && !startupStateCheck) {
       prevAssetsRef.current = [...assetsRef.current]
       return
     }
@@ -308,8 +332,9 @@ export default function App() {
     const fired = []
     const firedBatchKeys = new Set()
     const marketOpen = isUSMarketOpen()
-    const cooldownFor = cfg => {
-      const level = cfg.alertLevel ?? (cfg.special ? 3 : 1)
+    const margin = rsiMargin(alertModeRef.current.rsiSensitivity)
+    const observationOn = alertModeRef.current.observationEnabled
+    const cooldownFor = level => {
       const hours = levelCooldownRef.current?.[level] ?? alertCooldown
       return hours * 60 * 60 * 1000
     }
@@ -331,10 +356,10 @@ export default function App() {
         notifData.signal ?? notifData.condition ?? key,
       ].join('|')
       if (firedBatchKeys.has(batchKey)) return
-      if (now - (cfg.lastFired?.[key] ?? 0) < cooldownFor(cfg)) return
+      const level = notifData.level ?? cfg.alertLevel ?? (cfg.special ? 3 : 1)
+      if (now - (cfg.lastFired?.[key] ?? 0) < cooldownFor(level)) return
       updateLastFired(cfg.id, key)
       firedBatchKeys.add(batchKey)
-      const level = cfg.alertLevel ?? (cfg.special ? 3 : 1)
       fired.push({ ...notifData, level, special: level >= 2 })
     }
 
@@ -348,6 +373,7 @@ export default function App() {
       if (!prev) continue
 
       const tfs = cfg.timeframes ?? []
+      const observeTfs = observationTimeframes(tfs, observationOn)
       const ctx = { price: asset.price, change24h: asset.change24h }
       const c = (key, nd) => collect(cfg, key, { ...ctx, ...nd })
 
@@ -355,23 +381,52 @@ export default function App() {
         const rsi     = asset.rsi?.[tf]
         const prevRsi = prev.rsi?.[tf]
         if (rsi == null || prevRsi == null) continue
-        if (cfg.rsiAbove != null && rsi > cfg.rsiAbove + 2 && prevRsi <= cfg.rsiAbove)
-          c(`${tf}_rsi_above`, { symbol: cfg.symbol, type: 'rsi', timeframe: tf, condition: 'above', threshold: cfg.rsiAbove, value: rsi })
-        if (cfg.rsiBelow != null && rsi < cfg.rsiBelow - 2 && prevRsi >= cfg.rsiBelow)
-          c(`${tf}_rsi_below`, { symbol: cfg.symbol, type: 'rsi', timeframe: tf, condition: 'below', threshold: cfg.rsiBelow, value: rsi })
+        if (cfg.rsiAbove != null && rsi > cfg.rsiAbove + margin && (startupStateCheck || prevRsi <= cfg.rsiAbove))
+          c(`${tf}_rsi_above`, { symbol: cfg.symbol, type: 'rsi', timeframe: tf, condition: 'above', threshold: cfg.rsiAbove, value: rsi, level: cfg.alertLevel ?? defaultLevelForTimeframe(tf) })
+        if (cfg.rsiBelow != null && rsi < cfg.rsiBelow - margin && (startupStateCheck || prevRsi >= cfg.rsiBelow))
+          c(`${tf}_rsi_below`, { symbol: cfg.symbol, type: 'rsi', timeframe: tf, condition: 'below', threshold: cfg.rsiBelow, value: rsi, level: cfg.alertLevel ?? defaultLevelForTimeframe(tf) })
+      }
+
+      if (observationOn) {
+        for (const tf of observeTfs) {
+          const rsi = asset.rsi?.[tf]
+          if (rsi == null) continue
+          if (cfg.rsiAbove != null && rsi > cfg.rsiAbove + margin) {
+            c(`${tf}_rsi_above_observe`, {
+              symbol: cfg.symbol,
+              type: 'rsi',
+              timeframe: tf,
+              condition: 'above',
+              threshold: cfg.rsiAbove,
+              value: rsi,
+              level: 0,
+            })
+          }
+          if (cfg.rsiBelow != null && rsi < cfg.rsiBelow - margin) {
+            c(`${tf}_rsi_below_observe`, {
+              symbol: cfg.symbol,
+              type: 'rsi',
+              timeframe: tf,
+              condition: 'below',
+              threshold: cfg.rsiBelow,
+              value: rsi,
+              level: 0,
+            })
+          }
+        }
       }
 
       if (cfg.requireAllTf && tfs.length > 1) {
         if (cfg.rsiAbove != null) {
-          const allNow  = tfs.every(tf => (asset.rsi?.[tf] ?? 0)   > cfg.rsiAbove + 2)
+          const allNow  = tfs.every(tf => (asset.rsi?.[tf] ?? 0)   > cfg.rsiAbove + margin)
           const allPrev = tfs.every(tf => (prev.rsi?.[tf]  ?? 0)   > cfg.rsiAbove)
-          if (allNow && !allPrev)
+          if (allNow && (startupStateCheck || !allPrev))
             c('rsi_above_resonance', { symbol: cfg.symbol, type: 'rsi', timeframe: tfs.join('+'), condition: 'above', threshold: cfg.rsiAbove, value: Math.max(...tfs.map(tf => asset.rsi?.[tf] ?? 0)), special: true })
         }
         if (cfg.rsiBelow != null) {
-          const allNow  = tfs.every(tf => (asset.rsi?.[tf] ?? 100) < cfg.rsiBelow - 2)
+          const allNow  = tfs.every(tf => (asset.rsi?.[tf] ?? 100) < cfg.rsiBelow - margin)
           const allPrev = tfs.every(tf => (prev.rsi?.[tf]  ?? 100) < cfg.rsiBelow)
-          if (allNow && !allPrev)
+          if (allNow && (startupStateCheck || !allPrev))
             c('rsi_below_resonance', { symbol: cfg.symbol, type: 'rsi', timeframe: tfs.join('+'), condition: 'below', threshold: cfg.rsiBelow, value: Math.min(...tfs.map(tf => asset.rsi?.[tf] ?? 100)), special: true })
         }
       }
@@ -393,24 +448,32 @@ export default function App() {
       }
 
       if (cfg.divBull || cfg.divBear) {
-        for (const tf of tfs) {
+        for (const tf of observeTfs) {
+          const strongTf = tfs.includes(tf)
           const divNow  = asset.divergence?.[tf]
           const divPrev = prev.divergence?.[tf]
-          if (cfg.divBull && divNow === 'bullish' && divPrev !== 'bullish')
-            c(`${tf}_div_bull`, { symbol: cfg.symbol, type: 'divergence', timeframe: tf, condition: 'bull' })
-          if (cfg.divBear && divNow === 'bearish' && divPrev !== 'bearish')
-            c(`${tf}_div_bear`, { symbol: cfg.symbol, type: 'divergence', timeframe: tf, condition: 'bear' })
+          if (strongTf && cfg.divBull && divNow === 'bullish' && (startupStateCheck || divPrev !== 'bullish'))
+            c(`${tf}_div_bull`, { symbol: cfg.symbol, type: 'divergence', timeframe: tf, condition: 'bull', level: cfg.alertLevel ?? defaultLevelForTimeframe(tf) })
+          if (strongTf && cfg.divBear && divNow === 'bearish' && (startupStateCheck || divPrev !== 'bearish'))
+            c(`${tf}_div_bear`, { symbol: cfg.symbol, type: 'divergence', timeframe: tf, condition: 'bear', level: cfg.alertLevel ?? defaultLevelForTimeframe(tf) })
+          if (observationOn && cfg.divBull && divNow === 'bullish')
+            c(`${tf}_div_bull_observe`, { symbol: cfg.symbol, type: 'divergence', timeframe: tf, condition: 'bull', level: 0 })
+          if (observationOn && cfg.divBear && divNow === 'bearish')
+            c(`${tf}_div_bear_observe`, { symbol: cfg.symbol, type: 'divergence', timeframe: tf, condition: 'bear', level: 0 })
         }
       }
 
       if (cfg.volumeSignal) {
-        for (const tf of tfs) {
+        for (const tf of observeTfs) {
+          const strongTf = tfs.includes(tf)
           const sig = asset.volumeSignal?.[tf]
           const prevSig = prev.volumeSignal?.[tf]
           const score = asset.signalScore?.[tf] ?? 0
-          if (!matchesStrategy(cfg, sig) || Math.abs(score) < (cfg.minScore ?? 3)) continue
-          if (sig.type === prevSig?.type) continue
-          c(`${tf}_structure_${sig.type}`, {
+          const strongMatch = strongTf && matchesStrategy(cfg, sig, false) && Math.abs(score) >= (cfg.minScore ?? 3)
+          const observeMatch = observationOn && matchesStrategy(cfg, sig, true) && Math.abs(score) >= 1
+          if (!strongMatch && !observeMatch) continue
+          if (strongMatch && !startupStateCheck && sig.type === prevSig?.type) continue
+          c(`${tf}_structure_${sig.type}${strongMatch ? '' : '_observe'}`, {
             symbol: cfg.symbol,
             type: 'structure',
             timeframe: tf,
@@ -419,6 +482,7 @@ export default function App() {
             value: score,
             volumeRatio: sig.volumeRatio,
             priceMovePct: sig.priceMovePct,
+            level: strongMatch ? (cfg.alertLevel ?? defaultLevelForTimeframe(tf)) : 0,
           })
         }
       }
@@ -499,22 +563,24 @@ export default function App() {
           )}
 
           {hasData && (
-            <>
-              {/* Summary cards */}
-              <SummaryBar assets={filteredAssets} timeframe={timeframe} />
-              <StatusBanner />
+            <div className="market-layout">
+              <div className="market-main-column">
+                {/* Summary cards */}
+                <SummaryBar assets={filteredAssets} timeframe={timeframe} />
+                <StatusBanner />
 
-              {/* Heatmap */}
-              <div className="heatmap-wrapper">
-                <Heatmap />
-              </div>
+                {/* Heatmap */}
+                <div className="heatmap-wrapper">
+                  <Heatmap />
+                </div>
 
-              {/* Table + Feed */}
-              <div className="market-bottom">
-                <StatsTable />
-                <AlertFeed />
+                {/* Table */}
+                <div className="market-table-wrap">
+                  <StatsTable />
+                </div>
               </div>
-            </>
+              <AlertFeed />
+            </div>
           )}
         </div>
       )}

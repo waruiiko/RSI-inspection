@@ -40,6 +40,7 @@ function mergeAssetData(prev, next) {
 }
 
 const ALL_ZONES = ['overbought', 'strong', 'neutral', 'weak', 'oversold']
+const DEFAULT_ZONES = ALL_ZONES.filter(z => z !== 'neutral')
 
 const _loadPinned = () => {
   try { return new Set(JSON.parse(localStorage.getItem('rsi:pinned') ?? '[]')) }
@@ -106,7 +107,7 @@ const useMarketStore = create((set, get) => ({
   liquidityLimit: _prefs.liquidityLimit ?? 100,
   timeframe:     _prefs.timeframe ?? '4h',
   layout:        _prefs.layout ?? 'random',
-  rsiZones:      _prefs.rsiZones ?? ALL_ZONES,      // visible RSI zones
+  rsiZones:      Array.isArray(_prefs.rsiZones) ? _prefs.rsiZones : DEFAULT_ZONES, // visible RSI zones
   hoveredSymbol: null,           // table row hover → chart highlight
   flashSymbol:   null,           // table row click  → chart flash { symbol, ts }
   pinnedSymbols: _loadPinned(),  // Set<string>, persisted to localStorage

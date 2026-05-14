@@ -20,7 +20,10 @@ const useSettingsStore = create((set, get) => ({
   popupMinLevel:   1,
   soundMinLevel:   1,
   webhookMinLevel: 1,
-  levelCooldowns:  { 1: 4, 2: 2, 3: 1 },
+  levelCooldowns:  { 0: 3, 1: 4, 2: 2, 3: 1 },
+  observationEnabled: true,
+  rsiSensitivity:  'standard',
+  startupStateAlerts: true,
   autoCheckUpdates:false,
   loaded:          false,
 

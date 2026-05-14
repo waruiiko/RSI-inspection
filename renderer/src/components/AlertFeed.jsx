@@ -51,6 +51,7 @@ function fmtDetail(item) {
 
 function levelLabel(item) {
   const level = item.level ?? (item.special ? 3 : 1)
+  if (level === 0) return '观察'
   return `${level}级`
 }
 

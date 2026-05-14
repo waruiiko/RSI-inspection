@@ -10,6 +10,12 @@ const RSI_MA_TYPES       = ['None', 'SMA', 'EMA', 'RMA', 'WMA', 'BB']
 const RSI_MA_LENGTHS     = [5, 9, 14, 21]
 const RSI_BB_MULTS       = [1.5, 2.0, 2.5, 3.0]
 const LEVEL_OPTIONS      = [1, 2, 3]
+const RSI_SENS_OPTIONS   = ['strict', 'standard', 'loose']
+const RSI_SENS_LABELS    = {
+  strict: '严格',
+  standard: '标准',
+  loose: '宽松',
+}
 
 /* ── Section title ─────────────────────────────────────────── */
 function SectionTitle({ children }) {
@@ -52,6 +58,7 @@ export default function SettingsPage() {
     startMinimized, rsiPeriod, rsiOverbought, rsiOversold,
     rsiMaType, rsiMaLength, rsiBbMult,
     popupMinLevel, soundMinLevel, webhookMinLevel, levelCooldowns, autoCheckUpdates,
+    observationEnabled, rsiSensitivity, startupStateAlerts,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook,
     update,
@@ -101,7 +108,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.0.5
+          v1.0.6
         </span>
       </div>
 
@@ -196,6 +203,15 @@ export default function SettingsPage() {
             <BtnGroup options={RSI_PERIOD_OPTIONS} value={rsiPeriod} onChange={v => update('rsiPeriod', v)} />
           </Row>
 
+          <Row label="RSI 提醒灵敏度" hint="严格：需越过阈值 2 点；标准：触及阈值；宽松：提前 2 点进入观察">
+            <BtnGroup
+              options={RSI_SENS_OPTIONS}
+              value={rsiSensitivity}
+              onChange={v => update('rsiSensitivity', v)}
+              format={v => RSI_SENS_LABELS[v]}
+            />
+          </Row>
+
           <Row label="RSI-MA 类型" hint="在图表 RSI 面板中叠加平滑均线">
             <BtnGroup options={RSI_MA_TYPES} value={rsiMaType} onChange={v => update('rsiMaType', v)} />
           </Row>
@@ -261,6 +277,20 @@ export default function SettingsPage() {
             </div>
           </Row>
 
+          <Row label="观察模式" hint="记录早期量价信号、RSI 区域状态和持续背离；会额外参考 1h 周期，默认只进提醒记录，不弹窗">
+            <Toggle
+              checked={observationEnabled}
+              onChange={e => update('observationEnabled', e.target.checked)}
+            />
+          </Row>
+
+          <Row label="启动状态提醒" hint="全量数据补完后，若规则已经满足，也记录一次；用于发现软件启动前已形成的信号">
+            <Toggle
+              checked={startupStateAlerts}
+              onChange={e => update('startupStateAlerts', e.target.checked)}
+            />
+          </Row>
+
           <Row label="弹窗通知" hint="触发提醒时是否显示桌面弹窗">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <Toggle
@@ -313,11 +343,11 @@ export default function SettingsPage() {
             />
           </Row>
 
-          <Row label="分级冷却" hint="不同等级可使用不同冷却时间；未设置时使用全局冷却">
+          <Row label="分级冷却" hint="不同等级可使用不同冷却时间；观察默认 3 小时，未设置时使用全局冷却">
             <div className="settings-btn-group">
-              {[1, 2, 3].map(level => (
+              {[0, 1, 2, 3].map(level => (
                 <label key={level} className="level-cooldown">
-                  <span>{level}级</span>
+                  <span>{level === 0 ? '观察' : `${level}级`}</span>
                   <input
                     className="alert-num-input"
                     type="number"
