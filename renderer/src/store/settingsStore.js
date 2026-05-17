@@ -25,6 +25,7 @@ const useSettingsStore = create((set, get) => ({
   rsiSensitivity:  'standard',
   startupStateAlerts: true,
   autoCheckUpdates:false,
+  codexCliPath:     'codex',
   loaded:          false,
 
   load: async () => {

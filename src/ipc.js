@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, shell } = require('electron')
 const { Worker } = require('worker_threads')
 const fs             = require('fs')
 const path           = require('path')
+const codexReview    = require('./codexReview')
 const { fetchOHLCV } = require('./data/provider')
 const binance        = require('./data/binance')
 const yahoo          = require('./data/yahoo')
@@ -112,6 +113,20 @@ exports.register = (ipcMain) => {
   ipcMain.handle('settings:setAutoLaunch', (_, enabled) => {
     app.setLoginItemSettings({ openAtLogin: !!enabled })
     return { ok: true }
+  })
+
+  ipcMain.handle('codex:status', async () => {
+    return codexReview.getStatus(config.loadSettings())
+  })
+
+  ipcMain.handle('codex:runReview', async (_, payload) => {
+    return codexReview.runReview(payload, config.loadSettings())
+  })
+
+  ipcMain.handle('shell:openPath', async (_, target) => {
+    if (!target) return { ok: false, error: 'Missing path' }
+    const result = await shell.openPath(target)
+    return result ? { ok: false, error: result } : { ok: true }
   })
 
   // Streaming: returns immediately, pushes chunks via event as each asset finishes

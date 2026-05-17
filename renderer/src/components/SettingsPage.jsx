@@ -1,28 +1,26 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import useSettingsStore from '../store/settingsStore'
 import { playAlertSound } from '../utils/sound'
 import { sendWebhooks } from '../utils/webhook'
 
-const REFRESH_OPTIONS    = [1, 2, 5, 10, 30]
-const COOLDOWN_OPTIONS   = [1, 2, 4, 8]
+const REFRESH_OPTIONS = [1, 2, 5, 10, 30]
+const COOLDOWN_OPTIONS = [1, 2, 4, 8]
 const RSI_PERIOD_OPTIONS = [7, 14, 21]
-const RSI_MA_TYPES       = ['None', 'SMA', 'EMA', 'RMA', 'WMA', 'BB']
-const RSI_MA_LENGTHS     = [5, 9, 14, 21]
-const RSI_BB_MULTS       = [1.5, 2.0, 2.5, 3.0]
-const LEVEL_OPTIONS      = [1, 2, 3]
-const RSI_SENS_OPTIONS   = ['strict', 'standard', 'loose']
-const RSI_SENS_LABELS    = {
+const RSI_MA_TYPES = ['None', 'SMA', 'EMA', 'RMA', 'WMA', 'BB']
+const RSI_MA_LENGTHS = [5, 9, 14, 21]
+const RSI_BB_MULTS = [1.5, 2.0, 2.5, 3.0]
+const LEVEL_OPTIONS = [1, 2, 3]
+const RSI_SENS_OPTIONS = ['strict', 'standard', 'loose']
+const RSI_SENS_LABELS = {
   strict: '严格',
   standard: '标准',
   loose: '宽松',
 }
 
-/* ── Section title ─────────────────────────────────────────── */
 function SectionTitle({ children }) {
   return <div className="settings-section-title">{children}</div>
 }
 
-/* ── Settings row ──────────────────────────────────────────── */
 function Row({ label, hint, children }) {
   return (
     <div className="settings-row">
@@ -35,7 +33,6 @@ function Row({ label, hint, children }) {
   )
 }
 
-/* ── Segmented button group ────────────────────────────────── */
 function BtnGroup({ options, value, onChange, format }) {
   return (
     <div className="settings-btn-group">
@@ -52,6 +49,15 @@ function BtnGroup({ options, value, onChange, format }) {
   )
 }
 
+function Toggle({ checked, onChange, disabled }) {
+  return (
+    <label className="toggle-switch">
+      <input type="checkbox" checked={checked} onChange={onChange} disabled={disabled} />
+      <span className="toggle-track" />
+    </label>
+  )
+}
+
 export default function SettingsPage() {
   const {
     refreshInterval, alertCooldown, popupEnabled, soundEnabled,
@@ -60,18 +66,22 @@ export default function SettingsPage() {
     popupMinLevel, soundMinLevel, webhookMinLevel, levelCooldowns, autoCheckUpdates,
     observationEnabled, rsiSensitivity, startupStateAlerts,
     silentStart, silentEnd,
-    telegramToken, telegramChatId, discordWebhook,
+    telegramToken, telegramChatId, discordWebhook, codexCliPath,
     update,
   } = useSettingsStore()
 
-  const [autoLaunch,     setAutoLaunch]     = useState(false)
+  const [autoLaunch, setAutoLaunch] = useState(false)
   const [autoLaunchBusy, setAutoLaunchBusy] = useState(true)
-  const [settingsMsg,    setSettingsMsg]    = useState('')
-  const [diagnostics,    setDiagnostics]    = useState(null)
-  const [cacheStats,     setCacheStats]     = useState(null)
+  const [settingsMsg, setSettingsMsg] = useState('')
+  const [diagnostics, setDiagnostics] = useState(null)
+  const [cacheStats, setCacheStats] = useState(null)
+  const [codexStatus, setCodexStatus] = useState(null)
 
   useEffect(() => {
-    window.api.getAutoLaunch().then(v => { setAutoLaunch(v); setAutoLaunchBusy(false) })
+    window.api.getAutoLaunch().then(v => {
+      setAutoLaunch(v)
+      setAutoLaunchBusy(false)
+    })
     refreshDiagnostics()
   }, [])
 
@@ -89,22 +99,51 @@ export default function SettingsPage() {
   }
 
   const handleAutoLaunch = async (e) => {
-    const v = e.target.checked
-    setAutoLaunch(v)
-    await window.api.setAutoLaunch(v)
+    const next = e.target.checked
+    setAutoLaunch(next)
+    await window.api.setAutoLaunch(next)
   }
 
-  /* ── Toggle helper ── */
-  const Toggle = ({ checked, onChange, disabled }) => (
-    <label className="toggle-switch">
-      <input type="checkbox" checked={checked} onChange={onChange} disabled={disabled} />
-      <span className="toggle-track" />
-    </label>
-  )
+  const handleCheckUpdate = async () => {
+    try {
+      const r = await window.api.checkForUpdates(true)
+      setSettingsMsg(`已打开最新版本页面：${r.tag ?? r.name ?? ''}`)
+    } catch (err) {
+      setSettingsMsg(`检查更新失败：${err.message}`)
+    }
+  }
+
+  const handleClearCache = async () => {
+    const result = await window.api.clearCache()
+    setCacheStats(result)
+    setSettingsMsg('K线缓存已清理')
+  }
+
+  const handleImportConfig = async () => {
+    const r = await window.api.importConfig()
+    if (r?.ok) {
+      setSettingsMsg('导入完成，请重新启动或刷新数据')
+      window.location.reload()
+    }
+  }
+
+  const handleCleanupInstallers = async () => {
+    const r = await window.api.cleanupInstallers()
+    setSettingsMsg(`已清理 ${r.removed?.length ?? 0} 个旧文件，保留：${r.kept ?? '无'}`)
+  }
+
+  const checkCodex = async () => {
+    const status = await window.api.getCodexStatus()
+    setCodexStatus(status)
+    setSettingsMsg(
+      status.ok
+        ? `Codex 可用：${status.version || '已检测到 CLI'}`
+        : `Codex 不可用：${status.error}`
+    )
+  }
 
   return (
     <div className="settings-page">
-      {/* Header */}
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
@@ -113,11 +152,10 @@ export default function SettingsPage() {
       </div>
 
       <div className="settings-body">
-
-        {/* ── 系统 ── */}
         <div className="settings-section">
           <SectionTitle>系统</SectionTitle>
-          <Row label="发布前体检" hint="检查配置、提醒、缓存和通知配置是否正常">
+
+          <Row label="发布前体检" hint="检查配置、提醒、缓存和通知设置是否正常">
             <button
               className="zone-btn"
               style={{ fontSize: 11, padding: '3px 10px' }}
@@ -126,40 +164,40 @@ export default function SettingsPage() {
               重新检查
             </button>
           </Row>
+
           {diagnostics && (
             <div className="diagnostics-grid">
               {diagnostics.checks.map(c => (
                 <div key={c.key} className={`diagnostic-chip ${c.ok ? 'ok' : 'warn'}`}>
-                  <span>{c.ok ? '✓' : '!'}</span>
+                  <span>{c.ok ? 'OK' : '!'}</span>
                   <b>{c.label}</b>
                   <em>{c.detail}</em>
                 </div>
               ))}
             </div>
           )}
+
           <Row label="开机自动启动" hint="登录后自动在后台运行">
             <Toggle checked={autoLaunch} disabled={autoLaunchBusy} onChange={handleAutoLaunch} />
           </Row>
+
           <Row label="启动时最小化到托盘" hint="每次打开应用直接进入托盘">
             <Toggle
               checked={startMinimized}
               onChange={e => update('startMinimized', e.target.checked)}
             />
           </Row>
+
           <Row label="自动检查更新" hint="启动时检查 GitHub Releases，不会自动安装">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Toggle checked={autoCheckUpdates} onChange={e => update('autoCheckUpdates', e.target.checked)} />
+              <Toggle
+                checked={autoCheckUpdates}
+                onChange={e => update('autoCheckUpdates', e.target.checked)}
+              />
               <button
                 className="zone-btn"
                 style={{ fontSize: 11, padding: '3px 10px' }}
-                onClick={async () => {
-                  try {
-                    const r = await window.api.checkForUpdates(true)
-                    setSettingsMsg(`已打开最新版本页面：${r.tag ?? r.name ?? ''}`)
-                  } catch (err) {
-                    setSettingsMsg(`检查更新失败：${err.message}`)
-                  }
-                }}
+                onClick={handleCheckUpdate}
               >
                 检查更新
               </button>
@@ -167,14 +205,16 @@ export default function SettingsPage() {
           </Row>
         </div>
 
-        {/* ── 数据 ── */}
         <div className="settings-section">
           <SectionTitle>数据</SectionTitle>
 
           <Row label="RSI 超买阈值" hint="默认 70，高于此值视为超买">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <input
-                type="range" min="60" max="90" step="1"
+                type="range"
+                min="60"
+                max="90"
+                step="1"
                 value={rsiOverbought}
                 onChange={e => update('rsiOverbought', Number(e.target.value))}
                 style={{ width: 100, accentColor: '#ef4444' }}
@@ -188,7 +228,10 @@ export default function SettingsPage() {
           <Row label="RSI 超卖阈值" hint="默认 30，低于此值视为超卖">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <input
-                type="range" min="10" max="40" step="1"
+                type="range"
+                min="10"
+                max="40"
+                step="1"
                 value={rsiOversold}
                 onChange={e => update('rsiOversold', Number(e.target.value))}
                 style={{ width: 100, accentColor: '#22c55e' }}
@@ -199,11 +242,11 @@ export default function SettingsPage() {
             </div>
           </Row>
 
-          <Row label="RSI 周期" hint="影响所有品种的 RSI 计算，修改后下次刷新生效">
+          <Row label="RSI 周期" hint="影响所有品种的 RSI 计算">
             <BtnGroup options={RSI_PERIOD_OPTIONS} value={rsiPeriod} onChange={v => update('rsiPeriod', v)} />
           </Row>
 
-          <Row label="RSI 提醒灵敏度" hint="严格：需越过阈值 2 点；标准：触及阈值；宽松：提前 2 点进入观察">
+          <Row label="RSI 提醒灵敏度" hint="严格：阈值外再多 2 点；标准：触及阈值；宽松：提前 2 点">
             <BtnGroup
               options={RSI_SENS_OPTIONS}
               value={rsiSensitivity}
@@ -212,7 +255,7 @@ export default function SettingsPage() {
             />
           </Row>
 
-          <Row label="RSI-MA 类型" hint="在图表 RSI 面板中叠加平滑均线">
+          <Row label="RSI-MA 类型" hint="图表 RSI 面板叠加的平滑均线">
             <BtnGroup options={RSI_MA_TYPES} value={rsiMaType} onChange={v => update('rsiMaType', v)} />
           </Row>
 
@@ -223,12 +266,12 @@ export default function SettingsPage() {
           )}
 
           {rsiMaType === 'BB' && (
-            <Row label="BB 倍数" hint="布林带标准差倍数，默认 2.0">
+            <Row label="BB 倍数" hint="布林带标准差倍数">
               <BtnGroup options={RSI_BB_MULTS} value={rsiBbMult} onChange={v => update('rsiBbMult', v)} />
             </Row>
           )}
 
-          <Row label="刷新间隔" hint="每隔多长时间重新拉取行情">
+          <Row label="刷新间隔" hint="多久重新拉取一次行情">
             <BtnGroup
               options={REFRESH_OPTIONS}
               value={refreshInterval}
@@ -237,19 +280,15 @@ export default function SettingsPage() {
             />
           </Row>
 
-          <Row label="K线缓存" hint="缓存可减少重复请求；接口失败时也可回退到上次数据">
+          <Row label="K 线缓存" hint="减少重复请求；接口失败时也可回退到上次数据">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ color: 'var(--dim)', fontSize: 11 }}>
-                {cacheStats ? `${cacheStats.entries} 条 · ${formatBytes(cacheStats.sizeBytes)}` : '读取中'}
+                {cacheStats ? `${cacheStats.entries} 条 · ${formatBytes(cacheStats.sizeBytes)}` : '读取中...'}
               </span>
               <button
                 className="zone-btn"
                 style={{ fontSize: 11, padding: '3px 10px' }}
-                onClick={async () => {
-                  const r = await window.api.clearCache()
-                  setCacheStats(r)
-                  setSettingsMsg('K线缓存已清理')
-                }}
+                onClick={handleClearCache}
               >
                 清理缓存
               </button>
@@ -257,51 +296,40 @@ export default function SettingsPage() {
           </Row>
         </div>
 
-        {/* ── 提醒 ── */}
         <div className="settings-section">
           <SectionTitle>提醒</SectionTitle>
 
           <Row label="声音提醒" hint="触发提醒时播放提示音">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Toggle
-                checked={soundEnabled}
-                onChange={e => update('soundEnabled', e.target.checked)}
-              />
-              <button
-                className="zone-btn"
-                style={{ fontSize: 11, padding: '3px 10px' }}
-                onClick={playAlertSound}
-              >
+              <Toggle checked={soundEnabled} onChange={e => update('soundEnabled', e.target.checked)} />
+              <button className="zone-btn" style={{ fontSize: 11, padding: '3px 10px' }} onClick={playAlertSound}>
                 试听
               </button>
             </div>
           </Row>
 
-          <Row label="观察模式" hint="记录早期量价信号、RSI 区域状态和持续背离；会额外参考 1h 周期，默认只进提醒记录，不弹窗">
+          <Row label="观察模式" hint="记录早期量价信号、RSI 区域状态和持续背离；默认只写入记录，不弹窗">
             <Toggle
               checked={observationEnabled}
               onChange={e => update('observationEnabled', e.target.checked)}
             />
           </Row>
 
-          <Row label="启动状态提醒" hint="全量数据补完后，若规则已经满足，也记录一次；用于发现软件启动前已形成的信号">
+          <Row label="启动状态提醒" hint="全量数据补完后，若规则已经满足，也记录一次">
             <Toggle
               checked={startupStateAlerts}
               onChange={e => update('startupStateAlerts', e.target.checked)}
             />
           </Row>
 
-          <Row label="弹窗通知" hint="触发提醒时是否显示桌面弹窗">
+          <Row label="弹窗通知" hint="触发提醒时显示桌面弹窗">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <Toggle
-                checked={popupEnabled}
-                onChange={e => update('popupEnabled', e.target.checked)}
-              />
+              <Toggle checked={popupEnabled} onChange={e => update('popupEnabled', e.target.checked)} />
               <button
                 className="zone-btn"
                 style={{ fontSize: 11, padding: '3px 10px' }}
                 onClick={() => window.api.showNotificationBatch([
-                    { symbol: 'TEST', type: 'rsi', timeframe: '1h', condition: 'above', threshold: 70, value: 73.5, level: 1 }
+                  { symbol: 'TEST', type: 'rsi', timeframe: '1h', condition: 'above', threshold: 70, value: 73.5, level: 1 },
                 ])}
               >
                 测试弹窗
@@ -312,13 +340,15 @@ export default function SettingsPage() {
           <Row label="静音时段" hint="该时段内不弹窗、不发声，但仍写入提醒记录">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <input
-                type="time" value={silentStart}
+                type="time"
+                value={silentStart}
                 onChange={e => update('silentStart', e.target.value)}
                 className="time-input"
               />
-              <span style={{ color: 'var(--muted)' }}>—</span>
+              <span style={{ color: 'var(--muted)' }}>-</span>
               <input
-                type="time" value={silentEnd}
+                type="time"
+                value={silentEnd}
                 onChange={e => update('silentEnd', e.target.value)}
                 className="time-input"
               />
@@ -343,7 +373,7 @@ export default function SettingsPage() {
             />
           </Row>
 
-          <Row label="分级冷却" hint="不同等级可使用不同冷却时间；观察默认 3 小时，未设置时使用全局冷却">
+          <Row label="分级冷却" hint="不同等级可使用不同冷却时间；观察默认 3 小时">
             <div className="settings-btn-group">
               {[0, 1, 2, 3].map(level => (
                 <label key={level} className="level-cooldown">
@@ -377,6 +407,7 @@ export default function SettingsPage() {
 
         <div className="settings-section">
           <SectionTitle>备份</SectionTitle>
+
           <Row label="导出配置" hint="导出品种、分组、提醒规则与常规设置；不会导出 Telegram / Discord 密钥">
             <button
               className="zone-btn"
@@ -389,37 +420,67 @@ export default function SettingsPage() {
               导出
             </button>
           </Row>
+
           <Row label="导入配置" hint="导入后建议重新刷新市场数据；现有 Webhook 密钥会保留">
             <button
               className="zone-btn"
               style={{ fontSize: 11, padding: '3px 10px' }}
-              onClick={async () => {
-                const r = await window.api.importConfig()
-                if (r?.ok) {
-                  setSettingsMsg('导入完成，请重启或刷新数据')
-                  window.location.reload()
-                }
-              }}
+              onClick={handleImportConfig}
             >
               导入
             </button>
           </Row>
-          <Row label="清理安装包" hint="删除 dist 目录中的旧安装包，仅保留最新版本">
+
+          <Row label="清理安装包" hint="删除 dist 目录里的旧安装包，仅保留最新版本">
             <button
               className="zone-btn"
               style={{ fontSize: 11, padding: '3px 10px' }}
-              onClick={async () => {
-                const r = await window.api.cleanupInstallers()
-                setSettingsMsg(`已清理 ${r.removed?.length ?? 0} 个旧文件，保留：${r.kept ?? '无'}`)
-              }}
+              onClick={handleCleanupInstallers}
             >
               清理旧安装包
             </button>
           </Row>
+
           {settingsMsg && <div className="settings-note">{settingsMsg}</div>}
         </div>
 
-        {/* ── Webhook ── */}
+        <div className="settings-section">
+          <SectionTitle>Codex 复盘</SectionTitle>
+
+          <Row label="Codex CLI 路径" hint="默认使用 PATH 里的 codex；如果检测不到，可以填完整路径">
+            <input
+              className="search-input"
+              style={{ maxWidth: 280 }}
+              placeholder="codex"
+              value={codexCliPath}
+              onChange={e => update('codexCliPath', e.target.value)}
+            />
+          </Row>
+
+          <Row label="检测 Codex" hint="使用本机 Codex 登录状态；不需要 OpenAI API Key">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                className="zone-btn"
+                style={{ fontSize: 11, padding: '3px 10px' }}
+                onClick={checkCodex}
+              >
+                检测
+              </button>
+              <span style={{ color: 'var(--dim)', fontSize: 11 }}>
+                复盘目录：~/.rsi-inspection/codex-reviews
+              </span>
+            </div>
+          </Row>
+
+          {codexStatus && (
+            <div className="settings-note">
+              {codexStatus.ok
+                ? `Codex 可用：${codexStatus.version || '已检测到 CLI'}`
+                : `Codex 不可用：${codexStatus.error}`}
+            </div>
+          )}
+        </div>
+
         <div className="settings-section">
           <SectionTitle>Webhook 通知</SectionTitle>
 
@@ -434,20 +495,17 @@ export default function SettingsPage() {
             />
           </Row>
 
-          <Row
-            label="Telegram Chat ID"
-            hint="必须是数字 ID（非用户名）。获取方式：先给机器人发一条消息，再访问 api.telegram.org/bot<TOKEN>/getUpdates，找 message.chat.id"
-          >
+          <Row label="Telegram Chat ID" hint="必须是数字 ID（非用户名）。可通过 getUpdates 获取 message.chat.id">
             <input
               className="search-input"
-              style={{ maxWidth: 200 }}
+              style={{ maxWidth: 220 }}
               placeholder="如 123456789 或 -1001234567890"
               value={telegramChatId}
               onChange={e => update('telegramChatId', e.target.value)}
             />
           </Row>
 
-          <Row label="Discord Webhook URL" hint="频道设置 → 整合 → Webhook">
+          <Row label="Discord Webhook URL" hint="频道设置 -> 整合 -> Webhook">
             <input
               className="search-input"
               style={{ maxWidth: 280 }}
@@ -472,7 +530,6 @@ export default function SettingsPage() {
             </button>
           </Row>
         </div>
-
       </div>
     </div>
   )

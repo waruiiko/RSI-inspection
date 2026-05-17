@@ -59,4 +59,8 @@ contextBridge.exposeInMainWorld('api', {
   checkForUpdates: (openRelease = true) => ipcRenderer.invoke('settings:checkUpdates', openRelease),
   getAutoLaunch:   ()        => ipcRenderer.invoke('settings:getAutoLaunch'),
   setAutoLaunch:   (enabled) => ipcRenderer.invoke('settings:setAutoLaunch', enabled),
+
+  getCodexStatus:      ()        => ipcRenderer.invoke('codex:status'),
+  runCodexReview:      (data)    => ipcRenderer.invoke('codex:runReview', data),
+  openPath:            (target)  => ipcRenderer.invoke('shell:openPath', target),
 })

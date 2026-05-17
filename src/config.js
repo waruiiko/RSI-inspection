@@ -40,6 +40,7 @@ const SETTINGS_DEFAULTS = {
   rsiSensitivity:  'standard',
   startupStateAlerts: true,
   autoCheckUpdates:false,
+  codexCliPath:     'codex',
 }
 
 exports.load = () => {

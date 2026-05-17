@@ -732,12 +732,23 @@ body {
   padding: 14px;
 }
 
-.review-head,
-.review-actions {
+.review-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+
+.review-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-actions .zone-btn {
+  flex: 0 0 auto;
 }
 
 .review-grid {
