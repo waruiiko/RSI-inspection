@@ -1,4 +1,11 @@
 function fmtItem(item) {
+  if (item.type === 'ai') {
+    const label = item.condition === 'focus' ? '重点' : item.condition === 'risk' ? '风险' : '观察'
+    const confidence = item.value != null ? `  置信度 ${item.value}` : ''
+    const reason = item.reason ? `  ${item.reason}` : ''
+    const next = item.nextCheck ? `  看点：${item.nextCheck}` : ''
+    return `${item.symbol}  AI筛选：${label}${confidence}${reason}${next}`
+  }
   if (item.type === 'divergence') {
     const dir = item.condition === 'bull' ? '牛市背离' : '熊市背离'
     return `${item.symbol}  (${item.timeframe}) 检测到${dir}`

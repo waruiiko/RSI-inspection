@@ -123,6 +123,10 @@ exports.register = (ipcMain) => {
     return codexReview.runReview(payload, config.loadSettings())
   })
 
+  ipcMain.handle('codex:runScreen', async (_, payload) => {
+    return codexReview.runScreen(payload, config.loadSettings())
+  })
+
   ipcMain.handle('shell:openPath', async (_, target) => {
     if (!target) return { ok: false, error: 'Missing path' }
     const result = await shell.openPath(target)

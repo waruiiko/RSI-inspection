@@ -35,12 +35,21 @@ const SETTINGS_DEFAULTS = {
   popupMinLevel:   1,
   soundMinLevel:   1,
   webhookMinLevel: 1,
+  webhookAiOnly:   true,
   levelCooldowns:  { 0: 3, 1: 4, 2: 2, 3: 1 },
   observationEnabled: true,
   rsiSensitivity:  'standard',
   startupStateAlerts: true,
   autoCheckUpdates:false,
   codexCliPath:     'codex',
+  autoAiEnabled:    false,
+  autoAiInterval:   30,
+  autoAiLimit:      20,
+  autoAiStartupDelay: 10,
+  aiLastRunAt:      null,
+  aiLastRunMode:    '',
+  aiLastRunCount:   0,
+  aiLastSnapshot:   null,
 }
 
 exports.load = () => {

@@ -63,10 +63,11 @@ export default function SettingsPage() {
     refreshInterval, alertCooldown, popupEnabled, soundEnabled,
     startMinimized, rsiPeriod, rsiOverbought, rsiOversold,
     rsiMaType, rsiMaLength, rsiBbMult,
-    popupMinLevel, soundMinLevel, webhookMinLevel, levelCooldowns, autoCheckUpdates,
+    popupMinLevel, soundMinLevel, webhookMinLevel, webhookAiOnly, levelCooldowns, autoCheckUpdates,
     observationEnabled, rsiSensitivity, startupStateAlerts,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook, codexCliPath,
+    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay,
     update,
   } = useSettingsStore()
 
@@ -147,7 +148,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.0.6
+          v1.0.7
         </span>
       </div>
 
@@ -472,6 +473,40 @@ export default function SettingsPage() {
             </div>
           </Row>
 
+          <Row label="自动 AI 筛选" hint="市场数据刷新后，仅在候选明显变化且冷却结束时运行 Codex">
+            <Toggle
+              checked={autoAiEnabled}
+              onChange={e => update('autoAiEnabled', e.target.checked)}
+            />
+          </Row>
+
+          <Row label="AI 冷却时间" hint="两次自动筛选之间的最短间隔">
+            <BtnGroup
+              options={[15, 30, 60, 120]}
+              value={autoAiInterval}
+              onChange={v => update('autoAiInterval', v)}
+              format={v => `${v} 分钟`}
+            />
+          </Row>
+
+          <Row label="AI 候选数量" hint="每次最多提交给 Codex 的候选数量">
+            <BtnGroup
+              options={[10, 20, 30]}
+              value={autoAiLimit}
+              onChange={v => update('autoAiLimit', v)}
+              format={v => `Top ${v}`}
+            />
+          </Row>
+
+          <Row label="AI 启动延迟" hint="避免软件刚启动时同时拉数据和运行 AI">
+            <BtnGroup
+              options={[5, 10, 15, 30]}
+              value={autoAiStartupDelay}
+              onChange={v => update('autoAiStartupDelay', v)}
+              format={v => `${v} 分钟`}
+            />
+          </Row>
+
           {codexStatus && (
             <div className="settings-note">
               {codexStatus.ok
@@ -516,13 +551,20 @@ export default function SettingsPage() {
             />
           </Row>
 
-          <Row label="发送测试消息" hint="验证 Telegram / Discord 配置是否正确">
+          <Row label="Webhook 发送范围" hint="开启后只发送经过 AI 筛选写入的重点/风险提醒，普通规则仍留在本地提醒记录">
+            <Toggle
+              checked={webhookAiOnly}
+              onChange={e => update('webhookAiOnly', e.target.checked)}
+            />
+          </Row>
+
+          <Row label="发送测试消息" hint="验证 Telegram / Discord 配置是否正确；测试消息模拟 AI 筛选后的提醒">
             <button
               className="zone-btn"
               style={{ fontSize: 11, padding: '3px 10px' }}
               disabled={!telegramToken && !discordWebhook}
               onClick={() => sendWebhooks(
-                [{ symbol: 'TEST', type: 'rsi', timeframe: '1h', condition: 'above', threshold: 70, value: 73.5 }],
+                [{ symbol: 'TEST', type: 'ai', condition: 'focus', value: 88, reason: 'AI 筛选测试', risk: '仅用于验证通知链路', nextCheck: '无需操作' }],
                 { telegramToken, telegramChatId, discordWebhook }
               )}
             >

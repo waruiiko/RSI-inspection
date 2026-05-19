@@ -62,5 +62,6 @@ contextBridge.exposeInMainWorld('api', {
 
   getCodexStatus:      ()        => ipcRenderer.invoke('codex:status'),
   runCodexReview:      (data)    => ipcRenderer.invoke('codex:runReview', data),
+  runCodexScreen:      (data)    => ipcRenderer.invoke('codex:runScreen', data),
   openPath:            (target)  => ipcRenderer.invoke('shell:openPath', target),
 })

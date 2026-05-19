@@ -1686,3 +1686,144 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* AI candidate screening */
+.ai-page {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  height: 100%;
+}
+
+.ai-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ai-header h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.ai-header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.ai-header .ai-last-run {
+  margin-top: 6px;
+  color: #58a6ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-actions,
+.ai-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ai-filter-row {
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.ai-status {
+  color: #58a6ff;
+}
+
+.ai-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg2);
+}
+
+.ai-table {
+  width: 100%;
+  min-width: 1120px;
+}
+
+.ai-table th,
+.ai-table td {
+  white-space: nowrap;
+}
+
+.ai-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+}
+
+.ai-decision {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ai-decision-focus {
+  color: #f97316;
+  background: rgba(249, 115, 22, 0.12);
+}
+
+.ai-decision-watch {
+  color: #58a6ff;
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.ai-decision-risk {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.ai-decision-ignore,
+.ai-decision-pending {
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.ai-reason {
+  min-width: 260px;
+}
+
+.ai-reason b,
+.ai-reason span {
+  display: block;
+  white-space: normal;
+  line-height: 1.45;
+}
+
+.ai-reason span {
+  color: var(--muted);
+}
+
+.ai-row-btn {
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: #58a6ff;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ai-row-btn:hover:not(:disabled) {
+  border-color: #58a6ff;
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.ai-row-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

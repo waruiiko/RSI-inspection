@@ -9,6 +9,7 @@ import { sendWebhooks }  from './utils/webhook'
 import { getRsiZone }   from './utils/rsi'
 import { matchesAssetRef } from './utils/assetKey'
 import { applyLiquidityLimit } from './utils/liquidity'
+import { buildCandidates, candidateSignature, makeAiFeedItems } from './utils/aiCandidates'
 import Toolbar      from './components/Toolbar'
 import Heatmap      from './components/Heatmap'
 import StatsTable   from './components/StatsTable'
@@ -16,6 +17,7 @@ import ManagePage   from './components/ManagePage'
 import AlertPage    from './components/AlertPage'
 import AlertFeed    from './components/AlertFeed'
 import SettingsPage from './components/SettingsPage'
+import AiPage       from './components/AiPage'
 
 function isSilentHours(start, end) {
   if (!start || !end) return false
@@ -108,7 +110,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.0.6'
+const APP_VERSION = 'v1.0.7'
 
 function SummaryBar({ assets, timeframe }) {
   const counts = useMemo(() => {
@@ -226,7 +228,9 @@ export default function App() {
     refreshInterval, alertCooldown, levelCooldowns, popupEnabled, soundEnabled,
     silentStart, silentEnd, telegramToken, telegramChatId, discordWebhook,
     popupMinLevel, soundMinLevel, webhookMinLevel, autoCheckUpdates,
+    webhookAiOnly,
     observationEnabled, rsiSensitivity, startupStateAlerts,
+    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay,
     loaded: settingsLoaded, load: loadSettings,
   } = useSettingsStore()
 
@@ -238,9 +242,12 @@ export default function App() {
   const popupRef      = useRef(popupEnabled)
   const soundRef      = useRef(soundEnabled)
   const silentRef     = useRef({ start: silentStart, end: silentEnd })
-  const webhookRef    = useRef({ telegramToken, telegramChatId, discordWebhook })
+  const webhookRef    = useRef({ telegramToken, telegramChatId, discordWebhook, webhookAiOnly })
   const minLevelRef   = useRef({ popup: popupMinLevel, sound: soundMinLevel, webhook: webhookMinLevel })
   const alertModeRef  = useRef({ observationEnabled, rsiSensitivity, startupStateAlerts })
+  const autoAiRef     = useRef({ enabled: autoAiEnabled, interval: autoAiInterval, limit: autoAiLimit, startupDelay: autoAiStartupDelay })
+  const aiRunRef      = useRef({ busy: false, lastRun: 0, lastSignature: '', notified: {} })
+  const appStartedAtRef = useRef(Date.now())
   configsRef.current  = configs
   assetsRef.current   = assets
   cooldownRef.current = alertCooldown * 60 * 60 * 1000
@@ -248,9 +255,10 @@ export default function App() {
   popupRef.current    = popupEnabled
   soundRef.current    = soundEnabled
   silentRef.current   = { start: silentStart, end: silentEnd }
-  webhookRef.current  = { telegramToken, telegramChatId, discordWebhook }
+  webhookRef.current  = { telegramToken, telegramChatId, discordWebhook, webhookAiOnly }
   minLevelRef.current = { popup: popupMinLevel, sound: soundMinLevel, webhook: webhookMinLevel }
   alertModeRef.current = { observationEnabled, rsiSensitivity, startupStateAlerts }
+  autoAiRef.current = { enabled: autoAiEnabled, interval: autoAiInterval, limit: autoAiLimit, startupDelay: autoAiStartupDelay }
 
   const focusSearch  = useMarketStore(s => s.focusSearch)
   const setTimeframe = useMarketStore(s => s.setTimeframe)
@@ -495,7 +503,10 @@ export default function App() {
       const silent = isSilentHours(silentRef.current.start, silentRef.current.end)
       const popupItems = fired.filter(i => (i.level ?? 1) >= (minLevelRef.current.popup ?? 1))
       const soundItems = fired.filter(i => (i.level ?? 1) >= (minLevelRef.current.sound ?? 1))
-      const webhookItems = fired.filter(i => (i.level ?? 1) >= (minLevelRef.current.webhook ?? 1))
+      const webhookItems = fired.filter(i =>
+        (i.level ?? 1) >= (minLevelRef.current.webhook ?? 1) &&
+        (!webhookRef.current.webhookAiOnly || i.type === 'ai')
+      )
       if (!silent && popupRef.current && popupItems.length) window.api.showNotificationBatch(popupItems)
       if (!silent && soundRef.current && soundItems.length) playAlertSound()
       if (webhookItems.length) sendWebhooks(webhookItems, webhookRef.current)
@@ -525,6 +536,83 @@ export default function App() {
     })
   }, [completedAt])
 
+  useEffect(() => {
+    if (!completedAt || !settingsLoaded) return
+    const cfg = autoAiRef.current
+    if (!cfg.enabled) return
+
+    const now = Date.now()
+    const startupDelayMs = Math.max(1, Number(cfg.startupDelay) || 10) * 60 * 1000
+    if (now - appStartedAtRef.current < startupDelayMs) return
+
+    const state = aiRunRef.current
+    if (state.busy) return
+
+    const intervalMs = Math.max(5, Number(cfg.interval) || 30) * 60 * 1000
+    if (now - state.lastRun < intervalMs) return
+
+    const limit = Math.max(5, Number(cfg.limit) || 20)
+    const candidates = buildCandidates(assetsRef.current, limit)
+    if (!candidates.length) return
+
+    const sig = candidateSignature(candidates)
+    if (sig && sig === state.lastSignature) return
+
+    state.busy = true
+    state.lastRun = now
+    state.lastSignature = sig
+
+    const payload = {
+      scope: 'auto-market',
+      createdAt: new Date(now).toISOString(),
+      updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+      note: '自动 AI 筛选：AI 只做噪音过滤和提醒归类，不给交易指令。',
+      candidates,
+    }
+
+    window.api.runCodexScreen(payload)
+      .then(res => {
+        if (!res?.ok || !res.result?.items?.length) return
+        const finishedAt = Date.now()
+        const settingsApi = useSettingsStore.getState()
+        settingsApi.update('aiLastRunAt', finishedAt)
+        settingsApi.update('aiLastRunMode', 'auto')
+        settingsApi.update('aiLastRunCount', res.result.items.length)
+        settingsApi.update('aiLastSnapshot', {
+          ts: finishedAt,
+          mode: 'auto',
+          candidates,
+          result: res.result,
+          summary: res.result.summary ?? '',
+        })
+        const rawItems = makeAiFeedItems(candidates, res.result.items, Date.now())
+        const filtered = rawItems.filter(item => {
+          const key = `${item.symbol}|${item.condition}`
+          const prev = state.notified[key] ?? 0
+          if (Date.now() - prev < 2 * 60 * 60 * 1000) return false
+          state.notified[key] = Date.now()
+          return true
+        })
+        if (!filtered.length) return
+
+        addFeedItems(filtered)
+        const silent = isSilentHours(silentRef.current.start, silentRef.current.end)
+        const popupItems = filtered.filter(i => (i.level ?? 1) >= (minLevelRef.current.popup ?? 1))
+        const soundItems = filtered.filter(i => (i.level ?? 1) >= (minLevelRef.current.sound ?? 1))
+        const webhookItems = filtered.filter(i =>
+          (i.level ?? 1) >= (minLevelRef.current.webhook ?? 1) &&
+          (!webhookRef.current.webhookAiOnly || i.type === 'ai')
+        )
+        if (!silent && popupRef.current && popupItems.length) window.api.showNotificationBatch(popupItems)
+        if (!silent && soundRef.current && soundItems.length) playAlertSound()
+        if (webhookItems.length) sendWebhooks(webhookItems, webhookRef.current)
+      })
+      .catch(err => console.warn('[auto-ai-screen]', err))
+      .finally(() => {
+        aiRunRef.current.busy = false
+      })
+  }, [completedAt, settingsLoaded, updatedAt, addFeedItems])
+
   /* 鈹€鈹€ Filtered assets for summary bar 鈹€鈹€ */
   const filteredAssets = useMemo(() => {
     return filter === 'all'    ? assets
@@ -549,6 +637,8 @@ export default function App() {
         <AlertPage />
       ) : activeTab === 'settings' ? (
         <SettingsPage />
+      ) : activeTab === 'ai' ? (
+        <AiPage />
       ) : (
         <div className="main">
           {loading && !hasData && (

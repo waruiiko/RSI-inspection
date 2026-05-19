@@ -10,6 +10,7 @@ const TYPE_FILTERS = [
   { key: 'change', label: '涨跌' },
   { key: 'divergence', label: '背离' },
   { key: 'structure', label: '量价' },
+  { key: 'ai', label: 'AI' },
 ]
 
 function fmtTime(ts) {
@@ -50,6 +51,12 @@ function fmtDetail(item) {
     const move = item.priceMovePct != null ? `，K线 ${fmtPct(item.priceMovePct)}` : ''
     return ` (${item.timeframe}) ${item.signal ?? '量价结构'}，评分 ${item.value}${ratio}${move}`
   }
+  if (item.type === 'ai') {
+    const label = item.condition === 'focus' ? '重点' : item.condition === 'risk' ? '风险' : '观察'
+    const confidence = item.value != null ? `，置信度 ${item.value}` : ''
+    const next = item.nextCheck ? `，看点：${item.nextCheck}` : ''
+    return ` AI筛选：${label}${confidence}，${item.reason ?? '等待复核'}${next}`
+  }
   const dir = item.condition === 'above' ? '涨超' : '跌超'
   const mag = Math.abs(item.threshold)
   return ` 24h${dir} ${mag}%，当前 ${fmtPct(item.value)}`
@@ -65,6 +72,7 @@ function itemColor(item) {
   if (item.type === 'rsi') return item.condition === 'above' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'price') return item.condition === 'above' ? 'feed-red' : 'feed-green'
   if (item.type === 'divergence') return item.condition === 'bull' ? 'feed-green' : 'feed-orange'
+  if (item.type === 'ai') return item.condition === 'risk' ? 'feed-red' : item.condition === 'focus' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'structure') {
     return item.condition === 'bullish'
       ? 'feed-green'
