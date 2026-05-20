@@ -168,6 +168,33 @@ function VolumeSignalBadge({ signal, score }) {
   )
 }
 
+function DerivativesBadge({ data }) {
+  if (!data) return <span style={{ color: 'var(--dim)', fontSize: 11 }}>-</span>
+  const color = data.score >= 3 ? '#f97316'
+    : data.score <= -2 ? '#ef4444'
+    : data.score > 0 ? '#58a6ff'
+    : '#8b949e'
+  const oi = data.oiChange4h != null ? `OI4h ${data.oiChange4h >= 0 ? '+' : ''}${data.oiChange4h.toFixed(1)}%` : ''
+  const funding = data.fundingRate != null ? `费率 ${data.fundingRate.toFixed(4)}%` : ''
+  return (
+    <span title={[oi, funding, ...(data.reasons ?? [])].filter(Boolean).join('，')}
+      style={{
+        display: 'inline-block',
+        maxWidth: 86,
+        padding: '1px 6px',
+        borderRadius: 4,
+        fontSize: 11,
+        color,
+        background: `${color}18`,
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+      }}>
+      {data.label}
+    </span>
+  )
+}
+
 function getDataIssue(asset) {
   const turnover = getQuoteVolume(asset)
   if (!turnover) return '成交额缺失'
@@ -180,7 +207,7 @@ function getDataIssue(asset) {
 
 /* 鈹€鈹€ CSV export 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function exportCsv(visible, timeframe) {
-  const headers = ['#', '品种', '类型', '价格', '成交额', '24h%', ...TIMEFRAMES.map(tf => `RSI ${tf}`), '量价信号', '评分']
+  const headers = ['#', '品种', '类型', '价格', '成交额', '24h%', ...TIMEFRAMES.map(tf => `RSI ${tf}`), '量价信号', '资金结构', '评分']
   const rows = visible.map((a, i) => [
     i + 1,
     a.symbol,
@@ -190,6 +217,7 @@ function exportCsv(visible, timeframe) {
     a.change24h != null ? a.change24h.toFixed(2) : '',
     ...TIMEFRAMES.map(tf => a.rsi[tf] != null ? a.rsi[tf].toFixed(1) : ''),
     a.volumeSignal?.[timeframe]?.label ?? '',
+    a.derivatives?.label ?? '',
     a.signalScore?.[timeframe] ?? '',
   ])
   const csv = [headers, ...rows].map(r => r.join(',')).join('\n')
@@ -272,11 +300,13 @@ export default function StatsTable() {
                  : sortCol === '24h'      ? (a.change24h ?? -Infinity)
                  : sortCol === 'score'    ? getScore(a, rsiOverbought, rsiOversold, timeframe)
                  : sortCol === 'signal'   ? Math.abs(getScore(a, rsiOverbought, rsiOversold, timeframe))
+                 : sortCol === 'derivatives' ? (a.derivatives?.score ?? -Infinity)
                  : (a.rsi[sortCol] ?? -Infinity)
         const vb = sortCol === 'turnover' ? (getQuoteVolume(b) ?? -Infinity)
                  : sortCol === '24h'      ? (b.change24h ?? -Infinity)
                  : sortCol === 'score'    ? getScore(b, rsiOverbought, rsiOversold, timeframe)
                  : sortCol === 'signal'   ? Math.abs(getScore(b, rsiOverbought, rsiOversold, timeframe))
+                 : sortCol === 'derivatives' ? (b.derivatives?.score ?? -Infinity)
                  : (b.rsi[sortCol] ?? -Infinity)
         return sortDir === 'desc' ? vb - va : va - vb
       })
@@ -376,11 +406,14 @@ export default function StatsTable() {
               <th className="th-sort" onClick={() => handleSort('signal')} style={{ width: 94 }}>
                 量价 <SortIcon col="signal" sortCol={sortCol} sortDir={sortDir} />
               </th>
+              <th className="th-sort" onClick={() => handleSort('derivatives')} style={{ width: 94 }}>
+                资金 <SortIcon col="derivatives" sortCol={sortCol} sortDir={sortDir} />
+              </th>
               <th style={{ width: 72 }}>走势</th>
             </tr>
           </thead>
           <tbody onMouseLeave={handleBodyLeave}>
-            {padTop > 0 && <tr><td colSpan={11} style={{ height: padTop, padding: 0, border: 'none' }} /></tr>}
+            {padTop > 0 && <tr><td colSpan={12} style={{ height: padTop, padding: 0, border: 'none' }} /></tr>}
             {vItems.map(vItem => {
               const i = vItem.index
               const a = visible[i]
@@ -494,6 +527,10 @@ export default function StatsTable() {
                     <VolumeSignalBadge signal={a.volumeSignal?.[timeframe]} score={a.signalScore?.[timeframe]} />
                   </td>
 
+                  <td>
+                    <DerivativesBadge data={a.derivatives} />
+                  </td>
+
                   {/* 璧板娍 sparkline */}
                   <td style={{ padding: '6px 12px' }}>
                     <Sparkline closes={a.sparkline} />
@@ -501,7 +538,7 @@ export default function StatsTable() {
                 </tr>
               )
             })}
-            {padBot > 0 && <tr><td colSpan={11} style={{ height: padBot, padding: 0, border: 'none' }} /></tr>}
+            {padBot > 0 && <tr><td colSpan={12} style={{ height: padBot, padding: 0, border: 'none' }} /></tr>}
           </tbody>
         </table>
       </div>

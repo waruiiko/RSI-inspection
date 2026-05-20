@@ -35,6 +35,9 @@ const useSettingsStore = create((set, get) => ({
   aiLastRunMode:    '',
   aiLastRunCount:   0,
   aiLastSnapshot:   null,
+  launchReviewLastRunAt: null,
+  launchReviewLastReportPath: '',
+  launchReviewLastDir: '',
   loaded:          false,
 
   load: async () => {

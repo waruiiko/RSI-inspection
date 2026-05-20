@@ -11,19 +11,118 @@ const config         = require('./config')
 const { isUSMarketOpen } = require('./marketHours')
 
 const DEFAULT_TIMEFRAMES = ['15m', '1h', '4h', '1d']
+const AUTO_TRADFI_TIMEFRAMES = ['15m', '1h', '4h', '1d']
+const AUTO_TRADFI_STRATEGIES = ['breakout', 'breakdown', 'volume_divergence']
 let _indicatorWorker = null
 let _indicatorSeq = 0
 const _indicatorPending = new Map()
+
+function makeId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2)
+}
+
+function baseAssetConfig() {
+  return {
+    crypto: getCrypto(),
+    stocks: getStocks(),
+  }
+}
+
+function makeAutoTradFiAlert(pair) {
+  return {
+    id: makeId(),
+    symbol: pair.symbol,
+    enabled: true,
+    timeframes: AUTO_TRADFI_TIMEFRAMES,
+    requireAllTf: false,
+    alertLevel: 3,
+    special: true,
+    followTop: false,
+    followTopLimit: null,
+    rsiAbove: null,
+    rsiBelow: null,
+    changeAbove: null,
+    changeBelow: null,
+    priceAbove: null,
+    priceBelow: null,
+    divBull: false,
+    divBear: false,
+    volumeSignal: true,
+    strategies: AUTO_TRADFI_STRATEGIES,
+    strategy: null,
+    minScore: 1,
+    lastFired: {},
+    fireCount: 0,
+    autoTradfi: true,
+    createdAt: Date.now(),
+  }
+}
+
+async function ensureTradFiOnboarded() {
+  const current = config.load() || baseAssetConfig()
+  const crypto = Array.isArray(current.crypto) ? current.crypto : []
+  const stocks = Array.isArray(current.stocks) ? current.stocks : []
+  let futuresPairs = []
+  try {
+    futuresPairs = await binance.fetchAllFuturesPairs()
+  } catch (err) {
+    return { ok: false, added: [], totalTradfi: 0, error: err.message }
+  }
+  const tradfiPairs = futuresPairs.filter(p => p.contractType === 'TRADIFI_PERPETUAL')
+  const allTradfi = new Set(tradfiPairs.map(p => p.apiSymbol))
+  const hasSeenList = Array.isArray(current.tradfiSeen)
+  const seen = hasSeenList ? new Set(current.tradfiSeen) : new Set(allTradfi)
+  const tracked = new Set(crypto.map(a => a.apiSymbol))
+  const newPairs = hasSeenList
+    ? tradfiPairs.filter(p => !seen.has(p.apiSymbol))
+    : []
+
+  const nextCrypto = [...crypto]
+  for (const pair of newPairs) {
+    if (tracked.has(pair.apiSymbol)) continue
+    nextCrypto.push({
+      symbol: pair.symbol,
+      apiSymbol: pair.apiSymbol,
+      type: 'tradfi',
+      source: 'binance-futures',
+    })
+    tracked.add(pair.apiSymbol)
+  }
+
+  const nextCfg = {
+    ...current,
+    crypto: nextCrypto,
+    stocks,
+    tradfiSeen: [...allTradfi],
+    tradfiAutoAddedAt: newPairs.length ? Date.now() : current.tradfiAutoAddedAt,
+  }
+
+  if (newPairs.length || !hasSeenList) config.save(nextCfg)
+
+  if (newPairs.length) {
+    const alerts = config.loadAlerts() ?? []
+    const alertSymbols = new Set(alerts.map(a => String(a.symbol || '').toUpperCase()))
+    const additions = newPairs
+      .filter(pair => !alertSymbols.has(String(pair.symbol).toUpperCase()))
+      .map(makeAutoTradFiAlert)
+    if (additions.length) config.saveAlerts([...alerts, ...additions])
+  }
+
+  return {
+    ok: true,
+    added: newPairs.map(p => ({ symbol: p.symbol, apiSymbol: p.apiSymbol })),
+    totalTradfi: tradfiPairs.length,
+  }
+}
+
 exports.register = (ipcMain) => {
 
   // Asset config management
-  ipcMain.handle('assets:getConfig', () => {
+  ipcMain.handle('assets:getConfig', async () => {
+    await ensureTradFiOnboarded()
     const cfg = config.load()
     if (cfg) return cfg
-    return {
-      crypto: getCrypto(),
-      stocks: getStocks(),
-    }
+    return baseAssetConfig()
   })
 
   ipcMain.handle('assets:saveConfig', (_, cfg) => {
@@ -127,6 +226,22 @@ exports.register = (ipcMain) => {
     return codexReview.runScreen(payload, config.loadSettings())
   })
 
+  ipcMain.handle('codex:runLaunchReview', async (_, payload) => {
+    return codexReview.runLaunchReview(payload, config.loadSettings())
+  })
+
+  ipcMain.handle('codex:runMarketChat', async (_, payload) => {
+    return codexReview.runMarketChat(payload, config.loadSettings())
+  })
+
+  ipcMain.handle('codex:runManagePlan', async (_, payload) => {
+    return codexReview.runManagePlan(payload, config.loadSettings())
+  })
+
+  ipcMain.handle('codex:runAlertPlan', async (_, payload) => {
+    return codexReview.runAlertPlan(payload, config.loadSettings())
+  })
+
   ipcMain.handle('shell:openPath', async (_, target) => {
     if (!target) return { ok: false, error: 'Missing path' }
     const result = await shell.openPath(target)
@@ -142,6 +257,7 @@ exports.register = (ipcMain) => {
     scope = 'full',
     suppressAlerts = false,
   } = {}) => {
+    await ensureTradFiOnboarded()
     const assets        = getRuntimeAll()
     const normalizedAssets = assets.map(normalizeAsset)
     let cryptoAssets  = normalizedAssets.filter(a => a.source === 'binance')
@@ -357,7 +473,115 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
 
   if (quoteVolume24h == null) quoteVolume24h = estimateTurnover(closedCandlesByTf)
 
-  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore }
+  const derivatives = asset.source === 'binance-futures'
+    ? await fetchDerivativesSnapshot(asset, closedCandlesByTf, rsi, volumeSignal, signalScore)
+    : null
+
+  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives }
+}
+
+async function fetchDerivativesSnapshot(asset, candlesByTf, rsi, volumeSignal, signalScore) {
+  const [oiResult, premiumResult] = await Promise.allSettled([
+    binance.fetchFuturesOpenInterestHist(asset.apiSymbol, '1h', 24),
+    binance.fetchFuturesPremiumIndex(asset.apiSymbol),
+  ])
+  const oiHist = oiResult.status === 'fulfilled' ? oiResult.value : []
+  const premium = premiumResult.status === 'fulfilled' ? premiumResult.value : null
+  return buildDerivativesSignal({ asset, candlesByTf, rsi, volumeSignal, signalScore, oiHist, premium })
+}
+
+function lastPctChange(list, bars) {
+  if (!Array.isArray(list) || list.length < bars + 1) return null
+  const prev = list.at(-(bars + 1))
+  const cur = list.at(-1)
+  return prev ? pctChange(prev, cur) : null
+}
+
+function buildDerivativesSignal({ candlesByTf, rsi, volumeSignal, signalScore, oiHist, premium }) {
+  const oiValues = (oiHist ?? []).map(x => toNumber(x.openInterestValue)).filter(v => v != null)
+  const oiValue = oiValues.at(-1) ?? null
+  const oiChange1h = lastPctChange(oiValues, 1)
+  const oiChange4h = lastPctChange(oiValues, 4)
+  const oiChange24h = oiValues.length >= 2 ? pctChange(oiValues[0], oiValues.at(-1)) : null
+  const fundingRate = premium?.lastFundingRate != null ? premium.lastFundingRate * 100 : null
+  const nextFundingTime = premium?.nextFundingTime ?? null
+  const c1h = candlesByTf['1h'] ?? []
+  const c4h = candlesByTf['4h'] ?? []
+  const priceChange1h = c1h.length >= 2 ? pctChange(c1h.at(-2).close, c1h.at(-1).close) : null
+  const priceChange4h = c4h.length >= 2 ? pctChange(c4h.at(-2).close, c4h.at(-1).close) : null
+  const rsi4h = rsi?.['4h'] ?? null
+  const vol4h = volumeSignal?.['4h'] ?? volumeSignal?.['1h'] ?? null
+  const baseScore = Math.max(
+    Math.abs(signalScore?.['1h'] ?? 0),
+    Math.abs(signalScore?.['4h'] ?? 0),
+    Math.abs(signalScore?.['1d'] ?? 0),
+  )
+
+  let stage = 'neutral'
+  let label = '资金中性'
+  let score = 0
+  const reasons = []
+  const cleanFunding = fundingRate == null || Math.abs(fundingRate) <= 0.03
+  const crowdedFunding = fundingRate != null && Math.abs(fundingRate) >= 0.06
+  const oiUp = (oiChange4h ?? oiChange1h ?? 0) >= 6
+  const oiDown = (oiChange4h ?? oiChange1h ?? 0) <= -5
+  const priceUp = (priceChange4h ?? priceChange1h ?? 0) >= 2
+  const priceDown = (priceChange4h ?? priceChange1h ?? 0) <= -2
+  const notExtended = rsi4h == null || rsi4h < 70
+
+  if (oiUp) reasons.push(`OI 4h ${oiChange4h?.toFixed(1) ?? oiChange1h?.toFixed(1)}%`)
+  if (fundingRate != null) reasons.push(`费率 ${fundingRate.toFixed(4)}%`)
+  if (priceChange4h != null) reasons.push(`价格4h ${priceChange4h >= 0 ? '+' : ''}${priceChange4h.toFixed(1)}%`)
+
+  if (crowdedFunding && ((priceChange4h ?? 0) > 4 || (rsi4h ?? 0) >= 75)) {
+    stage = 'crowded'
+    label = '过热拥挤'
+    score = -3
+  } else if (oiUp && !priceUp && !priceDown && cleanFunding && notExtended) {
+    stage = 'early_build'
+    label = '早期蓄势'
+    score = 4
+  } else if (oiUp && priceUp && cleanFunding && notExtended) {
+    stage = 'long_build'
+    label = '多头增仓'
+    score = 3
+  } else if (oiUp && priceDown) {
+    stage = 'short_build'
+    label = '空头增仓'
+    score = -3
+  } else if (oiDown && priceUp) {
+    stage = 'short_cover'
+    label = '空头回补'
+    score = 1
+  } else if (oiDown && priceDown) {
+    stage = 'deleveraging'
+    label = '减仓释放'
+    score = -1
+  } else if (oiUp && cleanFunding) {
+    stage = 'oi_build'
+    label = 'OI 增长'
+    score = 2
+  }
+
+  if (vol4h?.volumeRatio >= 1.5 && score > 0) score += 1
+  if (baseScore >= 4 && score > 0) score += 1
+  if (crowdedFunding && score > 0) score -= 2
+  score = Math.max(-5, Math.min(5, score))
+
+  return {
+    oiValue,
+    oiChange1h,
+    oiChange4h,
+    oiChange24h,
+    fundingRate,
+    nextFundingTime,
+    priceChange1h,
+    priceChange4h,
+    stage,
+    label,
+    score,
+    reasons,
+  }
 }
 
 async function fetchOHLCVWithRetry(asset, timeframe, attempts = 3) {

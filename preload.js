@@ -63,5 +63,9 @@ contextBridge.exposeInMainWorld('api', {
   getCodexStatus:      ()        => ipcRenderer.invoke('codex:status'),
   runCodexReview:      (data)    => ipcRenderer.invoke('codex:runReview', data),
   runCodexScreen:      (data)    => ipcRenderer.invoke('codex:runScreen', data),
+  runCodexLaunchReview:(data)    => ipcRenderer.invoke('codex:runLaunchReview', data),
+  runCodexMarketChat:  (data)    => ipcRenderer.invoke('codex:runMarketChat', data),
+  runCodexManagePlan:  (data)    => ipcRenderer.invoke('codex:runManagePlan', data),
+  runCodexAlertPlan:   (data)    => ipcRenderer.invoke('codex:runAlertPlan', data),
   openPath:            (target)  => ipcRenderer.invoke('shell:openPath', target),
 })

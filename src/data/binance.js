@@ -112,6 +112,46 @@ async function fetchFuturesTickers(symbols) {
   )
 }
 
+async function fetchFuturesOpenInterestHist(symbol, period = '1h', limit = 24) {
+  const KEY = `binance:futures:oi:${symbol}:${period}:${limit}`, TTL = 5 * 60 * 1000
+  const cached = cache.get(KEY)
+  if (cached) return cached
+
+  const url = `${FAPI_BASE}/futures/data/openInterestHist?symbol=${symbol}&period=${period}&limit=${limit}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Binance Futures OI ${res.status} ${symbol}`)
+  const raw = await res.json()
+  const data = raw.map(x => ({
+    symbol: x.symbol,
+    openInterest: parseFloat(x.sumOpenInterest),
+    openInterestValue: parseFloat(x.sumOpenInterestValue),
+    timestamp: Number(x.timestamp),
+  }))
+  cache.set(KEY, data, TTL)
+  return data
+}
+
+async function fetchFuturesPremiumIndex(symbol) {
+  const KEY = `binance:futures:premium:${symbol}`, TTL = 2 * 60 * 1000
+  const cached = cache.get(KEY)
+  if (cached) return cached
+
+  const url = `${FAPI_BASE}/fapi/v1/premiumIndex?symbol=${symbol}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Binance Futures premium ${res.status} ${symbol}`)
+  const x = await res.json()
+  const data = {
+    symbol: x.symbol,
+    markPrice: parseFloat(x.markPrice),
+    indexPrice: parseFloat(x.indexPrice),
+    lastFundingRate: parseFloat(x.lastFundingRate),
+    nextFundingTime: Number(x.nextFundingTime),
+    time: Number(x.time),
+  }
+  cache.set(KEY, data, TTL)
+  return data
+}
+
 async function fetchAllFuturesPairs() {
   const KEY = 'binance:futuresPairs', TTL = 60 * 60 * 1000
   const cached = cache.get(KEY)
@@ -132,4 +172,5 @@ async function fetchAllFuturesPairs() {
 module.exports = {
   fetchKlines, fetchTickers, fetchAllUsdtPairs,
   fetchFuturesKlines, fetchFuturesTickers, fetchAllFuturesPairs,
+  fetchFuturesOpenInterestHist, fetchFuturesPremiumIndex,
 }

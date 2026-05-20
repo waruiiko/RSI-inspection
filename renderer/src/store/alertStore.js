@@ -74,6 +74,12 @@ const useAlertStore = create((set, get) => ({
     _persist(configs)
   },
 
+  replaceAll: (configs) => {
+    const next = normalizeAlertConfigs(Array.isArray(configs) ? configs : [])
+    set({ configs: next })
+    _persist(next)
+  },
+
   bulkSetTimeframes: (timeframes) => {
     const configs = get().configs.map(c => ({ ...c, timeframes }))
     set({ configs })

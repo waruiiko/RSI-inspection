@@ -66,6 +66,10 @@ export function buildCandidate(asset) {
     reasons.push(bullAlign >= 3 ? '多周期偏强' : '多周期偏弱')
   }
   if (move >= 4) { priority += Math.min(20, move * 2); reasons.push(`24H 波动 ${fmtPct(asset.change24h)}`) }
+  if (asset.derivatives?.score) {
+    priority += Math.abs(asset.derivatives.score) * 10
+    reasons.push(asset.derivatives.label ?? '资金结构')
+  }
   if (turnover) priority += Math.min(10, Math.log10(turnover / 1_000_000 + 1) * 3)
 
   return {
@@ -79,9 +83,22 @@ export function buildCandidate(asset) {
     divergence: asset.divergence ?? {},
     volumeSignal: asset.volumeSignal ?? {},
     signalScore: scores,
+    derivatives: asset.derivatives ?? null,
+    opportunityStage: classifyOpportunityStage(asset),
     priority: Math.round(priority),
     localReasons: reasons.slice(0, 4),
   }
+}
+
+export function classifyOpportunityStage(asset) {
+  const d = asset.derivatives
+  if (!d) return null
+  if (d.stage === 'crowded') return 'risk'
+  if (d.stage === 'early_build') return 'early'
+  if (d.stage === 'long_build' && (asset.rsi?.['4h'] ?? 50) < 72) return 'entry_window'
+  if (d.stage === 'short_cover') return 'pullback_watch'
+  if (Math.abs(d.score ?? 0) >= 4) return d.score > 0 ? 'early' : 'risk'
+  return null
 }
 
 export function buildCandidates(assets, limit = 30) {

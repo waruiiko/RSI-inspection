@@ -1,6 +1,29 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import usePairsStore  from '../store/pairsStore'
 import useGroupsStore from '../store/groupsStore'
+import useMarketStore from '../store/marketStore'
+import { getQuoteVolume } from '../utils/liquidity'
+
+function uniqByApiSymbol(items) {
+  const seen = new Set()
+  const out = []
+  for (const item of items) {
+    if (!item?.apiSymbol || seen.has(item.apiSymbol)) continue
+    seen.add(item.apiSymbol)
+    out.push(item)
+  }
+  return out
+}
+
+function countPlan(plan) {
+  const actions = Array.isArray(plan?.actions) ? plan.actions : []
+  const groups = Array.isArray(plan?.groups) ? plan.groups : []
+  return {
+    actions: actions.length,
+    symbols: actions.reduce((n, a) => n + (Array.isArray(a.apiSymbols) ? a.apiSymbols.length : 0), 0),
+    groups: groups.length,
+  }
+}
 
 export default function ManagePage({ onSaved }) {
   // ── Config ─────────────────────────────────────────────────
@@ -8,6 +31,7 @@ export default function ManagePage({ onSaved }) {
   const [trackedStocks,  setTrackedStocks]  = useState(new Set()) // Set<apiSymbol>
   const [knownStocks,    setKnownStocks]    = useState([])        // all validated stocks
   const [saving,         setSaving]         = useState(false)
+  const marketAssets = useMarketStore(s => s.assets)
 
   // ── Binance panel ──────────────────────────────────────────
   const spotPairs    = usePairsStore(s => s.spot)
@@ -22,6 +46,12 @@ export default function ManagePage({ onSaved }) {
   const [stockSearch,    setStockSearch]    = useState('')
   const [validating,     setValidating]     = useState(false)
   const [validateResult, setValidateResult] = useState(null)
+  const [aiInstruction,  setAiInstruction]  = useState('只保留成交额较高、近期有信号或资金结构较强的品种，低流动性和噪音品种先移除')
+  const [aiBusy,         setAiBusy]         = useState(false)
+  const [aiPlan,         setAiPlan]         = useState(null)
+  const [aiPlanDir,      setAiPlanDir]      = useState('')
+  const [aiError,        setAiError]        = useState('')
+  const [aiUndo,         setAiUndo]         = useState(null)
 
   // ── Load on mount ──────────────────────────────────────────
   useEffect(() => {
@@ -128,7 +158,9 @@ export default function ManagePage({ onSaved }) {
       .filter(s => trackedStocks.has(s.apiSymbol))
       .map(({ symbol, apiSymbol, type, source }) => ({ symbol, apiSymbol, type, source }))
 
+    const currentCfg = await window.api.getAssetsConfig()
     await window.api.saveAssetsConfig({
+      ...currentCfg,
       crypto:      cryptoArr,
       stocks:      stocksArr,
       knownStocks: knownStocks.map(({ symbol, apiSymbol, type, source, name }) =>
@@ -189,7 +221,145 @@ export default function ManagePage({ onSaved }) {
     setActiveGroup(name)
   }
 
+  const marketSnapshotByKey = useMemo(() => {
+    const map = new Map()
+    marketAssets.forEach(a => {
+      const snap = {
+        symbol: a.symbol,
+        apiSymbol: a.apiSymbol,
+        source: a.source,
+        type: a.type,
+        price: a.price,
+        change24h: a.change24h,
+        quoteVolume24h: getQuoteVolume(a),
+        rsi: a.rsi,
+        signalScore: a.signalScore,
+        volumeSignal: a.volumeSignal,
+        derivatives: a.derivatives,
+      }
+      if (a.apiSymbol) map.set(a.apiSymbol, snap)
+      if (a.symbol) map.set(a.symbol, snap)
+    })
+    return map
+  }, [marketAssets])
+
+  const buildManageAiContext = () => {
+    const allCrypto = uniqByApiSymbol([...spotPairs, ...futuresPairs])
+    return {
+      createdAt: new Date().toISOString(),
+      current: {
+        trackedCrypto: [...trackedCrypto],
+        trackedStocks: [...trackedStocks],
+        groups,
+      },
+      availableCrypto: allCrypto.map(p => ({
+        symbol: p.symbol,
+        apiSymbol: p.apiSymbol,
+        contractType: p.contractType ?? 'SPOT',
+        tracked: trackedCrypto.has(p.apiSymbol),
+        market: marketSnapshotByKey.get(p.apiSymbol) ?? marketSnapshotByKey.get(p.symbol) ?? null,
+      })),
+      knownStocks: knownStocks.map(s => ({
+        symbol: s.symbol,
+        apiSymbol: s.apiSymbol,
+        name: s.name,
+        tracked: trackedStocks.has(s.apiSymbol),
+        market: marketSnapshotByKey.get(s.apiSymbol) ?? marketSnapshotByKey.get(s.symbol) ?? null,
+      })),
+      rules: {
+        confirmationRequired: true,
+        allowedTargets: ['crypto', 'stocks'],
+        allowedModes: ['add', 'remove', 'set'],
+        note: 'AI only returns a plan; the app applies it after user confirmation.',
+      },
+    }
+  }
+
+  const generateAiPlan = async (instruction = aiInstruction) => {
+    const text = instruction.trim()
+    if (!text || aiBusy) return
+    setAiBusy(true)
+    setAiError('')
+    setAiPlan(null)
+    try {
+      const res = await window.api.runCodexManagePlan({
+        scope: 'manage',
+        instruction: text,
+        context: buildManageAiContext(),
+      })
+      if (res.ok && res.plan) {
+        setAiPlan(res.plan)
+        setAiPlanDir(res.planDir || '')
+      } else {
+        setAiError(res.parseError || res.stderr || res.stdout || 'AI 没有返回可用预案')
+        setAiPlanDir(res.planDir || '')
+      }
+    } catch (err) {
+      setAiError(err.message || String(err))
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  const applyAiPlan = () => {
+    if (!aiPlan) return
+    setAiUndo({
+      trackedCrypto: [...trackedCrypto],
+      trackedStocks: [...trackedStocks],
+      groups: { ...groups },
+    })
+    const cryptoAllowed = new Set([...spotPairs, ...futuresPairs].map(p => p.apiSymbol))
+    const stockAllowed = new Set(knownStocks.map(s => s.apiSymbol))
+    const clean = (items, allowed) => (Array.isArray(items) ? items : [])
+      .map(s => String(s || '').trim())
+      .filter(s => s && allowed.has(s))
+
+    for (const action of Array.isArray(aiPlan.actions) ? aiPlan.actions : []) {
+      const target = action.target === 'stocks' ? 'stocks' : 'crypto'
+      const allowed = target === 'stocks' ? stockAllowed : cryptoAllowed
+      const symbols = clean(action.apiSymbols, allowed)
+      if (target === 'stocks') {
+        setTrackedStocks(prev => {
+          const next = action.mode === 'set' ? new Set() : new Set(prev)
+          if (action.mode === 'remove') symbols.forEach(s => next.delete(s))
+          else symbols.forEach(s => next.add(s))
+          return next
+        })
+      } else {
+        setTrackedCrypto(prev => {
+          const next = action.mode === 'set' ? new Set() : new Set(prev)
+          if (action.mode === 'remove') symbols.forEach(s => next.delete(s))
+          else symbols.forEach(s => next.add(s))
+          return next
+        })
+      }
+    }
+
+    for (const group of Array.isArray(aiPlan.groups) ? aiPlan.groups : []) {
+      const name = String(group.name || '').trim()
+      if (!name) continue
+      const allowed = new Set([...cryptoAllowed, ...stockAllowed])
+      const symbols = clean(group.apiSymbols, allowed)
+      const prev = group.mode === 'add' ? new Set(groups[name] ?? []) : new Set()
+      symbols.forEach(s => prev.add(s))
+      setMembers(name, [...prev])
+      setActiveGroup(name)
+    }
+  }
+
+  const undoAiPlan = () => {
+    if (!aiUndo) return
+    setTrackedCrypto(new Set(aiUndo.trackedCrypto))
+    setTrackedStocks(new Set(aiUndo.trackedStocks))
+    Object.keys(groups).forEach(name => {
+      if (!Object.prototype.hasOwnProperty.call(aiUndo.groups, name)) deleteGroup(name)
+    })
+    Object.entries(aiUndo.groups).forEach(([name, members]) => setMembers(name, members))
+    setAiUndo(null)
+  }
+
   const totalSelected = trackedCrypto.size + trackedStocks.size
+  const aiPlanCount = countPlan(aiPlan)
 
   return (
     <div className="manage-page">
@@ -425,6 +595,60 @@ export default function ManagePage({ onSaved }) {
           )}
         </div>
 
+      </div>
+      <div className="manage-ai-panel">
+        <div className="panel-head">
+          <div>
+            <span className="panel-title">AI 批量助手</span>
+            <span className="panel-count" style={{ marginLeft: 8 }}>生成预案后需手动应用，不会自动修改配置</span>
+          </div>
+          <div className="manage-ai-actions">
+            {aiPlanDir && <button className="zone-btn" onClick={() => window.api.openPath(aiPlanDir)}>打开预案目录</button>}
+            <button className="zone-btn" disabled={aiBusy || !aiInstruction.trim()} onClick={() => generateAiPlan()}>
+              {aiBusy ? '生成中...' : '生成 AI 预案'}
+            </button>
+            <button className="save-btn" disabled={!aiPlan} onClick={applyAiPlan}>应用预案</button>
+            <button className="zone-btn" disabled={!aiUndo} onClick={undoAiPlan}>撤销应用</button>
+          </div>
+        </div>
+        <div className="manage-ai-input-row">
+          <textarea
+            value={aiInstruction}
+            onChange={e => setAiInstruction(e.target.value)}
+            placeholder="例如：只保留成交额 Top 100 的合约，并把 AI 候选池里值得观察的品种加入“重点观察”分组"
+          />
+          <div className="manage-ai-presets">
+            <button className="feed-type-btn" onClick={() => setAiInstruction('只保留成交额 Top 100 的加密货币，移除低流动性和无有效市场数据的品种')}>Top 100</button>
+            <button className="feed-type-btn" onClick={() => setAiInstruction('把评分较高、资金结构较强或近期有放量信号的品种加入“重点观察”分组，不改变当前跟踪列表')}>重点分组</button>
+            <button className="feed-type-btn" onClick={() => setAiInstruction('移除长时间无成交额、价格数据缺失或信号噪音明显的品种，保留主流和近期活跃品种')}>清理噪音</button>
+          </div>
+        </div>
+        {aiError && <div className="manage-ai-error">{aiError}</div>}
+        {aiPlan && (
+          <div className="manage-ai-plan">
+            <div className="manage-ai-summary">
+              <b>{aiPlan.summary || 'AI 批量操作预案'}</b>
+              <span>{aiPlanCount.actions} 个动作 · {aiPlanCount.symbols} 个标的 · {aiPlanCount.groups} 个分组</span>
+              {aiPlan.risk && <em>{aiPlan.risk}</em>}
+            </div>
+            <div className="manage-ai-plan-list">
+              {(aiPlan.actions ?? []).map((a, i) => (
+                <div key={`a-${i}`} className="manage-ai-plan-row">
+                  <strong>{a.target === 'stocks' ? '美股' : '加密'} · {a.mode}</strong>
+                  <span>{(a.apiSymbols ?? []).slice(0, 10).join(', ')}{(a.apiSymbols ?? []).length > 10 ? ` 等 ${(a.apiSymbols ?? []).length} 个` : ''}</span>
+                  <em>{a.reason}</em>
+                </div>
+              ))}
+              {(aiPlan.groups ?? []).map((g, i) => (
+                <div key={`g-${i}`} className="manage-ai-plan-row">
+                  <strong>分组 · {g.name} · {g.mode}</strong>
+                  <span>{(g.apiSymbols ?? []).slice(0, 10).join(', ')}{(g.apiSymbols ?? []).length > 10 ? ` 等 ${(g.apiSymbols ?? []).length} 个` : ''}</span>
+                  <em>{g.reason}</em>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

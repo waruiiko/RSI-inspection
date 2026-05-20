@@ -50,6 +50,9 @@ const SETTINGS_DEFAULTS = {
   aiLastRunMode:    '',
   aiLastRunCount:   0,
   aiLastSnapshot:   null,
+  launchReviewLastRunAt: null,
+  launchReviewLastReportPath: '',
+  launchReviewLastDir: '',
 }
 
 exports.load = () => {

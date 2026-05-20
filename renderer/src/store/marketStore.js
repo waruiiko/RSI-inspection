@@ -35,6 +35,7 @@ function mergeAssetData(prev, next) {
     divergence: { ...(prev.divergence ?? {}), ...(next.divergence ?? {}) },
     volumeSignal: { ...(prev.volumeSignal ?? {}), ...(next.volumeSignal ?? {}) },
     signalScore: { ...(prev.signalScore ?? {}), ...(next.signalScore ?? {}) },
+    derivatives: next.derivatives ?? prev.derivatives,
     sparkline: next.sparkline?.length ? next.sparkline : prev.sparkline,
   }
 }

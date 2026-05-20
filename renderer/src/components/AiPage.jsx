@@ -279,6 +279,7 @@ export default function AiPage() {
               <th>24H</th>
               {TFS.map(tf => <th key={tf}>RSI {tf.toUpperCase()}</th>)}
               <th>量能</th>
+              <th>资金结构</th>
               <th>本地原因</th>
               <th>操作</th>
               {showingResult && <th>AI</th>}
@@ -288,7 +289,7 @@ export default function AiPage() {
           <tbody>
             {visible.length === 0 ? (
               <tr>
-                <td colSpan={showingResult ? 12 : 10} className="ai-empty">
+                <td colSpan={showingResult ? 13 : 11} className="ai-empty">
                   {showingResult ? '暂无 AI 结果。先运行一次 Codex 筛选。' : '暂无候选。市场越平静，这里越空是正常的。'}
                 </td>
               </tr>
@@ -304,6 +305,13 @@ export default function AiPage() {
                     <td key={tf}>{c.rsi[tf] == null ? '-' : Number(c.rsi[tf]).toFixed(1)}</td>
                   ))}
                   <td>{c.turnover ? formatTurnover(c.turnover) : '-'}</td>
+                  <td>
+                    {c.derivatives ? (
+                      <span className={`ai-decision ${c.derivatives.score >= 3 ? 'ai-decision-focus' : c.derivatives.score <= -2 ? 'ai-decision-risk' : 'ai-decision-watch'}`}>
+                        {c.derivatives.label} {c.derivatives.score > 0 ? '+' : ''}{c.derivatives.score}
+                      </span>
+                    ) : '-'}
+                  </td>
                   <td>{c.localReasons.join('，') || '-'}</td>
                   <td>
                     <button

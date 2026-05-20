@@ -3,6 +3,7 @@ import useMarketStore   from './store/marketStore'
 import useAlertStore    from './store/alertStore'
 import useSettingsStore from './store/settingsStore'
 import useGroupsStore   from './store/groupsStore'
+import useSignalTrailStore from './store/signalTrailStore'
 import { isUSMarketOpen } from './utils/marketHours'
 import { playAlertSound } from './utils/sound'
 import { sendWebhooks }  from './utils/webhook'
@@ -18,6 +19,10 @@ import AlertPage    from './components/AlertPage'
 import AlertFeed    from './components/AlertFeed'
 import SettingsPage from './components/SettingsPage'
 import AiPage       from './components/AiPage'
+import SignalTrailPage from './components/SignalTrailPage'
+import AiReviewPage from './components/AiReviewPage'
+import LaunchReviewPage from './components/LaunchReviewPage'
+import MarketChatPage from './components/MarketChatPage'
 
 function isSilentHours(start, end) {
   if (!start || !end) return false
@@ -110,7 +115,11 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.0.7'
+const APP_VERSION = 'v1.0.8'
+
+function normalizeVersionTag(v) {
+  return String(v || '').trim().replace(/^v/i, '')
+}
 
 function SummaryBar({ assets, timeframe }) {
   const counts = useMemo(() => {
@@ -264,8 +273,10 @@ export default function App() {
   const setTimeframe = useMarketStore(s => s.setTimeframe)
   const [activeTab, setActiveTab] = useState('market')
   const [updateInfo, setUpdateInfo] = useState(null)
+  const [chatOpen, setChatOpen] = useState(false)
 
   const loadGroups = useGroupsStore(s => s.load)
+  const updateSignalTrail = useSignalTrailStore(s => s.updateFromAssets)
 
   useEffect(() => {
     loadSettings()
@@ -312,7 +323,7 @@ export default function App() {
     if (!settingsLoaded || !autoCheckUpdates) return
     window.api.checkForUpdates?.(false)
       .then(info => {
-        if (info?.tag && info.tag !== APP_VERSION) setUpdateInfo(info)
+        if (info?.tag && normalizeVersionTag(info.tag) !== normalizeVersionTag(APP_VERSION)) setUpdateInfo(info)
       })
       .catch(err => console.warn('[update-check]', err))
   }, [settingsLoaded, autoCheckUpdates])
@@ -613,6 +624,11 @@ export default function App() {
       })
   }, [completedAt, settingsLoaded, updatedAt, addFeedItems])
 
+  useEffect(() => {
+    if (!completedAt || !assets.length) return
+    updateSignalTrail(assets)
+  }, [completedAt, assets, updateSignalTrail])
+
   /* 鈹€鈹€ Filtered assets for summary bar 鈹€鈹€ */
   const filteredAssets = useMemo(() => {
     return filter === 'all'    ? assets
@@ -631,48 +647,68 @@ export default function App() {
         </div>
       )}
 
-      {activeTab === 'manage' ? (
-        <ManagePage onSaved={() => { setActiveTab('market'); fetchData() }} />
-      ) : activeTab === 'alerts' ? (
-        <AlertPage />
-      ) : activeTab === 'settings' ? (
-        <SettingsPage />
-      ) : activeTab === 'ai' ? (
-        <AiPage />
-      ) : (
-        <div className="main">
-          {loading && !hasData && (
-            <div className="splash">
-              <div className="spinner" />
-              正在获取市场数据...
-            </div>
-          )}
-
-          {error && !hasData && (
-            <div className="splash error">{error}</div>
-          )}
-
-          {hasData && (
-            <div className="market-layout">
-              <div className="market-main-column">
-                {/* Summary cards */}
-                <SummaryBar assets={filteredAssets} timeframe={timeframe} />
-                <StatusBanner />
-
-                {/* Heatmap */}
-                <div className="heatmap-wrapper">
-                  <Heatmap />
+      <div className={`app-shell ${chatOpen ? 'chat-open' : ''}`}>
+        <div className="app-content">
+          {activeTab === 'manage' ? (
+            <ManagePage onSaved={() => { setActiveTab('market'); fetchData() }} />
+          ) : activeTab === 'alerts' ? (
+            <AlertPage />
+          ) : activeTab === 'settings' ? (
+            <SettingsPage />
+          ) : activeTab === 'ai' ? (
+            <AiPage />
+          ) : activeTab === 'ai-review' ? (
+            <AiReviewPage />
+          ) : activeTab === 'trail' ? (
+            <SignalTrailPage />
+          ) : activeTab === 'launch-review' ? (
+            <LaunchReviewPage />
+          ) : (
+            <div className="main">
+              {loading && !hasData && (
+                <div className="splash">
+                  <div className="spinner" />
+                  正在获取市场数据...
                 </div>
+              )}
 
-                {/* Table */}
-                <div className="market-table-wrap">
-                  <StatsTable />
+              {error && !hasData && (
+                <div className="splash error">{error}</div>
+              )}
+
+              {hasData && (
+                <div className="market-layout">
+                  <div className="market-main-column">
+                    {/* Summary cards */}
+                    <SummaryBar assets={filteredAssets} timeframe={timeframe} />
+                    <StatusBanner />
+
+                    {/* Heatmap */}
+                    <div className="heatmap-wrapper">
+                      <Heatmap />
+                    </div>
+
+                    {/* Table */}
+                    <div className="market-table-wrap">
+                      <StatsTable />
+                    </div>
+                  </div>
+                  <AlertFeed />
                 </div>
-              </div>
-              <AlertFeed />
+              )}
             </div>
           )}
         </div>
+        {chatOpen && (
+          <aside className="chat-drawer">
+            <MarketChatPage activeTab={activeTab} drawer onClose={() => setChatOpen(false)} />
+          </aside>
+        )}
+      </div>
+      {!chatOpen && (
+        <button className="chat-fab" onClick={() => setChatOpen(true)} title="打开 AI 对话">
+          AI
+        </button>
       )}
     </div>
   )

@@ -3,7 +3,7 @@ import useAlertStore  from '../store/alertStore'
 import usePairsStore  from '../store/pairsStore'
 import useMarketStore from '../store/marketStore'
 import useGroupsStore from '../store/groupsStore'
-import { applyLiquidityLimit } from '../utils/liquidity'
+import { applyLiquidityLimit, getQuoteVolume } from '../utils/liquidity'
 
 const ALL_TF = ['15m', '1h', '4h', '1d']
 const STRATEGIES = [
@@ -24,6 +24,8 @@ const ALERT_LEVELS = [
   { value: 2, label: '二级提醒' },
   { value: 3, label: '三级提醒' },
 ]
+
+const VALID_STRATEGIES = new Set(DEFAULT_STRATEGIES)
 
 const LIST_TABS = [
   { key: 'spot',    label: '现货'   },
@@ -89,6 +91,7 @@ export default function AlertPage() {
   const toggle       = useAlertStore(s => s.toggle)
   const addFeedItems = useAlertStore(s => s.addFeedItems)
   const bulkSetTimeframes = useAlertStore(s => s.bulkSetTimeframes)
+  const replaceAllRules = useAlertStore(s => s.replaceAll)
 
   // ── Data ──────────────────────────────────────────────────
   const spotPairs    = usePairsStore(s => s.spot)
@@ -121,6 +124,12 @@ export default function AlertPage() {
   const [minScore,     setMinScore]      = useState(3)
   const [priceMode,    setPriceMode]     = useState('absolute')  // 'absolute' | 'pct'
   const [error,        setError]         = useState('')
+  const [aiInstruction, setAiInstruction] = useState('为当前观察列表生成一组不过度打扰的提醒：4h/1d 量价结构为主，1h 做观察，评分至少 3；强信号设为二级提醒，多周期共振设为三级提醒')
+  const [aiBusy,        setAiBusy]        = useState(false)
+  const [aiPlan,        setAiPlan]        = useState(null)
+  const [aiPlanDir,     setAiPlanDir]     = useState('')
+  const [aiError,       setAiError]       = useState('')
+  const [aiUndoRules,   setAiUndoRules]   = useState(null)
 
   const assets = useMarketStore(s => s.assets)
   const groups = useGroupsStore(s => s.groups)
@@ -211,6 +220,150 @@ export default function AlertPage() {
     setAlertLevel('auto')
     setFollowTop(true)
     setError(top.length ? '' : '当前没有可用于 Top50 的市场数据，请先刷新')
+  }
+
+  const allowedAlertSymbols = useMemo(() => {
+    return new Set([
+      ...spotPairs.map(p => p.symbol),
+      ...futuresPairs.map(p => p.symbol),
+      ...knownStocks.map(s => s.symbol),
+      ...trackedSymbols,
+      ...assets.map(a => a.symbol),
+    ].filter(Boolean).map(s => String(s).toUpperCase()))
+  }, [spotPairs, futuresPairs, knownStocks, trackedSymbols, assets])
+
+  const buildAlertAiContext = () => ({
+    createdAt: new Date().toISOString(),
+    allowedSymbols: [...allowedAlertSymbols],
+    trackedSymbols,
+    selectedSymbols: [...selected],
+    currentRules: configs.map(c => ({
+      symbol: c.symbol,
+      enabled: c.enabled,
+      timeframes: c.timeframes,
+      requireAllTf: c.requireAllTf,
+      alertLevel: c.alertLevel,
+      rsiAbove: c.rsiAbove,
+      rsiBelow: c.rsiBelow,
+      changeAbove: c.changeAbove,
+      changeBelow: c.changeBelow,
+      priceAbove: c.priceAbove,
+      priceBelow: c.priceBelow,
+      divBull: c.divBull,
+      divBear: c.divBear,
+      volumeSignal: c.volumeSignal,
+      strategies: getRuleStrategies(c),
+      minScore: c.minScore,
+      fireCount: c.fireCount ?? 0,
+      lastFiredAt: c.lastFiredAt ?? null,
+    })),
+    market: assets.map(a => ({
+      symbol: a.symbol,
+      source: a.source,
+      type: a.type,
+      price: a.price,
+      change24h: a.change24h,
+      quoteVolume24h: getQuoteVolume(a),
+      rsi: a.rsi,
+      signalScore: a.signalScore,
+      volumeSignal: a.volumeSignal,
+      divergence: a.divergence,
+      derivatives: a.derivatives,
+    })).slice(0, 300),
+    availableFields: {
+      timeframes: ALL_TF,
+      strategies: DEFAULT_STRATEGIES,
+      alertLevels: [1, 2, 3],
+    },
+  })
+
+  const normalizeAiRule = (rule) => {
+    const symbols = (Array.isArray(rule?.symbols) ? rule.symbols : [rule?.symbol])
+      .map(s => String(s || '').trim().toUpperCase())
+      .filter(s => s && allowedAlertSymbols.has(s))
+    const timeframes = (Array.isArray(rule?.timeframes) ? rule.timeframes : ['4h', '1d'])
+      .map(tf => String(tf || '').trim())
+      .filter(tf => ALL_TF.includes(tf))
+    const strategies = (Array.isArray(rule?.strategies) ? rule.strategies : [])
+      .filter(s => VALID_STRATEGIES.has(s))
+    const num = (v) => v == null || v === '' ? null : Number(v)
+    const level = Number(rule?.alertLevel)
+    const fields = {
+      timeframes: timeframes.length ? timeframes : ['4h', '1d'],
+      requireAllTf: !!rule?.requireAllTf,
+      alertLevel: [1, 2, 3].includes(level) ? level : inferAlertLevel(timeframes),
+      followTop: !!rule?.followTop,
+      followTopLimit: rule?.followTop ? Number(rule.followTopLimit) || 50 : null,
+      rsiAbove: num(rule?.rsiAbove),
+      rsiBelow: num(rule?.rsiBelow),
+      changeAbove: num(rule?.changeAbove),
+      changeBelow: num(rule?.changeBelow),
+      priceAbove: num(rule?.priceAbove),
+      priceBelow: num(rule?.priceBelow),
+      divBull: !!rule?.divBull,
+      divBear: !!rule?.divBear,
+      volumeSignal: !!rule?.volumeSignal || strategies.length > 0,
+      strategies: strategies.length ? strategies : null,
+      strategy: strategies.length === 1 ? strategies[0] : null,
+      minScore: strategies.length || rule?.volumeSignal ? Number(rule?.minScore) || 3 : null,
+    }
+    fields.special = fields.alertLevel >= 2
+    return { symbols, fields, reason: rule?.reason || '' }
+  }
+
+  const generateAiAlertPlan = async (instruction = aiInstruction) => {
+    const text = instruction.trim()
+    if (!text || aiBusy) return
+    setAiBusy(true)
+    setAiError('')
+    setAiPlan(null)
+    try {
+      const res = await window.api.runCodexAlertPlan({
+        scope: 'alerts',
+        instruction: text,
+        context: buildAlertAiContext(),
+      })
+      if (res.ok && res.plan) {
+        setAiPlan(res.plan)
+        setAiPlanDir(res.planDir || '')
+      } else {
+        setAiError(res.parseError || res.stderr || res.stdout || 'AI 没有返回可用提醒预案')
+        setAiPlanDir(res.planDir || '')
+      }
+    } catch (err) {
+      setAiError(err.message || String(err))
+    } finally {
+      setAiBusy(false)
+    }
+  }
+
+  const applyAiAlertPlan = () => {
+    if (!aiPlan) return
+    setAiUndoRules(JSON.parse(JSON.stringify(configs)))
+    let applied = 0
+    for (const rule of Array.isArray(aiPlan.rules) ? aiPlan.rules : []) {
+      const normalized = normalizeAiRule(rule)
+      const hasCondition = normalized.fields.volumeSignal
+        || normalized.fields.rsiAbove != null
+        || normalized.fields.rsiBelow != null
+        || normalized.fields.changeAbove != null
+        || normalized.fields.changeBelow != null
+        || normalized.fields.priceAbove != null
+        || normalized.fields.priceBelow != null
+        || normalized.fields.divBull
+        || normalized.fields.divBear
+      if (!normalized.symbols.length || !hasCondition) continue
+      upsert(normalized.symbols, normalized.fields)
+      applied += normalized.symbols.length
+    }
+    setError(applied ? `已应用 AI 预案：${applied} 个提醒规则` : 'AI 预案没有可应用的规则')
+  }
+
+  const undoAiAlertPlan = () => {
+    if (!aiUndoRules) return
+    replaceAllRules(aiUndoRules)
+    setAiUndoRules(null)
+    setError('已撤销上次 AI 提醒预案')
   }
 
   const handleEdit = useCallback(c => {
@@ -368,6 +521,15 @@ export default function AlertPage() {
     strategies: customMode ? null : strategies,
     minScore: customMode ? null : minScore,
   }), [selected, timeframes, requireAllTf, alertLevel, followTop, rsiAbove, rsiBelow, changeAbove, changeBelow, priceAbove, priceBelow, divBull, divBear, volumeSignal, customMode, strategies, minScore])
+
+  const aiPlanStats = useMemo(() => {
+    const rules = Array.isArray(aiPlan?.rules) ? aiPlan.rules : []
+    let symbols = 0
+    for (const rule of rules) {
+      symbols += normalizeAiRule(rule).symbols.length
+    }
+    return { rules: rules.length, symbols }
+  }, [aiPlan, allowedAlertSymbols])
 
   return (
     <div className="alert-page">
@@ -822,6 +984,57 @@ export default function AlertPage() {
           </div>
         </div>
 
+      </div>
+      <div className="manage-ai-panel alert-ai-panel">
+        <div className="panel-head">
+          <div>
+            <span className="panel-title">AI 提醒助手</span>
+            <span className="panel-count" style={{ marginLeft: 8 }}>生成规则预案后需手动应用</span>
+          </div>
+          <div className="manage-ai-actions">
+            {aiPlanDir && <button className="zone-btn" onClick={() => window.api.openPath(aiPlanDir)}>打开预案目录</button>}
+            <button className="zone-btn" disabled={aiBusy || !aiInstruction.trim()} onClick={() => generateAiAlertPlan()}>
+              {aiBusy ? '生成中...' : '生成 AI 预案'}
+            </button>
+            <button className="save-btn" disabled={!aiPlan} onClick={applyAiAlertPlan}>应用预案</button>
+            <button className="zone-btn" disabled={!aiUndoRules} onClick={undoAiAlertPlan}>撤销应用</button>
+          </div>
+        </div>
+        <div className="manage-ai-input-row">
+          <textarea
+            value={aiInstruction}
+            onChange={e => setAiInstruction(e.target.value)}
+            placeholder="例如：为观察列表生成 4h/1d 量价结构提醒，强信号二级，多周期共振三级"
+          />
+          <div className="manage-ai-presets">
+            <button className="feed-type-btn" onClick={() => setAiInstruction('为当前观察列表生成低噪音提醒：4h/1d 量价结构为主，评分至少 3，强信号二级提醒')}>低噪音</button>
+            <button className="feed-type-btn" onClick={() => setAiInstruction('为当前选中的品种生成观察提醒：1h/4h RSI 极值、背离和量价结构组合，普通提醒为主')}>当前选中</button>
+            <button className="feed-type-btn" onClick={() => setAiInstruction('生成一套多周期共振提醒：1h/4h/1d 同时满足 RSI 极值时设为三级特殊提醒，单周期仍保留普通提醒')}>共振规则</button>
+          </div>
+        </div>
+        {aiError && <div className="manage-ai-error">{aiError}</div>}
+        {aiPlan && (
+          <div className="manage-ai-plan">
+            <div className="manage-ai-summary">
+              <b>{aiPlan.summary || 'AI 提醒规则预案'}</b>
+              <span>{aiPlanStats.rules} 条规则 · 影响 {aiPlanStats.symbols} 个标的</span>
+              {aiPlan.risk && <em>{aiPlan.risk}</em>}
+            </div>
+            <div className="manage-ai-plan-list">
+              {(aiPlan.rules ?? []).map((rule, i) => {
+                const normalized = normalizeAiRule(rule)
+                const preview = { symbol: normalized.symbols[0] || '-', ...normalized.fields }
+                return (
+                  <div key={`alert-plan-${i}`} className="manage-ai-plan-row alert-ai-plan-row">
+                    <strong>{normalized.symbols.slice(0, 3).join(', ')}{normalized.symbols.length > 3 ? ` 等 ${normalized.symbols.length} 个` : ''}</strong>
+                    <span>{describeRule(preview, normalized.symbols.length || 1)}</span>
+                    <em>{rule.reason}</em>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
