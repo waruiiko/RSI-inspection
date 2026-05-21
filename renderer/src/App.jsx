@@ -4,12 +4,13 @@ import useAlertStore    from './store/alertStore'
 import useSettingsStore from './store/settingsStore'
 import useGroupsStore   from './store/groupsStore'
 import useSignalTrailStore from './store/signalTrailStore'
+import useWatchPoolStore from './store/watchPoolStore'
 import { isUSMarketOpen } from './utils/marketHours'
 import { playAlertSound } from './utils/sound'
 import { sendWebhooks }  from './utils/webhook'
 import { getRsiZone }   from './utils/rsi'
 import { matchesAssetRef } from './utils/assetKey'
-import { applyLiquidityLimit } from './utils/liquidity'
+import { applyLiquidityLimit, getQuoteVolume } from './utils/liquidity'
 import { buildCandidates, candidateSignature, makeAiFeedItems } from './utils/aiCandidates'
 import Toolbar      from './components/Toolbar'
 import Heatmap      from './components/Heatmap'
@@ -23,6 +24,7 @@ import SignalTrailPage from './components/SignalTrailPage'
 import AiReviewPage from './components/AiReviewPage'
 import LaunchReviewPage from './components/LaunchReviewPage'
 import MarketChatPage from './components/MarketChatPage'
+import WatchPoolPage from './components/WatchPoolPage'
 
 function isSilentHours(start, end) {
   if (!start || !end) return false
@@ -73,6 +75,85 @@ function observationTimeframes(tfs, enabled) {
   return [...next]
 }
 
+function findSlowOversoldSignals(assets, prevAssets, now, notified) {
+  const candidates = assets
+    .filter(a => a.type === 'crypto' || a.type === 'tradfi')
+    .filter(a => getQuoteVolume(a) >= 1_000_000)
+    .filter(a => Math.abs(a.change24h ?? 0) <= 8)
+
+  const top = applyLiquidityLimit(candidates, 160)
+  const out = []
+  for (const asset of top) {
+    const prev = prevAssets?.find(a => matchesAssetRef(a, asset.symbol))
+    for (const rule of [
+      { tf: '4h', threshold: 35, strong: 32 },
+      { tf: '1d', threshold: 38, strong: 35 },
+    ]) {
+      const rsi = asset.rsi?.[rule.tf]
+      if (rsi == null || rsi > rule.threshold) continue
+      const prevRsi = prev?.rsi?.[rule.tf]
+      const entering = prevRsi == null || prevRsi > rule.threshold || Math.abs(prevRsi - rsi) >= 2
+      if (!entering) continue
+      const key = `${asset.symbol}|${rule.tf}|slow_oversold`
+      if (now - (notified[key] ?? 0) < 12 * 60 * 60 * 1000) continue
+      notified[key] = now
+      out.push({
+        id: `slow-rsi-${asset.symbol}-${rule.tf}-${now}`,
+        ts: now,
+        symbol: asset.symbol,
+        type: 'rsi',
+        timeframe: rule.tf,
+        condition: 'below',
+        signal: '慢速超卖观察',
+        threshold: rule.threshold,
+        value: rsi,
+        price: asset.price,
+        change24h: asset.change24h,
+        level: rsi <= rule.strong ? 1 : 0,
+        reason: `${rule.tf} RSI 缓慢进入超卖/低位区，24H 波动不剧烈，适合加入观察而不是追急跌。`,
+      })
+      if (out.length >= 8) return out
+    }
+  }
+  return out
+}
+
+function findVolatileWatchPoolEntries(assets, prevAssets, now) {
+  const out = []
+  for (const asset of assets) {
+    if (asset.type !== 'crypto' && asset.type !== 'tradfi') continue
+    const turnover = getQuoteVolume(asset)
+    if (turnover < 1_000_000) continue
+    const move = asset.change24h ?? 0
+    const absMove = Math.abs(move)
+    const shortHot = (asset.rsi?.['15m'] ?? 50) >= 80 || (asset.rsi?.['1h'] ?? 50) >= 80
+    const shortCold = (asset.rsi?.['15m'] ?? 50) <= 20 || (asset.rsi?.['1h'] ?? 50) <= 20
+    const violent = absMove >= 12 || shortHot || shortCold
+    if (!violent) continue
+    const prev = prevAssets?.find(a => matchesAssetRef(a, asset.symbol))
+    const prevMove = Math.abs(prev?.change24h ?? 0)
+    if (prev && prevMove >= 12 && absMove >= 12 && Math.abs(prevMove - absMove) < 2 && !shortHot && !shortCold) continue
+    const reasons = []
+    if (absMove >= 12) reasons.push(`24H ${move >= 0 ? '上涨' : '下跌'} ${move.toFixed(2)}%`)
+    if (shortHot) reasons.push('短周期 RSI 过热')
+    if (shortCold) reasons.push('短周期 RSI 过冷')
+    out.push({
+      symbol: asset.symbol,
+      source: 'auto',
+      reason: reasons.join('，'),
+      ts: now,
+      snapshot: {
+        price: asset.price,
+        change24h: asset.change24h,
+        rsi: asset.rsi,
+        turnover,
+        signalScore: asset.signalScore,
+      },
+    })
+  }
+  return out.slice(0, 30)
+}
+
 function StatusBanner() {
   const events = useMarketStore(s => s.statusEvents)
   const clearStatus = useMarketStore(s => s.clearStatus)
@@ -115,7 +196,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.0.8'
+const APP_VERSION = 'v1.0.9'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
@@ -232,6 +313,9 @@ export default function App() {
   const updateFeed      = useAlertStore(s => s.updateFeed)
   const loadAlerts      = useAlertStore(s => s.load)
   const syncFollowTop   = useAlertStore(s => s.syncFollowTop)
+  const addWatchPool    = useWatchPoolStore(s => s.addOrUpdate)
+  const cleanupWatchPool = useWatchPoolStore(s => s.cleanup)
+  const watchPoolItems  = useWatchPoolStore(s => s.items)
 
   const {
     refreshInterval, alertCooldown, levelCooldowns, popupEnabled, soundEnabled,
@@ -240,6 +324,7 @@ export default function App() {
     webhookAiOnly,
     observationEnabled, rsiSensitivity, startupStateAlerts,
     autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay,
+    watchPoolRetentionDays,
     loaded: settingsLoaded, load: loadSettings,
   } = useSettingsStore()
 
@@ -256,6 +341,7 @@ export default function App() {
   const alertModeRef  = useRef({ observationEnabled, rsiSensitivity, startupStateAlerts })
   const autoAiRef     = useRef({ enabled: autoAiEnabled, interval: autoAiInterval, limit: autoAiLimit, startupDelay: autoAiStartupDelay })
   const aiRunRef      = useRef({ busy: false, lastRun: 0, lastSignature: '', notified: {} })
+  const slowRsiRef    = useRef({})
   const appStartedAtRef = useRef(Date.now())
   configsRef.current  = configs
   assetsRef.current   = assets
@@ -274,6 +360,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('market')
   const [updateInfo, setUpdateInfo] = useState(null)
   const [chatOpen, setChatOpen] = useState(false)
+  const [aiPlanRequest, setAiPlanRequest] = useState(null)
 
   const loadGroups = useGroupsStore(s => s.load)
   const updateSignalTrail = useSignalTrailStore(s => s.updateFromAssets)
@@ -353,6 +440,9 @@ export default function App() {
     const marketOpen = isUSMarketOpen()
     const margin = rsiMargin(alertModeRef.current.rsiSensitivity)
     const observationOn = alertModeRef.current.observationEnabled
+    findVolatileWatchPoolEntries(assetsRef.current, prevAssetsRef.current, now)
+      .forEach(entry => addWatchPool(entry))
+    cleanupWatchPool(watchPoolRetentionDays)
     const cooldownFor = level => {
       const hours = levelCooldownRef.current?.[level] ?? alertCooldown
       return hours * 60 * 60 * 1000
@@ -507,6 +597,16 @@ export default function App() {
       }
     }
 
+    const slowOversold = findSlowOversoldSignals(assetsRef.current, prevAssetsRef.current, now, slowRsiRef.current)
+    if (slowOversold.length) {
+      for (const item of slowOversold) {
+        const batchKey = [item.symbol, item.timeframe, item.type, item.signal].join('|')
+        if (firedBatchKeys.has(batchKey)) continue
+        firedBatchKeys.add(batchKey)
+        fired.push(item)
+      }
+    }
+
     prevAssetsRef.current = [...assetsRef.current]
 
     if (fired.length > 0) {
@@ -563,7 +663,7 @@ export default function App() {
     if (now - state.lastRun < intervalMs) return
 
     const limit = Math.max(5, Number(cfg.limit) || 20)
-    const candidates = buildCandidates(assetsRef.current, limit)
+    const candidates = buildCandidates(assetsRef.current, limit, watchPoolItems)
     if (!candidates.length) return
 
     const sig = candidateSignature(candidates)
@@ -650,9 +750,9 @@ export default function App() {
       <div className={`app-shell ${chatOpen ? 'chat-open' : ''}`}>
         <div className="app-content">
           {activeTab === 'manage' ? (
-            <ManagePage onSaved={() => { setActiveTab('market'); fetchData() }} />
+            <ManagePage aiRequest={aiPlanRequest?.target === 'manage' ? aiPlanRequest : null} onSaved={() => { setActiveTab('market'); fetchData() }} />
           ) : activeTab === 'alerts' ? (
-            <AlertPage />
+            <AlertPage aiRequest={aiPlanRequest?.target === 'alerts' ? aiPlanRequest : null} />
           ) : activeTab === 'settings' ? (
             <SettingsPage />
           ) : activeTab === 'ai' ? (
@@ -661,6 +761,8 @@ export default function App() {
             <AiReviewPage />
           ) : activeTab === 'trail' ? (
             <SignalTrailPage />
+          ) : activeTab === 'watch-pool' ? (
+            <WatchPoolPage />
           ) : activeTab === 'launch-review' ? (
             <LaunchReviewPage />
           ) : (
@@ -701,7 +803,16 @@ export default function App() {
         </div>
         {chatOpen && (
           <aside className="chat-drawer">
-            <MarketChatPage activeTab={activeTab} drawer onClose={() => setChatOpen(false)} />
+            <MarketChatPage
+              activeTab={activeTab}
+              drawer
+              onClose={() => setChatOpen(false)}
+              onGeneratePlan={(target, instruction) => {
+                const tab = target === 'manage' ? 'manage' : 'alerts'
+                setAiPlanRequest({ id: Date.now(), target: tab, instruction })
+                setActiveTab(tab)
+              }}
+            />
           </aside>
         )}
       </div>

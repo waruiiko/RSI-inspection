@@ -31,6 +31,7 @@ const useSettingsStore = create((set, get) => ({
   autoAiInterval:   30,
   autoAiLimit:      20,
   autoAiStartupDelay: 10,
+  watchPoolRetentionDays: 15,
   aiLastRunAt:      null,
   aiLastRunMode:    '',
   aiLastRunCount:   0,

@@ -3,6 +3,7 @@ import useAlertStore  from '../store/alertStore'
 import usePairsStore  from '../store/pairsStore'
 import useMarketStore from '../store/marketStore'
 import useGroupsStore from '../store/groupsStore'
+import useAiRunLogStore from '../store/aiRunLogStore'
 import { applyLiquidityLimit, getQuoteVolume } from '../utils/liquidity'
 
 const ALL_TF = ['15m', '1h', '4h', '1d']
@@ -83,8 +84,65 @@ function describeRule(rule, selectedSize = 1) {
   return parts.join(' · ')
 }
 
-export default function AlertPage() {
+function ruleSignature(rule) {
+  return JSON.stringify({
+    t: rule.timeframes ?? [],
+    all: !!rule.requireAllTf,
+    lvl: rule.alertLevel ?? 1,
+    ra: rule.rsiAbove ?? null,
+    rb: rule.rsiBelow ?? null,
+    ca: rule.changeAbove ?? null,
+    cb: rule.changeBelow ?? null,
+    pa: rule.priceAbove ?? null,
+    pb: rule.priceBelow ?? null,
+    bull: !!rule.divBull,
+    bear: !!rule.divBear,
+    vol: !!rule.volumeSignal,
+    str: getRuleStrategies(rule),
+    min: rule.minScore ?? null,
+  })
+}
+
+function getRuleHealth(rule, assets) {
+  if (!rule.enabled) return { label: '停用', tone: 'muted', detail: '规则当前已禁用，不会触发提醒。' }
+  const asset = assets.find(a => a.symbol === rule.symbol || a.apiSymbol === rule.symbol)
+  if (!asset) return { label: '缺数据', tone: 'red', detail: '当前市场列表里没有这个标的，规则可能无法触发。' }
+  const fireCount = rule.fireCount ?? 0
+  const last = rule.lastFiredAt ?? 0
+  const ageH = last ? (Date.now() - last) / 36e5 : Infinity
+  if (fireCount >= 20 && ageH < 24) return { label: '偏吵', tone: 'orange', detail: '24 小时内触发次数偏多，可以考虑提高 minScore、提高 RSI 阈值或降低提醒等级。' }
+  if (fireCount === 0) return { label: '偏严', tone: 'blue', detail: '规则从未触发，可以考虑放宽阈值，或改为观察级别。' }
+  return { label: '正常', tone: 'green', detail: `累计触发 ${fireCount} 次，最近一次距今约 ${Number.isFinite(ageH) ? ageH.toFixed(1) : '-'} 小时。` }
+}
+
+function simulateRuleNow(rule, asset) {
+  if (!rule.enabled) return { label: '停用', tone: 'muted', detail: '规则已禁用。' }
+  if (!asset) return { label: '缺数据', tone: 'red', detail: '当前市场数据中没有这个标的。' }
+
+  const checks = []
+  const tfs = rule.timeframes?.length ? rule.timeframes : ['4h']
+  const rsiAboveHits = rule.rsiAbove == null ? [] : tfs.filter(tf => (asset.rsi?.[tf] ?? -Infinity) > rule.rsiAbove)
+  const rsiBelowHits = rule.rsiBelow == null ? [] : tfs.filter(tf => (asset.rsi?.[tf] ?? Infinity) < rule.rsiBelow)
+  if (rule.rsiAbove != null) checks.push(rule.requireAllTf ? rsiAboveHits.length === tfs.length : rsiAboveHits.length > 0)
+  if (rule.rsiBelow != null) checks.push(rule.requireAllTf ? rsiBelowHits.length === tfs.length : rsiBelowHits.length > 0)
+  if (rule.changeAbove != null) checks.push((asset.change24h ?? -Infinity) > rule.changeAbove)
+  if (rule.changeBelow != null) checks.push((asset.change24h ?? Infinity) < rule.changeBelow)
+  if (rule.priceAbove != null) checks.push((asset.price ?? -Infinity) > rule.priceAbove)
+  if (rule.priceBelow != null) checks.push((asset.price ?? Infinity) < rule.priceBelow)
+  if (rule.divBull) checks.push(tfs.some(tf => asset.divergence?.[tf] === 'bullish'))
+  if (rule.divBear) checks.push(tfs.some(tf => asset.divergence?.[tf] === 'bearish'))
+  if (rule.volumeSignal) checks.push((asset.signalScore ?? 0) >= (rule.minScore ?? 3))
+
+  if (!checks.length) return { label: '无条件', tone: 'muted', detail: '这条规则没有可模拟的触发条件。' }
+  const passed = checks.filter(Boolean).length
+  if (passed === checks.length) return { label: '满足', tone: 'green', detail: `当前 ${passed}/${checks.length} 个条件满足。` }
+  if (passed > 0) return { label: `${passed}/${checks.length}`, tone: 'orange', detail: `当前满足 ${passed}/${checks.length} 个条件。` }
+  return { label: '未满足', tone: 'muted', detail: `当前 0/${checks.length} 个条件满足。` }
+}
+
+export default function AlertPage({ aiRequest }) {
   const configs      = useAlertStore(s => s.configs)
+  const feed         = useAlertStore(s => s.feed)
   const upsert       = useAlertStore(s => s.upsert)
   const updateById   = useAlertStore(s => s.updateById)
   const remove       = useAlertStore(s => s.remove)
@@ -130,6 +188,7 @@ export default function AlertPage() {
   const [aiPlanDir,     setAiPlanDir]     = useState('')
   const [aiError,       setAiError]       = useState('')
   const [aiUndoRules,   setAiUndoRules]   = useState(null)
+  const addAiRunLog = useAiRunLogStore(s => s.add)
 
   const assets = useMarketStore(s => s.assets)
   const groups = useGroupsStore(s => s.groups)
@@ -257,6 +316,19 @@ export default function AlertPage() {
       fireCount: c.fireCount ?? 0,
       lastFiredAt: c.lastFiredAt ?? null,
     })),
+    feedback: feed
+      .filter(i => i.feedback)
+      .slice(0, 120)
+      .map(i => ({
+        symbol: i.symbol,
+        type: i.type,
+        timeframe: i.timeframe,
+        condition: i.condition,
+        feedback: i.feedback,
+        reason: i.reason,
+        value: i.value,
+        ts: i.ts,
+      })),
     market: assets.map(a => ({
       symbol: a.symbol,
       source: a.source,
@@ -314,6 +386,7 @@ export default function AlertPage() {
   const generateAiAlertPlan = async (instruction = aiInstruction) => {
     const text = instruction.trim()
     if (!text || aiBusy) return
+    const startedAt = Date.now()
     setAiBusy(true)
     setAiError('')
     setAiPlan(null)
@@ -326,12 +399,40 @@ export default function AlertPage() {
       if (res.ok && res.plan) {
         setAiPlan(res.plan)
         setAiPlanDir(res.planDir || '')
+        addAiRunLog({
+          type: 'alert-plan',
+          mode: 'manual',
+          ok: true,
+          inputCount: configs.length,
+          outputCount: Array.isArray(res.plan.rules) ? res.plan.rules.length : 0,
+          elapsedMs: Date.now() - startedAt,
+          path: res.planDir,
+        })
       } else {
         setAiError(res.parseError || res.stderr || res.stdout || 'AI 没有返回可用提醒预案')
         setAiPlanDir(res.planDir || '')
+        addAiRunLog({
+          type: 'alert-plan',
+          mode: 'manual',
+          ok: false,
+          inputCount: configs.length,
+          outputCount: 0,
+          elapsedMs: Date.now() - startedAt,
+          error: res.parseError || res.stderr || res.stdout || 'AI 没有返回可用提醒预案',
+          path: res.planDir,
+        })
       }
     } catch (err) {
       setAiError(err.message || String(err))
+      addAiRunLog({
+        type: 'alert-plan',
+        mode: 'manual',
+        ok: false,
+        inputCount: configs.length,
+        outputCount: 0,
+        elapsedMs: Date.now() - startedAt,
+        error: err.message || String(err),
+      })
     } finally {
       setAiBusy(false)
     }
@@ -365,6 +466,13 @@ export default function AlertPage() {
     setAiUndoRules(null)
     setError('已撤销上次 AI 提醒预案')
   }
+
+  useEffect(() => {
+    if (!aiRequest?.instruction) return
+    if (pairsLoading || (!spotPairs.length && !futuresPairs.length && !knownStocks.length)) return
+    setAiInstruction(aiRequest.instruction)
+    generateAiAlertPlan(aiRequest.instruction)
+  }, [aiRequest?.id, pairsLoading, spotPairs.length, futuresPairs.length, knownStocks.length])
 
   const handleEdit = useCallback(c => {
     // Determine which tab this symbol belongs to
@@ -530,6 +638,34 @@ export default function AlertPage() {
     }
     return { rules: rules.length, symbols }
   }, [aiPlan, allowedAlertSymbols])
+  const aiPlanDiff = useMemo(() => {
+    if (!aiPlan) return null
+    const current = new Map(configs.map(c => [String(c.symbol).toUpperCase(), c]))
+    let add = 0, overwrite = 0, unchanged = 0, skipped = 0
+    for (const rule of Array.isArray(aiPlan.rules) ? aiPlan.rules : []) {
+      const normalized = normalizeAiRule(rule)
+      const hasCondition = normalized.fields.volumeSignal
+        || normalized.fields.rsiAbove != null
+        || normalized.fields.rsiBelow != null
+        || normalized.fields.changeAbove != null
+        || normalized.fields.changeBelow != null
+        || normalized.fields.priceAbove != null
+        || normalized.fields.priceBelow != null
+        || normalized.fields.divBull
+        || normalized.fields.divBear
+      if (!normalized.symbols.length || !hasCondition) {
+        skipped++
+        continue
+      }
+      normalized.symbols.forEach(symbol => {
+        const old = current.get(symbol)
+        if (!old) add++
+        else if (ruleSignature(old) === ruleSignature({ ...old, ...normalized.fields })) unchanged++
+        else overwrite++
+      })
+    }
+    return { add, overwrite, unchanged, skipped }
+  }, [aiPlan, allowedAlertSymbols, configs])
 
   return (
     <div className="alert-page">
@@ -918,6 +1054,9 @@ export default function AlertPage() {
                   {filtered.map(c => {
                     const strategyLabels = getStrategyLabels(c)
                     const conditionTags = getConditionTags(c)
+                    const health = getRuleHealth(c, assets)
+                    const asset = assets.find(a => a.symbol === c.symbol || a.apiSymbol === c.symbol)
+                    const simulation = simulateRuleNow(c, asset)
                     return (
                       <div key={c.id} className={`rule-card ${c.enabled ? '' : 'rule-disabled'}`}>
                         <div className="rule-card-main">
@@ -926,6 +1065,8 @@ export default function AlertPage() {
                             <span className="rule-chip orange">{getLevelLabel(c)}</span>
                             {c.followTop && <span className="rule-chip blue">Top{c.followTopLimit ?? 50} 跟随</span>}
                             {c.requireAllTf && <span className="rule-chip orange">共振</span>}
+                            <span className={`rule-chip ${health.tone}`} title={health.detail}>健康度：{health.label}</span>
+                            <span className={`rule-chip ${simulation.tone}`} title={simulation.detail}>模拟：{simulation.label}</span>
                             {!c.enabled && <span className="rule-chip muted">已禁用</span>}
                           </div>
                           <div className="rule-chip-row">
@@ -1010,6 +1151,7 @@ export default function AlertPage() {
             <button className="feed-type-btn" onClick={() => setAiInstruction('为当前观察列表生成低噪音提醒：4h/1d 量价结构为主，评分至少 3，强信号二级提醒')}>低噪音</button>
             <button className="feed-type-btn" onClick={() => setAiInstruction('为当前选中的品种生成观察提醒：1h/4h RSI 极值、背离和量价结构组合，普通提醒为主')}>当前选中</button>
             <button className="feed-type-btn" onClick={() => setAiInstruction('生成一套多周期共振提醒：1h/4h/1d 同时满足 RSI 极值时设为三级特殊提醒，单周期仍保留普通提醒')}>共振规则</button>
+            <button className="feed-type-btn" onClick={() => setAiInstruction('根据当前提醒记录里的用户反馈做一次降噪巡检：标记为噪音的规则提高阈值或降低等级；标记太早的规则增加确认条件；标记太晚的规则增加 1h/15m 前置信号；标记有用的结构保留相似规则')}>反馈巡检</button>
           </div>
         </div>
         {aiError && <div className="manage-ai-error">{aiError}</div>}
@@ -1018,6 +1160,9 @@ export default function AlertPage() {
             <div className="manage-ai-summary">
               <b>{aiPlan.summary || 'AI 提醒规则预案'}</b>
               <span>{aiPlanStats.rules} 条规则 · 影响 {aiPlanStats.symbols} 个标的</span>
+              {aiPlanDiff && (
+                <span>新增 {aiPlanDiff.add} · 覆盖 {aiPlanDiff.overwrite} · 不变 {aiPlanDiff.unchanged} · 跳过 {aiPlanDiff.skipped}</span>
+              )}
               {aiPlan.risk && <em>{aiPlan.risk}</em>}
             </div>
             <div className="manage-ai-plan-list">

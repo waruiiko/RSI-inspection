@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import useSettingsStore from '../store/settingsStore'
+import useMarketStore from '../store/marketStore'
+import useAiRunLogStore from '../store/aiRunLogStore'
 import { playAlertSound } from '../utils/sound'
 import { sendWebhooks } from '../utils/webhook'
 
@@ -67,9 +69,12 @@ export default function SettingsPage() {
     observationEnabled, rsiSensitivity, startupStateAlerts,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook, codexCliPath,
-    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay,
+    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, watchPoolRetentionDays,
     update,
   } = useSettingsStore()
+  const statusEvents = useMarketStore(s => s.statusEvents)
+  const aiRunLog = useAiRunLogStore(s => s.items)
+  const clearAiRunLog = useAiRunLogStore(s => s.clear)
 
   const [autoLaunch, setAutoLaunch] = useState(false)
   const [autoLaunchBusy, setAutoLaunchBusy] = useState(true)
@@ -148,7 +153,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.0.8
+          v1.0.9
         </span>
       </div>
 
@@ -177,6 +182,25 @@ export default function SettingsPage() {
               ))}
             </div>
           )}
+
+          <div className="health-panel">
+            <div className="health-panel-head">
+              <b>数据源健康</b>
+              <span>{statusEvents.length ? `最近 ${statusEvents.length} 条状态` : '暂无异常状态'}</span>
+            </div>
+            <div className="health-list">
+              {statusEvents.length === 0
+                ? <span className="settings-hint">Binance / Yahoo / OI / Funding 最近没有上报异常。</span>
+                : statusEvents.slice(0, 5).map((e, i) => (
+                  <div key={`${e.ts}-${i}`} className={`health-row ${e.level === 'warn' ? 'warn' : ''}`}>
+                    <b>{e.scope}</b>
+                    <span>{e.message}</span>
+                    <em>{new Date(e.ts).toLocaleTimeString('zh-CN')}</em>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
 
           <Row label="开机自动启动" hint="登录后自动在后台运行">
             <Toggle checked={autoLaunch} disabled={autoLaunchBusy} onChange={handleAutoLaunch} />
@@ -320,6 +344,15 @@ export default function SettingsPage() {
             <Toggle
               checked={startupStateAlerts}
               onChange={e => update('startupStateAlerts', e.target.checked)}
+            />
+          </Row>
+
+          <Row label="观察池保留时间" hint="剧烈波动标的会先进入观察池；未标记的记录到期自动剔除">
+            <BtnGroup
+              options={[7, 15, 30, 0]}
+              value={watchPoolRetentionDays}
+              onChange={v => update('watchPoolRetentionDays', v)}
+              format={v => v === 0 ? '永久' : `${v} 天`}
             />
           </Row>
 
@@ -514,6 +547,32 @@ export default function SettingsPage() {
                 : `Codex 不可用：${codexStatus.error}`}
             </div>
           )}
+
+          <div className="health-panel">
+            <div className="health-panel-head">
+              <b>AI 运行日志</b>
+              <button
+                className="zone-btn"
+                style={{ fontSize: 11, padding: '2px 8px' }}
+                onClick={clearAiRunLog}
+                disabled={!aiRunLog.length}
+              >
+                清空
+              </button>
+            </div>
+            <div className="health-list">
+              {aiRunLog.length === 0
+                ? <span className="settings-hint">暂无 Codex 运行记录。</span>
+                : aiRunLog.slice(0, 8).map(item => (
+                  <div key={item.id} className={`health-row ${item.ok ? '' : 'warn'}`}>
+                    <b>{item.type}/{item.mode}</b>
+                    <span>{item.ok ? `${item.inputCount ?? 0} 入 / ${item.outputCount ?? 0} 出` : item.error}</span>
+                    <em>{Math.round((item.elapsedMs ?? 0) / 1000)}s · {new Date(item.ts).toLocaleTimeString('zh-CN')}</em>
+                  </div>
+                ))
+              }
+            </div>
+          </div>
         </div>
 
         <div className="settings-section">

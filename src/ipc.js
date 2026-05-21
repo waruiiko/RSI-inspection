@@ -94,6 +94,15 @@ async function ensureTradFiOnboarded() {
     crypto: nextCrypto,
     stocks,
     tradfiSeen: [...allTradfi],
+    tradfiAutoAdded: [
+      ...(Array.isArray(current.tradfiAutoAdded) ? current.tradfiAutoAdded : []),
+      ...newPairs.map(p => ({
+        symbol: p.symbol,
+        apiSymbol: p.apiSymbol,
+        addedAt: Date.now(),
+        alertLevel: 3,
+      })),
+    ].slice(-100),
     tradfiAutoAddedAt: newPairs.length ? Date.now() : current.tradfiAutoAddedAt,
   }
 

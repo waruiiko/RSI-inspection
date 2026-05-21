@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react'
 import usePairsStore  from '../store/pairsStore'
 import useGroupsStore from '../store/groupsStore'
 import useMarketStore from '../store/marketStore'
+import useAiRunLogStore from '../store/aiRunLogStore'
 import { getQuoteVolume } from '../utils/liquidity'
 
 function uniqByApiSymbol(items) {
@@ -25,12 +26,13 @@ function countPlan(plan) {
   }
 }
 
-export default function ManagePage({ onSaved }) {
+export default function ManagePage({ onSaved, aiRequest }) {
   // ── Config ─────────────────────────────────────────────────
   const [trackedCrypto,  setTrackedCrypto]  = useState(new Set()) // Set<apiSymbol>
   const [trackedStocks,  setTrackedStocks]  = useState(new Set()) // Set<apiSymbol>
   const [knownStocks,    setKnownStocks]    = useState([])        // all validated stocks
   const [saving,         setSaving]         = useState(false)
+  const [configMeta,     setConfigMeta]     = useState({})
   const marketAssets = useMarketStore(s => s.assets)
 
   // ── Binance panel ──────────────────────────────────────────
@@ -52,10 +54,12 @@ export default function ManagePage({ onSaved }) {
   const [aiPlanDir,      setAiPlanDir]      = useState('')
   const [aiError,        setAiError]        = useState('')
   const [aiUndo,         setAiUndo]         = useState(null)
+  const addAiRunLog = useAiRunLogStore(s => s.add)
 
   // ── Load on mount ──────────────────────────────────────────
   useEffect(() => {
     window.api.getAssetsConfig().then(cfg => {
+      setConfigMeta(cfg)
       setTrackedCrypto(new Set((cfg.crypto  || []).map(a => a.apiSymbol)))
       setTrackedStocks(new Set((cfg.stocks  || []).map(a => a.apiSymbol)))
       setKnownStocks(cfg.knownStocks || cfg.stocks || [])
@@ -167,6 +171,7 @@ export default function ManagePage({ onSaved }) {
         ({ symbol, apiSymbol, type, source, name })),
     })
     setSaving(false)
+    setConfigMeta(currentCfg)
     onSaved()
   }, [spotPairs, futuresPairs, trackedCrypto, trackedStocks, knownStocks, onSaved])
 
@@ -181,6 +186,13 @@ export default function ManagePage({ onSaved }) {
   const [groupSearch,  setGroupSearch]  = useState('')
 
   useEffect(() => { loadGroups() }, [])
+
+  useEffect(() => {
+    if (!aiRequest?.instruction) return
+    if (pairsLoading || (!spotPairs.length && !futuresPairs.length)) return
+    setAiInstruction(aiRequest.instruction)
+    generateAiPlan(aiRequest.instruction)
+  }, [aiRequest?.id, pairsLoading, spotPairs.length, futuresPairs.length])
 
   // All tracked symbols (for group membership picker)
   const allTracked = useMemo(() => {
@@ -278,6 +290,7 @@ export default function ManagePage({ onSaved }) {
   const generateAiPlan = async (instruction = aiInstruction) => {
     const text = instruction.trim()
     if (!text || aiBusy) return
+    const startedAt = Date.now()
     setAiBusy(true)
     setAiError('')
     setAiPlan(null)
@@ -290,12 +303,40 @@ export default function ManagePage({ onSaved }) {
       if (res.ok && res.plan) {
         setAiPlan(res.plan)
         setAiPlanDir(res.planDir || '')
+        addAiRunLog({
+          type: 'manage-plan',
+          mode: 'manual',
+          ok: true,
+          inputCount: trackedCrypto.size + trackedStocks.size,
+          outputCount: countPlan(res.plan).actions,
+          elapsedMs: Date.now() - startedAt,
+          path: res.planDir,
+        })
       } else {
         setAiError(res.parseError || res.stderr || res.stdout || 'AI 没有返回可用预案')
         setAiPlanDir(res.planDir || '')
+        addAiRunLog({
+          type: 'manage-plan',
+          mode: 'manual',
+          ok: false,
+          inputCount: trackedCrypto.size + trackedStocks.size,
+          outputCount: 0,
+          elapsedMs: Date.now() - startedAt,
+          error: res.parseError || res.stderr || res.stdout || 'AI 没有返回可用预案',
+          path: res.planDir,
+        })
       }
     } catch (err) {
       setAiError(err.message || String(err))
+      addAiRunLog({
+        type: 'manage-plan',
+        mode: 'manual',
+        ok: false,
+        inputCount: trackedCrypto.size + trackedStocks.size,
+        outputCount: 0,
+        elapsedMs: Date.now() - startedAt,
+        error: err.message || String(err),
+      })
     } finally {
       setAiBusy(false)
     }
@@ -360,6 +401,33 @@ export default function ManagePage({ onSaved }) {
 
   const totalSelected = trackedCrypto.size + trackedStocks.size
   const aiPlanCount = countPlan(aiPlan)
+  const aiPlanDiff = useMemo(() => {
+    if (!aiPlan) return null
+    const cryptoAllowed = new Set([...spotPairs, ...futuresPairs].map(p => p.apiSymbol))
+    const stockAllowed = new Set(knownStocks.map(s => s.apiSymbol))
+    const curCrypto = new Set(trackedCrypto)
+    const curStocks = new Set(trackedStocks)
+    let add = 0, remove = 0, replace = 0, unchanged = 0, skipped = 0
+    for (const action of Array.isArray(aiPlan.actions) ? aiPlan.actions : []) {
+      const target = action.target === 'stocks' ? 'stocks' : 'crypto'
+      const current = target === 'stocks' ? curStocks : curCrypto
+      const allowed = target === 'stocks' ? stockAllowed : cryptoAllowed
+      const symbols = (Array.isArray(action.apiSymbols) ? action.apiSymbols : []).filter(s => allowed.has(s))
+      skipped += Math.max(0, (action.apiSymbols?.length ?? 0) - symbols.length)
+      if (action.mode === 'set') {
+        const next = new Set(symbols)
+        replace += symbols.length
+        current.forEach(s => { if (!next.has(s)) remove++ })
+        symbols.forEach(s => { if (!current.has(s)) add++; else unchanged++ })
+      } else if (action.mode === 'remove') {
+        symbols.forEach(s => current.has(s) ? remove++ : unchanged++)
+      } else {
+        symbols.forEach(s => current.has(s) ? unchanged++ : add++)
+      }
+    }
+    return { add, remove, replace, unchanged, skipped }
+  }, [aiPlan, spotPairs, futuresPairs, knownStocks, trackedCrypto, trackedStocks])
+  const tradfiAutoAdded = Array.isArray(configMeta.tradfiAutoAdded) ? configMeta.tradfiAutoAdded : []
 
   return (
     <div className="manage-page">
@@ -596,6 +664,21 @@ export default function ManagePage({ onSaved }) {
         </div>
 
       </div>
+      {tradfiAutoAdded.length > 0 && (
+        <div className="tradfi-center">
+          <div>
+            <b>TradFi 新标的中心</b>
+            <span>最近自动加入 {tradfiAutoAdded.length} 个 Binance 美股合约标的，并已补最高级别提醒</span>
+          </div>
+          <div className="tradfi-center-list">
+            {tradfiAutoAdded.slice(-8).reverse().map(item => (
+              <span key={`${item.apiSymbol}-${item.addedAt}`} className="rule-chip blue">
+                {item.symbol} · {new Date(item.addedAt).toLocaleDateString('zh-CN')}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="manage-ai-panel">
         <div className="panel-head">
           <div>
@@ -629,6 +712,9 @@ export default function ManagePage({ onSaved }) {
             <div className="manage-ai-summary">
               <b>{aiPlan.summary || 'AI 批量操作预案'}</b>
               <span>{aiPlanCount.actions} 个动作 · {aiPlanCount.symbols} 个标的 · {aiPlanCount.groups} 个分组</span>
+              {aiPlanDiff && (
+                <span>新增 {aiPlanDiff.add} · 移除 {aiPlanDiff.remove} · 不变 {aiPlanDiff.unchanged} · 跳过 {aiPlanDiff.skipped}</span>
+              )}
               {aiPlan.risk && <em>{aiPlan.risk}</em>}
             </div>
             <div className="manage-ai-plan-list">

@@ -5,11 +5,6 @@ import ChartModal from './ChartModal'
 
 const TYPE_FILTERS = [
   { key: 'all', label: '全部' },
-  { key: 'rsi', label: 'RSI' },
-  { key: 'price', label: '价格' },
-  { key: 'change', label: '涨跌' },
-  { key: 'divergence', label: '背离' },
-  { key: 'structure', label: '量价' },
   { key: 'ai', label: 'AI' },
 ]
 
@@ -35,6 +30,9 @@ function fmtPct(v, digits = 2) {
 
 function fmtDetail(item) {
   if (item.type === 'rsi') {
+    if (item.signal) {
+      return ` ${item.signal}(${item.timeframe})，RSI ${Number(item.value).toFixed(1)}${item.change24h != null ? `，24H ${fmtPct(item.change24h)}` : ''}`
+    }
     const dir = item.condition === 'above' ? '超过' : '低于'
     return ` RSI(${item.timeframe}) ${dir} ${item.threshold}，当前 ${Number(item.value).toFixed(1)}`
   }
@@ -118,6 +116,7 @@ function exportFeedCsv(items, assets) {
 }
 
 function signalBias(item) {
+  if (item.signal === '慢速超卖观察') return '偏中长线反弹观察'
   if (item.type === 'rsi') return item.condition === 'below' ? '偏反弹观察' : '偏过热观察'
   if (item.type === 'price') return item.condition === 'above' ? '偏突破跟踪' : '偏破位风险'
   if (item.type === 'divergence') return item.condition === 'bull' ? '偏底背离观察' : '偏顶背离风险'
@@ -211,6 +210,7 @@ async function copyText(text) {
 export default function AlertFeed() {
   const feed = useAlertStore(s => s.feed)
   const clearFeed = useAlertStore(s => s.clearFeed)
+  const updateFeed = useAlertStore(s => s.updateFeed)
   const setFlash = useMarketStore(s => s.setFlash)
   const assets = useMarketStore(s => s.assets)
 
@@ -219,6 +219,14 @@ export default function AlertFeed() {
   const [selectedItem, setSelectedItem] = useState(null)
   const [chartAsset, setChartAsset] = useState(null)
   const [codexState, setCodexState] = useState({ busy: false, msg: '', reviewDir: '', reportPath: '' })
+
+  const markFeedback = (value) => {
+    if (!selectedItem) return
+    updateFeed(items => items.map(item => item.id === selectedItem.id
+      ? { ...item, feedback: value, feedbackAt: Date.now() }
+      : item))
+    setSelectedItem(item => item ? { ...item, feedback: value, feedbackAt: Date.now() } : item)
+  }
 
   const visible = useMemo(() => {
     const q = symbolFilter.trim().toUpperCase()
@@ -377,7 +385,8 @@ export default function AlertFeed() {
                   >
                     {item.symbol}
                   </span>
-                  {fmtDetail(item)}
+                {fmtDetail(item)}
+                  {item.feedback && <span className="feed-feedback-badge">{item.feedback}</span>}
                 </span>
               </div>
             ))
@@ -419,6 +428,18 @@ export default function AlertFeed() {
               <button className="zone-btn" disabled={!reviewAsset} onClick={() => reviewAsset && setChartAsset(reviewAsset)}>
                 打开K线并查看标记
               </button>
+            </div>
+
+            <div className="review-actions feedback-actions">
+              {['有用', '噪音', '太早', '太晚'].map(label => (
+                <button
+                  key={label}
+                  className={`zone-btn ${selectedItem.feedback === label ? 'filtered' : ''}`}
+                  onClick={() => markFeedback(label)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             <div className="review-actions" style={{ paddingTop: 10 }}>

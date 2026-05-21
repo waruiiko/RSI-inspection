@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react'
 import useMarketStore from '../store/marketStore'
 import useAlertStore from '../store/alertStore'
 import useSettingsStore from '../store/settingsStore'
+import useAiRunLogStore from '../store/aiRunLogStore'
+import useWatchPoolStore from '../store/watchPoolStore'
 import { formatTurnover } from '../utils/liquidity'
 import {
   AI_DECISION_LABELS as DECISION_LABELS,
@@ -50,6 +52,8 @@ export default function AiPage() {
   const aiLastRunCount = useSettingsStore(s => s.aiLastRunCount)
   const aiLastSnapshot = useSettingsStore(s => s.aiLastSnapshot)
   const updateSetting = useSettingsStore(s => s.update)
+  const addAiRunLog = useAiRunLogStore(s => s.add)
+  const watchPoolItems = useWatchPoolStore(s => s.items)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState('')
   const [result, setResult] = useState(null)
@@ -59,7 +63,7 @@ export default function AiPage() {
   const [rowBusy, setRowBusy] = useState('')
   const [viewMode, setViewMode] = useState(aiLastSnapshot ? 'result' : 'current')
 
-  const candidates = useMemo(() => buildCandidates(assets), [assets])
+  const candidates = useMemo(() => buildCandidates(assets, 30, watchPoolItems), [assets, watchPoolItems])
   const activeSnapshot = localSnapshot ?? aiLastSnapshot
   const snapshotCandidates = activeSnapshot?.candidates ?? []
   const hasSnapshot = snapshotCandidates.length > 0
@@ -103,6 +107,7 @@ export default function AiPage() {
         candidates: runCandidates,
       }
       const res = await window.api.runCodexScreen(payload)
+      const elapsedMs = Date.now() - runStartedAt
       setPaths({ screenDir: res.screenDir, reportPath: res.reportPath, resultPath: res.resultPath })
       if (res.ok && res.result) {
         setResult(res.result)
@@ -119,11 +124,31 @@ export default function AiPage() {
         updateSetting('aiLastRunMode', 'manual')
         updateSetting('aiLastRunCount', res.result.items?.length ?? 0)
         updateSetting('aiLastSnapshot', snapshot)
+        addAiRunLog({ type: 'screen', mode: 'manual', ok: true, inputCount: runCandidates.length, outputCount: res.result.items?.length ?? 0, elapsedMs, path: res.screenDir })
         setStatus(`筛选完成：${res.result.summary ?? res.screenName}`)
       } else {
+        addAiRunLog({
+          type: 'screen',
+          mode: 'manual',
+          ok: false,
+          inputCount: runCandidates.length,
+          outputCount: 0,
+          elapsedMs,
+          error: res.parseError || res.stderr || res.stdout || 'Codex 未返回可用结果',
+          path: res.screenDir,
+        })
         setStatus(`筛选失败：${res.parseError || res.stderr || res.stdout || '请检查 Codex 登录状态'}`)
       }
     } catch (err) {
+      addAiRunLog({
+        type: 'screen',
+        mode: 'manual',
+        ok: false,
+        inputCount: runCandidates.length,
+        outputCount: 0,
+        elapsedMs: Date.now() - runStartedAt,
+        error: err.message || String(err),
+      })
       setStatus(`筛选失败：${err.message}`)
     } finally {
       setBusy(false)
@@ -164,6 +189,7 @@ export default function AiPage() {
 
   const runSingle = async (candidate) => {
     if (busy || rowBusy) return
+    const runStartedAt = Date.now()
     setRowBusy(candidate.symbol)
     setStatus(`正在单独筛选 ${candidate.symbol}...`)
     try {
@@ -175,16 +201,37 @@ export default function AiPage() {
         candidates: [candidate],
       }
       const res = await window.api.runCodexScreen(payload)
+      const elapsedMs = Date.now() - runStartedAt
       setPaths({ screenDir: res.screenDir, reportPath: res.reportPath, resultPath: res.resultPath })
       const aiItem = res.result?.items?.[0]
       if (res.ok && aiItem) {
         mergeRowResult(candidate, aiItem, res)
+        addAiRunLog({ type: 'screen', mode: 'single', ok: true, inputCount: 1, outputCount: 1, elapsedMs, path: res.screenDir })
         setViewMode('result')
         setStatus(`${candidate.symbol} 筛选完成：${res.result.summary ?? aiItem.reason ?? ''}`)
       } else {
+        addAiRunLog({
+          type: 'screen',
+          mode: 'single',
+          ok: false,
+          inputCount: 1,
+          outputCount: 0,
+          elapsedMs,
+          error: res.parseError || res.stderr || res.stdout || 'Codex 未返回可用结果',
+          path: res.screenDir,
+        })
         setStatus(`${candidate.symbol} 筛选失败：${res.parseError || res.stderr || res.stdout || '请检查 Codex 登录状态'}`)
       }
     } catch (err) {
+      addAiRunLog({
+        type: 'screen',
+        mode: 'single',
+        ok: false,
+        inputCount: 1,
+        outputCount: 0,
+        elapsedMs: Date.now() - runStartedAt,
+        error: err.message || String(err),
+      })
       setStatus(`${candidate.symbol} 筛选失败：${err.message}`)
     } finally {
       setRowBusy('')

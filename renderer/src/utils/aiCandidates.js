@@ -40,7 +40,17 @@ function divergenceReason(asset) {
   return `${tf} ${type === 'bullish' ? '牛市背离' : '熊市背离'}`
 }
 
-export function buildCandidate(asset) {
+function slowRsiReason(asset) {
+  const rsi4h = asset.rsi?.['4h']
+  const rsi1d = asset.rsi?.['1d']
+  const move = Math.abs(asset.change24h ?? 0)
+  const parts = []
+  if (rsi4h != null && rsi4h <= 35 && move <= 8) parts.push(`4h 慢速超卖 ${rsi4h.toFixed(1)}`)
+  if (rsi1d != null && rsi1d <= 38 && move <= 8) parts.push(`1d 慢速超卖 ${rsi1d.toFixed(1)}`)
+  return parts.length ? parts.join(' / ') : null
+}
+
+export function buildCandidate(asset, watchItem = null) {
   const rsi = asset.rsi ?? {}
   const scores = asset.signalScore ?? {}
   const score = maxAbsScore(scores)
@@ -50,6 +60,7 @@ export function buildCandidate(asset) {
   const bearAlign = AI_TFS.filter(tf => rsi[tf] <= 45).length
   const div = divergenceReason(asset)
   const vol = volumeReason(asset)
+  const slowRsi = slowRsiReason(asset)
   const move = Math.abs(asset.change24h ?? 0)
   const turnover = getQuoteVolume(asset)
 
@@ -59,6 +70,7 @@ export function buildCandidate(asset) {
   else if (score >= 2) { priority += score * 8; reasons.push(`量价评分 ${score}`) }
   if (vol) { priority += 18; reasons.push(vol) }
   if (div) { priority += 26; reasons.push(div) }
+  if (slowRsi) { priority += 28; reasons.push(slowRsi) }
   if (rsiExtreme.length) { priority += rsiExtreme.length * 12; reasons.push(`${rsiExtreme.join('/')} RSI 极值`) }
   else if (rsiHot.length) { priority += rsiHot.length * 7; reasons.push(`${rsiHot.join('/')} RSI 接近极值`) }
   if (bullAlign >= 3 || bearAlign >= 3) {
@@ -71,6 +83,10 @@ export function buildCandidate(asset) {
     reasons.push(asset.derivatives.label ?? '资金结构')
   }
   if (turnover) priority += Math.min(10, Math.log10(turnover / 1_000_000 + 1) * 3)
+  if (watchItem) {
+    priority += watchItem.status === 'interesting' ? 24 : watchItem.status === 'watch' ? 14 : 8
+    reasons.push(`观察池：${watchItem.reason ?? '剧烈波动冷却'}`)
+  }
 
   return {
     symbol: asset.symbol,
@@ -84,6 +100,13 @@ export function buildCandidate(asset) {
     volumeSignal: asset.volumeSignal ?? {},
     signalScore: scores,
     derivatives: asset.derivatives ?? null,
+    watchPool: watchItem ? {
+      status: watchItem.status,
+      reason: watchItem.reason,
+      firstSeenAt: watchItem.firstSeenAt,
+      lastSeenAt: watchItem.lastSeenAt,
+      note: watchItem.note,
+    } : null,
     opportunityStage: classifyOpportunityStage(asset),
     priority: Math.round(priority),
     localReasons: reasons.slice(0, 4),
@@ -91,6 +114,10 @@ export function buildCandidate(asset) {
 }
 
 export function classifyOpportunityStage(asset) {
+  const move = Math.abs(asset.change24h ?? 0)
+  if (move <= 8 && ((asset.rsi?.['4h'] ?? 100) <= 35 || (asset.rsi?.['1d'] ?? 100) <= 38)) {
+    return 'pullback_watch'
+  }
   const d = asset.derivatives
   if (!d) return null
   if (d.stage === 'crowded') return 'risk'
@@ -101,9 +128,10 @@ export function classifyOpportunityStage(asset) {
   return null
 }
 
-export function buildCandidates(assets, limit = 30) {
+export function buildCandidates(assets, limit = 30, watchItems = []) {
+  const watchMap = new Map(watchItems.map(i => [String(i.symbol).toUpperCase(), i]))
   return assets
-    .map(buildCandidate)
+    .map(asset => buildCandidate(asset, watchMap.get(String(asset.symbol).toUpperCase())))
     .filter(c => c.priority >= 24 || c.localReasons.length >= 2)
     .sort((a, b) => b.priority - a.priority)
     .slice(0, limit)

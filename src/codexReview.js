@@ -579,6 +579,7 @@ function buildAlertPlanPrompt(payload) {
     '- 如果使用策略提醒，请设置 volumeSignal=true，并给出 strategies 与 minScore。',
     '- 如果使用自定义 RSI/涨跌/背离提醒，可以设置 volumeSignal=false。',
     '- 批量规则尽量不要生成 priceAbove/priceBelow，除非用户明确要求价格提醒。',
+    '- 如果 context.feedback 中某类规则被标为“噪音”，请提高阈值、提高 minScore 或降低提醒等级；“太早”增加确认周期；“太晚”增加 1h/15m 前置信号；“有用”保留相似结构。',
     '- 每条规则至少要包含 RSI、涨跌幅、背离、价格或量价结构中的一种条件。',
     '- 不要给交易建议，只生成提醒规则预案。',
     '',

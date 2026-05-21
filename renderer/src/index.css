@@ -695,6 +695,16 @@ body {
 .feed-item.feed-orange .feed-msg { color: #f97316; }
 .feed-item.feed-sky    .feed-msg { color: #38bdf8; }
 
+.feed-feedback-badge {
+  display: inline-flex;
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 10px;
+}
+
 .feed-star {
   color: var(--amber);
   font-size: var(--text-xs);
@@ -749,6 +759,11 @@ body {
 
 .review-actions .zone-btn {
   flex: 0 0 auto;
+}
+
+.feedback-actions {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
 }
 
 .review-grid {
@@ -1575,6 +1590,71 @@ body {
 .diagnostic-chip b { color: var(--text); font-weight: 600; }
 .diagnostic-chip em { color: var(--dim); font-style: normal; }
 
+.health-panel {
+  margin: 8px 0 10px;
+  padding: 9px 10px;
+  background: rgba(13, 20, 33, 0.72);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.health-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.health-panel-head b {
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.health-panel-head span {
+  color: var(--dim);
+  font-size: var(--text-xs);
+}
+
+.health-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.health-row {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+.health-row b {
+  color: var(--blue-link);
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.health-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.health-row em {
+  color: var(--dim);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.health-row.warn b,
+.health-row.warn span {
+  color: #f97316;
+}
+
 .level-cooldown {
   display: flex;
   align-items: center;
@@ -1704,6 +1784,34 @@ body {
   background: var(--bg2);
   max-height: 260px;
   overflow: auto;
+}
+
+.tradfi-center {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+  background: rgba(37, 99, 235, 0.05);
+}
+
+.tradfi-center b {
+  color: var(--text);
+  margin-right: 10px;
+}
+
+.tradfi-center span {
+  color: var(--dim);
+  font-size: var(--text-sm);
+}
+
+.tradfi-center-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .manage-ai-actions {
@@ -2008,6 +2116,113 @@ body {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.chat-plan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.watch-pool-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.watch-pool-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.watch-pool-tools .search-input {
+  max-width: 220px;
+}
+
+.watch-pool-table {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 16px 16px;
+}
+
+.watch-row {
+  display: grid;
+  grid-template-columns: 110px minmax(220px, 1.4fr) 120px 110px minmax(150px, 0.8fr) minmax(260px, auto);
+  gap: 12px;
+  align-items: center;
+  min-height: 54px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(30, 45, 69, 0.58);
+  background: rgba(8, 13, 19, 0.45);
+}
+
+.watch-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  min-height: 34px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+
+.watch-row b {
+  color: var(--text);
+}
+
+.watch-row em {
+  display: block;
+  margin-top: 3px;
+  color: var(--dim);
+  font-style: normal;
+  font-size: var(--text-xs);
+}
+
+.watch-row .up { color: #22c55e; }
+.watch-row .down { color: #ef4444; }
+
+.watch-reason span {
+  display: block;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watch-note {
+  width: 100%;
+  margin-top: 6px;
+  padding: 5px 7px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.watch-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.watch-status-interesting {
+  box-shadow: inset 3px 0 0 #f97316;
+}
+
+.watch-status-watch {
+  box-shadow: inset 3px 0 0 #58a6ff;
 }
 
 .chat-context-strip span {

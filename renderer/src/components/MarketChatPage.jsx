@@ -111,7 +111,7 @@ function pageContextFor(activeTab, data) {
   }
 }
 
-export default function MarketChatPage({ activeTab = 'market', drawer = false, onClose }) {
+export default function MarketChatPage({ activeTab = 'market', drawer = false, onClose, onGeneratePlan }) {
   const assets = useMarketStore(s => s.assets)
   const timeframe = useMarketStore(s => s.timeframe)
   const filter = useMarketStore(s => s.filter)
@@ -204,6 +204,21 @@ export default function MarketChatPage({ activeTab = 'market', drawer = false, o
         {QUICK_QUESTIONS.map(q => (
           <button key={q} className="feed-type-btn" disabled={busy} onClick={() => ask(q)}>{q}</button>
         ))}
+      </div>
+
+      <div className="chat-plan-row">
+        <button
+          className="zone-btn"
+          onClick={() => onGeneratePlan?.('manage', question.trim() || '根据当前市场和 AI 候选池生成管理品种预案：清理低流动性噪音品种，保留近期有结构信号和资金结构较强的标的')}
+        >
+          生成管理预案
+        </button>
+        <button
+          className="zone-btn"
+          onClick={() => onGeneratePlan?.('alerts', question.trim() || '根据当前市场和 AI 候选池生成低噪音提醒预案：4h/1d 量价结构为主，强信号二级，多周期共振三级')}
+        >
+          生成提醒预案
+        </button>
       </div>
 
       <div className="market-chat-list">
