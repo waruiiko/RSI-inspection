@@ -1,10 +1,10 @@
-﻿import { useState, useRef, useCallback, useMemo, useEffect } from 'react'
+import { lazy, Suspense, useId, useState, useRef, useCallback, useMemo, useEffect } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import useMarketStore   from '../store/marketStore'
 import useSettingsStore from '../store/settingsStore'
 import useGroupsStore   from '../store/groupsStore'
 import { getRsiColor, getRsiZone, formatPrice } from '../utils/rsi'
-import ChartModal from './ChartModal'
+const ChartModal = lazy(() => import('./ChartModal'))
 import { applyLiquidityLimit, formatTurnover, getQuoteVolume } from '../utils/liquidity'
 import { assetKey, matchesAssetRef } from '../utils/assetKey'
 
@@ -66,6 +66,7 @@ function SortIcon({ col, sortCol, sortDir }) {
 
 /* 鈹€鈹€ Gradient sparkline 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 function Sparkline({ closes }) {
+  const uid = useId().replaceAll(':', '')
   if (!closes || closes.length < 2) return null
   const W = 56, H = 20
   const min = Math.min(...closes)
@@ -78,7 +79,7 @@ function Sparkline({ closes }) {
   const linePts = pts.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
   const up = closes[closes.length - 1] >= closes[0]
   const color = up ? '#22c55e' : '#ef4444'
-  const id = `sp-${Math.random().toString(36).slice(2, 8)}`
+  const id = `sp-${uid}`
   const fillPath =
     `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}` +
     pts.slice(1).map(([x, y]) => `L${x.toFixed(1)},${y.toFixed(1)}`).join('') +
@@ -354,7 +355,11 @@ export default function StatsTable() {
 
   return (
     <div className="table-section">
-      {chartAsset && <ChartModal asset={chartAsset} onClose={() => setChartAsset(null)} />}
+      {chartAsset && (
+        <Suspense fallback={null}>
+          <ChartModal asset={chartAsset} onClose={() => setChartAsset(null)} />
+        </Suspense>
+      )}
 
       {/* 鈹€鈹€ Search bar 鈹€鈹€ */}
       <div className="table-search">

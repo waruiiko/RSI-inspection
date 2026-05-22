@@ -1,12 +1,22 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, lazy, Suspense, useMemo, useState } from 'react'
 import useAlertStore from '../store/alertStore'
 import useMarketStore from '../store/marketStore'
-import ChartModal from './ChartModal'
+const ChartModal = lazy(() => import('./ChartModal'))
 
 const TYPE_FILTERS = [
   { key: 'all', label: '全部' },
+  { key: 'opportunity', label: '机会' },
+  { key: 'risk', label: '风险' },
+  { key: 'cooldown', label: '冷却' },
   { key: 'ai', label: 'AI' },
 ]
+
+const BUCKET_LABELS = {
+  opportunity: '机会',
+  risk: '风险',
+  cooldown: '冷却',
+  ai: 'AI',
+}
 
 function fmtTime(ts) {
   const d = new Date(ts)
@@ -29,6 +39,9 @@ function fmtPct(v, digits = 2) {
 }
 
 function fmtDetail(item) {
+  if (item.type === 'market_report') {
+    return ` ${item.signal ?? '启动健康报告'}：${item.reason ?? '-'}`
+  }
   if (item.type === 'rsi') {
     if (item.signal) {
       return ` ${item.signal}(${item.timeframe})，RSI ${Number(item.value).toFixed(1)}${item.change24h != null ? `，24H ${fmtPct(item.change24h)}` : ''}`
@@ -55,6 +68,9 @@ function fmtDetail(item) {
     const next = item.nextCheck ? `，看点：${item.nextCheck}` : ''
     return ` AI筛选：${label}${confidence}，${item.reason ?? '等待复核'}${next}`
   }
+  if (item.type === 'watch_pool') {
+    return ` ${item.signal ?? '观察池复看'}，${item.reason ?? '波动冷却后可重新观察'}`
+  }
   const dir = item.condition === 'above' ? '涨超' : '跌超'
   const mag = Math.abs(item.threshold)
   return ` 24h${dir} ${mag}%，当前 ${fmtPct(item.value)}`
@@ -67,10 +83,12 @@ function levelLabel(item) {
 }
 
 function itemColor(item) {
+  if (item.type === 'market_report') return 'feed-sky'
   if (item.type === 'rsi') return item.condition === 'above' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'price') return item.condition === 'above' ? 'feed-red' : 'feed-green'
   if (item.type === 'divergence') return item.condition === 'bull' ? 'feed-green' : 'feed-orange'
   if (item.type === 'ai') return item.condition === 'risk' ? 'feed-red' : item.condition === 'focus' ? 'feed-orange' : 'feed-sky'
+  if (item.type === 'watch_pool') return 'feed-sky'
   if (item.type === 'structure') {
     return item.condition === 'bullish'
       ? 'feed-green'
@@ -79,6 +97,19 @@ function itemColor(item) {
         : 'feed-orange'
   }
   return item.value > 0 ? 'feed-green' : 'feed-red'
+}
+
+function feedBucket(item) {
+  if (item.type === 'ai') return 'ai'
+  if (item.type === 'watch_pool') return 'cooldown'
+  if (item.type === 'market_report') return 'opportunity'
+  if (item.condition === 'risk') return 'risk'
+  if (item.type === 'rsi') return item.condition === 'below' ? 'opportunity' : 'risk'
+  if (item.type === 'price') return item.condition === 'above' ? 'opportunity' : 'risk'
+  if (item.type === 'divergence') return item.condition === 'bull' ? 'opportunity' : 'risk'
+  if (item.type === 'structure') return item.condition === 'bearish' ? 'risk' : 'opportunity'
+  if (item.type === 'change') return item.condition === 'above' ? 'opportunity' : 'risk'
+  return (item.value ?? 0) >= 0 ? 'opportunity' : 'risk'
 }
 
 function exportFeedCsv(items, assets) {
@@ -116,7 +147,8 @@ function exportFeedCsv(items, assets) {
 }
 
 function signalBias(item) {
-  if (item.signal === '慢速超卖观察') return '偏中长线反弹观察'
+  if (String(item.signal || '').startsWith('慢速超卖观察')) return '偏中长线反弹观察'
+  if (item.type === 'watch_pool') return '冷却后复看观察'
   if (item.type === 'rsi') return item.condition === 'below' ? '偏反弹观察' : '偏过热观察'
   if (item.type === 'price') return item.condition === 'above' ? '偏突破跟踪' : '偏破位风险'
   if (item.type === 'divergence') return item.condition === 'bull' ? '偏底背离观察' : '偏顶背离风险'
@@ -209,6 +241,7 @@ async function copyText(text) {
 
 export default function AlertFeed() {
   const feed = useAlertStore(s => s.feed)
+  const configs = useAlertStore(s => s.configs)
   const clearFeed = useAlertStore(s => s.clearFeed)
   const updateFeed = useAlertStore(s => s.updateFeed)
   const setFlash = useMarketStore(s => s.setFlash)
@@ -220,6 +253,17 @@ export default function AlertFeed() {
   const [chartAsset, setChartAsset] = useState(null)
   const [codexState, setCodexState] = useState({ busy: false, msg: '', reviewDir: '', reportPath: '' })
 
+  const assetMap = useMemo(() => {
+    const map = new Map()
+    for (const asset of assets) {
+      if (asset.symbol) map.set(String(asset.symbol).toUpperCase(), asset)
+      if (asset.apiSymbol) map.set(String(asset.apiSymbol).toUpperCase(), asset)
+    }
+    return map
+  }, [assets])
+
+  const findAsset = (symbol) => assetMap.get(String(symbol ?? '').toUpperCase()) ?? null
+
   const markFeedback = (value) => {
     if (!selectedItem) return
     updateFeed(items => items.map(item => item.id === selectedItem.id
@@ -228,17 +272,26 @@ export default function AlertFeed() {
     setSelectedItem(item => item ? { ...item, feedback: value, feedbackAt: Date.now() } : item)
   }
 
+  const feedbackStats = useMemo(() => {
+    const tally = {}
+    for (const item of feed) {
+      if (!item.feedback) continue
+      tally[item.feedback] = (tally[item.feedback] ?? 0) + 1
+    }
+    return tally
+  }, [feed])
+
   const visible = useMemo(() => {
     const q = symbolFilter.trim().toUpperCase()
     return feed.filter(item => {
-      if (typeFilter !== 'all' && item.type !== typeFilter) return false
+      if (typeFilter !== 'all' && feedBucket(item) !== typeFilter) return false
       if (q && !item.symbol.toUpperCase().includes(q)) return false
       return true
     })
   }, [feed, typeFilter, symbolFilter])
 
   const reviewAsset = selectedItem
-    ? assets.find(a => a.symbol === selectedItem.symbol || a.apiSymbol === selectedItem.symbol)
+    ? findAsset(selectedItem.symbol)
     : null
   const currentMove = selectedItem?.price && reviewAsset?.price
     ? ((reviewAsset.price - selectedItem.price) / selectedItem.price) * 100
@@ -247,7 +300,7 @@ export default function AlertFeed() {
   const perf = useMemo(() => {
     const rows = []
     for (const item of feed) {
-      const asset = assets.find(x => x.symbol === item.symbol || x.apiSymbol === item.symbol)
+      const asset = findAsset(item.symbol)
       if (!asset?.price || !item.price) continue
       const move = ((asset.price - item.price) / item.price) * 100
       const expectedUp = item.type === 'rsi'
@@ -261,7 +314,58 @@ export default function AlertFeed() {
     }
     const hit = rows.filter(r => r.hit).length
     return { total: rows.length, hit, rate: rows.length ? Math.round(hit / rows.length * 100) : null }
-  }, [feed, assets])
+  }, [feed, assetMap])
+
+  const bucketPerf = useMemo(() => {
+    const stats = {}
+    for (const item of feed) {
+      const asset = findAsset(item.symbol)
+      if (!asset?.price || !item.price) continue
+      const move = ((asset.price - item.price) / item.price) * 100
+      const bucket = feedBucket(item)
+      const expectedUp = bucket === 'opportunity' || bucket === 'ai'
+      const hit = expectedUp ? move > 0 : move < 0
+      const row = stats[bucket] ?? { total: 0, hit: 0 }
+      row.total += 1
+      if (hit) row.hit += 1
+      stats[bucket] = row
+    }
+    return stats
+  }, [feed, assetMap])
+
+  const rulePerf = useMemo(() => {
+    const names = new Map(configs.map(c => [c.id, c.symbol]))
+    const stats = {}
+    for (const item of feed) {
+      if (!item.ruleId || !item.price) continue
+      const outcome = item.outcomes?.['4h'] ?? item.outcomes?.['1h'] ?? item.outcomes?.['24h']
+      let move = outcome?.changePct
+      if (move == null) {
+        const asset = findAsset(item.symbol)
+        if (!asset?.price) continue
+        move = ((asset.price - item.price) / item.price) * 100
+      }
+      const bucket = feedBucket(item)
+      const expectedUp = bucket === 'opportunity' || bucket === 'ai'
+      const hit = expectedUp ? move > 0 : move < 0
+      const row = stats[item.ruleId] ?? {
+        ruleId: item.ruleId,
+        label: names.get(item.ruleId) ?? item.ruleSymbol ?? item.symbol,
+        total: 0,
+        hit: 0,
+        lastTs: 0,
+      }
+      row.total += 1
+      if (hit) row.hit += 1
+      row.lastTs = Math.max(row.lastTs, item.ts ?? 0)
+      stats[item.ruleId] = row
+    }
+    return Object.values(stats)
+      .filter(row => row.total >= 2)
+      .map(row => ({ ...row, rate: Math.round(row.hit / row.total * 100) }))
+      .sort((a, b) => a.rate - b.rate || b.total - a.total)
+      .slice(0, 4)
+  }, [feed, assetMap, configs])
 
   const buildReviewPayload = () => {
     if (!selectedItem) return null
@@ -333,6 +437,16 @@ export default function AlertFeed() {
               {feed.length} 条{perf.total ? ` · 命中 ${perf.rate}%` : ''}
             </span>
           )}
+          {Object.keys(feedbackStats).length > 0 && (
+            <span className="feed-feedback-summary">
+              {Object.entries(feedbackStats).map(([k, v]) => `${k}${v}`).join(' · ')}
+            </span>
+          )}
+          {Object.keys(bucketPerf).length > 0 && (
+            <span className="feed-feedback-summary">
+              {Object.entries(bucketPerf).map(([k, v]) => `${BUCKET_LABELS[k] ?? k} ${Math.round(v.hit / v.total * 100)}%`).join(' · ')}
+            </span>
+          )}
           {feed.length > 0 && (
             <button className="feed-clear-btn" onClick={clearFeed}>清除</button>
           )}
@@ -362,6 +476,22 @@ export default function AlertFeed() {
             value={symbolFilter}
             onChange={e => setSymbolFilter(e.target.value)}
           />
+        </div>
+      )}
+
+      {rulePerf.length > 0 && (
+        <div className="feed-rule-perf">
+          <span>规则复盘</span>
+          {rulePerf.map(row => (
+            <button
+              key={row.ruleId}
+              className={row.rate < 40 ? 'weak' : row.rate >= 60 ? 'good' : ''}
+              title={`${row.label}：${row.total} 条，命中 ${row.hit} 条`}
+              onClick={() => setSymbolFilter(row.label)}
+            >
+              {row.label} {row.rate}%
+            </button>
+          ))}
         </div>
       )}
 
@@ -473,7 +603,11 @@ export default function AlertFeed() {
         </div>
       )}
 
-      {chartAsset && <ChartModal asset={chartAsset} alertItem={selectedItem} onClose={() => setChartAsset(null)} />}
+      {chartAsset && (
+        <Suspense fallback={null}>
+          <ChartModal asset={chartAsset} alertItem={selectedItem} onClose={() => setChartAsset(null)} />
+        </Suspense>
+      )}
     </div>
   )
 }

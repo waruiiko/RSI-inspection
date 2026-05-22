@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState, useMemo } from 'react'
+import { lazy, Suspense, useDeferredValue, useEffect, useRef, useState, useMemo } from 'react'
 import useMarketStore   from './store/marketStore'
 import useAlertStore    from './store/alertStore'
 import useSettingsStore from './store/settingsStore'
@@ -13,18 +13,23 @@ import { matchesAssetRef } from './utils/assetKey'
 import { applyLiquidityLimit, getQuoteVolume } from './utils/liquidity'
 import { buildCandidates, candidateSignature, makeAiFeedItems } from './utils/aiCandidates'
 import Toolbar      from './components/Toolbar'
-import Heatmap      from './components/Heatmap'
-import StatsTable   from './components/StatsTable'
-import ManagePage   from './components/ManagePage'
-import AlertPage    from './components/AlertPage'
-import AlertFeed    from './components/AlertFeed'
-import SettingsPage from './components/SettingsPage'
-import AiPage       from './components/AiPage'
-import SignalTrailPage from './components/SignalTrailPage'
-import AiReviewPage from './components/AiReviewPage'
-import LaunchReviewPage from './components/LaunchReviewPage'
-import MarketChatPage from './components/MarketChatPage'
-import WatchPoolPage from './components/WatchPoolPage'
+const Heatmap = lazy(() => import('./components/Heatmap'))
+const StatsTable = lazy(() => import('./components/StatsTable'))
+const ManagePage = lazy(() => import('./components/ManagePage'))
+const AlertPage = lazy(() => import('./components/AlertPage'))
+const AlertFeed = lazy(() => import('./components/AlertFeed'))
+const SettingsPage = lazy(() => import('./components/SettingsPage'))
+const AiPage = lazy(() => import('./components/AiPage'))
+const SignalTrailPage = lazy(() => import('./components/SignalTrailPage'))
+const AiReviewPage = lazy(() => import('./components/AiReviewPage'))
+const LaunchReviewPage = lazy(() => import('./components/LaunchReviewPage'))
+const MarketChatPage = lazy(() => import('./components/MarketChatPage'))
+const WatchPoolPage = lazy(() => import('./components/WatchPoolPage'))
+const OpportunityPage = lazy(() => import('./components/OpportunityPage'))
+
+function LazyFallback({ label = '正在加载...' }) {
+  return <div className="lazy-fallback">{label}</div>
+}
 
 function isSilentHours(start, end) {
   if (!start || !end) return false
@@ -75,6 +80,28 @@ function observationTimeframes(tfs, enabled) {
   return [...next]
 }
 
+function slowOversoldStage(asset, prev, tf, threshold, strong) {
+  const rsi = asset.rsi?.[tf]
+  const prevRsi = prev?.rsi?.[tf]
+  if (rsi == null) return null
+  if (prevRsi != null && prevRsi > threshold && rsi <= threshold) {
+    return { key: 'enter', label: '初次进入低位', level: rsi <= strong ? 1 : 0 }
+  }
+  if (prevRsi != null && rsi > prevRsi + 1.5 && rsi <= threshold + 6) {
+    const priceHeld = asset.price != null && prev?.price != null && asset.price >= prev.price * 0.995
+    const score = Math.abs(asset.signalScore?.[tf] ?? 0)
+    const hasStructure = score >= 1 || !!asset.volumeSignal?.[tf] || !!asset.divergence?.[tf]
+    if (!priceHeld && !hasStructure) return null
+    return {
+      key: priceHeld && hasStructure ? 'rsi_lift_price_hold_structure' : priceHeld ? 'rsi_lift_price_hold' : 'rsi_lift_structure',
+      label: priceHeld && hasStructure ? '价格未破低且 RSI 抬高，结构改善' : priceHeld ? '价格未破低且 RSI 抬高' : 'RSI 低位回升且结构改善',
+      level: 1,
+    }
+  }
+  if (rsi <= strong) return { key: 'deep', label: '深度低位', level: 1 }
+  return { key: 'base', label: '持续低位横盘', level: 0 }
+}
+
 function findSlowOversoldSignals(assets, prevAssets, now, notified) {
   const candidates = assets
     .filter(a => a.type === 'crypto' || a.type === 'tradfi')
@@ -92,9 +119,11 @@ function findSlowOversoldSignals(assets, prevAssets, now, notified) {
       const rsi = asset.rsi?.[rule.tf]
       if (rsi == null || rsi > rule.threshold) continue
       const prevRsi = prev?.rsi?.[rule.tf]
-      const entering = prevRsi == null || prevRsi > rule.threshold || Math.abs(prevRsi - rsi) >= 2
-      if (!entering) continue
-      const key = `${asset.symbol}|${rule.tf}|slow_oversold`
+      const stage = slowOversoldStage(asset, prev, rule.tf, rule.threshold, rule.strong)
+      if (!stage) continue
+      const changedEnough = prevRsi == null || prevRsi > rule.threshold || Math.abs(prevRsi - rsi) >= 1.5 || stage.level >= 1
+      if (!changedEnough) continue
+      const key = `${asset.symbol}|${rule.tf}|slow_oversold|${stage.key}`
       if (now - (notified[key] ?? 0) < 12 * 60 * 60 * 1000) continue
       notified[key] = now
       out.push({
@@ -104,18 +133,149 @@ function findSlowOversoldSignals(assets, prevAssets, now, notified) {
         type: 'rsi',
         timeframe: rule.tf,
         condition: 'below',
-        signal: '慢速超卖观察',
+        signal: `慢速超卖观察 · ${stage.label}`,
         threshold: rule.threshold,
         value: rsi,
         price: asset.price,
         change24h: asset.change24h,
-        level: rsi <= rule.strong ? 1 : 0,
-        reason: `${rule.tf} RSI 缓慢进入超卖/低位区，24H 波动不剧烈，适合加入观察而不是追急跌。`,
+        level: stage.level,
+        reason: `${rule.tf} ${stage.label}，RSI ${rsi.toFixed(1)}，24H 波动不剧烈，适合加入观察而不是追急跌。`,
       })
       if (out.length >= 8) return out
     }
   }
   return out
+}
+
+function findWatchPoolReviewSignals(watchItems, assets, now, notified) {
+  const out = []
+  for (const item of watchItems) {
+    if (item.status === 'ignore') continue
+    const enteredAt = item.firstSeenAt ?? item.lastSeenAt
+    if (!enteredAt || now - enteredAt < 36 * 60 * 60 * 1000) continue
+    const asset = assets.find(a => matchesAssetRef(a, item.symbol))
+    if (!asset) continue
+    const move = Math.abs(asset.change24h ?? 0)
+    const rsi4h = asset.rsi?.['4h']
+    const rsi1d = asset.rsi?.['1d']
+    const cooled = move <= 6
+    const rsiNormalized = (rsi4h != null && rsi4h >= 38 && rsi4h <= 58) || (rsi1d != null && rsi1d >= 38 && rsi1d <= 58)
+    const stillLiquid = getQuoteVolume(asset) >= 1_000_000
+    if (!cooled || !rsiNormalized || !stillLiquid) continue
+    const key = `${item.symbol}|watch_pool_review`
+    if (now - (notified[key] ?? 0) < 24 * 60 * 60 * 1000) continue
+    notified[key] = now
+    out.push({
+      id: `watch-pool-review-${item.symbol}-${now}`,
+      ts: now,
+      symbol: item.symbol,
+      type: 'watch_pool',
+      condition: 'cooled',
+      signal: '观察池冷却复看',
+      value: rsi4h ?? rsi1d ?? null,
+      price: asset.price,
+      change24h: asset.change24h,
+      level: item.status === 'interesting' ? 1 : 0,
+      reason: `已冷却 ${Math.floor((now - enteredAt) / 864e5)} 天，24H 波动收敛到 ${asset.change24h?.toFixed?.(2) ?? '-'}%，RSI 回到可复看区间。`,
+    })
+    if (out.length >= 8) return out
+  }
+  return out
+}
+
+function buildStartupHealthReport(assets, timeframe = '4h') {
+  const valid = assets.filter(a => a.rsi?.[timeframe] != null)
+  if (!valid.length) return null
+  const oversold = valid.filter(a => a.rsi[timeframe] <= 30).length
+  const low = valid.filter(a => a.rsi[timeframe] > 30 && a.rsi[timeframe] <= 40).length
+  const overbought = valid.filter(a => a.rsi[timeframe] >= 70).length
+  const volatile = valid.filter(a => Math.abs(a.change24h ?? 0) >= 12).length
+  const up = valid.filter(a => (a.change24h ?? 0) > 0).length
+  const avg = valid.reduce((sum, a) => sum + a.rsi[timeframe], 0) / valid.length
+  const mood = avg <= 42 ? '偏弱，低位标的较多'
+    : avg >= 58 ? '偏强，注意追高风险'
+      : '中性，适合等待结构信号'
+  return {
+    id: `startup-health-${Date.now()}`,
+    symbol: 'MARKET',
+    type: 'market_report',
+    condition: 'startup',
+    signal: '启动健康报告',
+    value: Number(avg.toFixed(1)),
+    level: 0,
+    reason: `${timeframe} 均值 RSI ${avg.toFixed(1)}，超卖 ${oversold}，低位 ${low}，超买 ${overbought}，剧烈波动 ${volatile}，上涨 ${Math.round(up / valid.length * 100)}%；市场${mood}。`,
+  }
+}
+
+function getTodayPicks({ assets, feed, watchPoolItems }) {
+  const picks = []
+  const push = (item) => {
+    if (!item?.symbol || picks.some(p => p.symbol === item.symbol && p.type === item.type)) return
+    picks.push(item)
+  }
+
+  const liquid = applyLiquidityLimit(
+    assets.filter(a => (a.type === 'crypto' || a.type === 'tradfi') && getQuoteVolume(a) >= 1_000_000),
+    220
+  )
+
+  liquid
+    .filter(a => Math.abs(a.change24h ?? 0) <= 8)
+    .filter(a => (a.rsi?.['4h'] ?? 100) <= 35 || (a.rsi?.['1d'] ?? 100) <= 38)
+    .sort((a, b) => Math.min(a.rsi?.['4h'] ?? 100, a.rsi?.['1d'] ?? 100) - Math.min(b.rsi?.['4h'] ?? 100, b.rsi?.['1d'] ?? 100))
+    .slice(0, 4)
+    .forEach(a => push({
+      type: 'opportunity',
+      symbol: a.symbol,
+      label: '慢速低位',
+      detail: `4h ${a.rsi?.['4h']?.toFixed?.(1) ?? '-'} / 1d ${a.rsi?.['1d']?.toFixed?.(1) ?? '-'}`,
+      tone: 'green',
+    }))
+
+  watchPoolItems
+    .filter(i => i.status === 'interesting' || i.status === 'watch')
+    .map(i => {
+      const asset = assets.find(a => matchesAssetRef(a, i.symbol))
+      if (!asset) return null
+      const ageH = (Date.now() - (i.firstSeenAt ?? i.lastSeenAt ?? Date.now())) / 36e5
+      const cooled = ageH >= 36 && Math.abs(asset.change24h ?? 0) <= 6
+      const rsiOk = ((asset.rsi?.['4h'] ?? 0) >= 38 && (asset.rsi?.['4h'] ?? 100) <= 58)
+        || ((asset.rsi?.['1d'] ?? 0) >= 38 && (asset.rsi?.['1d'] ?? 100) <= 58)
+      return cooled && rsiOk ? { item: i, asset } : null
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+    .forEach(({ item, asset }) => push({
+      type: 'cooldown',
+      symbol: item.symbol,
+      label: '观察池复看',
+      detail: `24H ${asset.change24h?.toFixed?.(2) ?? '-'}%`,
+      tone: 'blue',
+    }))
+
+  feed
+    .filter(i => i.type === 'ai' && (i.condition === 'focus' || i.value >= 80))
+    .slice(0, 3)
+    .forEach(i => push({
+      type: 'ai',
+      symbol: i.symbol,
+      label: 'AI重点',
+      detail: `置信 ${i.value ?? '-'}`,
+      tone: 'orange',
+    }))
+
+  liquid
+    .filter(a => Math.abs(a.change24h ?? 0) >= 12 || (a.rsi?.['4h'] ?? 50) >= 76 || (a.rsi?.['4h'] ?? 50) <= 24)
+    .slice(0, 3)
+    .forEach(a => push({
+      type: 'risk',
+      symbol: a.symbol,
+      label: '风险集中',
+      detail: `24H ${a.change24h?.toFixed?.(2) ?? '-'}%`,
+      tone: 'red',
+    }))
+
+  return picks.slice(0, 8)
 }
 
 function findVolatileWatchPoolEntries(assets, prevAssets, now) {
@@ -196,7 +356,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.0.9'
+const APP_VERSION = 'v1.1.0'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
@@ -293,6 +453,32 @@ function SummaryBar({ assets, timeframe }) {
     </div>
   )
 }
+
+function TodayPicks({ picks, onSelect }) {
+  if (!picks.length) return null
+  return (
+    <div className="today-picks">
+      <div className="today-picks-head">
+        <b>今日值得看</b>
+        <span>{picks.length} 个线索</span>
+      </div>
+      <div className="today-picks-list">
+        {picks.map(item => (
+          <button
+            key={`${item.type}-${item.symbol}`}
+            className={`today-pick today-pick-${item.tone}`}
+            onClick={() => onSelect(item.symbol)}
+            title={item.detail}
+          >
+            <b>{item.symbol}</b>
+            <span>{item.label}</span>
+            <em>{item.detail}</em>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
 /* 鈹€鈹€ Main App 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ */
 export default function App() {
   const fetchData  = useMarketStore(s => s.fetchData)
@@ -308,6 +494,7 @@ export default function App() {
   const hasData    = assets.length > 0
 
   const configs         = useAlertStore(s => s.configs)
+  const feed            = useAlertStore(s => s.feed)
   const updateLastFired = useAlertStore(s => s.updateLastFired)
   const addFeedItems    = useAlertStore(s => s.addFeedItems)
   const updateFeed      = useAlertStore(s => s.updateFeed)
@@ -342,6 +529,9 @@ export default function App() {
   const autoAiRef     = useRef({ enabled: autoAiEnabled, interval: autoAiInterval, limit: autoAiLimit, startupDelay: autoAiStartupDelay })
   const aiRunRef      = useRef({ busy: false, lastRun: 0, lastSignature: '', notified: {} })
   const slowRsiRef    = useRef({})
+  const watchPoolReviewRef = useRef({})
+  const backgroundScanRef = useRef({ slowRsiAt: 0, watchPoolAt: 0 })
+  const startupReportRef = useRef(false)
   const appStartedAtRef = useRef(Date.now())
   configsRef.current  = configs
   assetsRef.current   = assets
@@ -440,6 +630,11 @@ export default function App() {
     const marketOpen = isUSMarketOpen()
     const margin = rsiMargin(alertModeRef.current.rsiSensitivity)
     const observationOn = alertModeRef.current.observationEnabled
+    if (completedMeta?.scope === 'startup-full' && !startupReportRef.current) {
+      const report = buildStartupHealthReport(assetsRef.current, '4h')
+      if (report) fired.push(report)
+      startupReportRef.current = true
+    }
     findVolatileWatchPoolEntries(assetsRef.current, prevAssetsRef.current, now)
       .forEach(entry => addWatchPool(entry))
     cleanupWatchPool(watchPoolRetentionDays)
@@ -469,7 +664,14 @@ export default function App() {
       if (now - (cfg.lastFired?.[key] ?? 0) < cooldownFor(level)) return
       updateLastFired(cfg.id, key)
       firedBatchKeys.add(batchKey)
-      fired.push({ ...notifData, level, special: level >= 2 })
+      fired.push({
+        ...notifData,
+        ruleId: cfg.id,
+        ruleSymbol: cfg.symbol,
+        ruleLevel: cfg.alertLevel ?? (cfg.special ? 3 : 1),
+        level,
+        special: level >= 2,
+      })
     }
 
     for (const cfg of configsRef.current) {
@@ -597,13 +799,32 @@ export default function App() {
       }
     }
 
-    const slowOversold = findSlowOversoldSignals(assetsRef.current, prevAssetsRef.current, now, slowRsiRef.current)
-    if (slowOversold.length) {
-      for (const item of slowOversold) {
-        const batchKey = [item.symbol, item.timeframe, item.type, item.signal].join('|')
-        if (firedBatchKeys.has(batchKey)) continue
-        firedBatchKeys.add(batchKey)
-        fired.push(item)
+    const bgScan = backgroundScanRef.current
+    const shouldScanSlowRsi = startupStateCheck || now - bgScan.slowRsiAt >= 30 * 60 * 1000
+    if (shouldScanSlowRsi) {
+      bgScan.slowRsiAt = now
+      const slowOversold = findSlowOversoldSignals(assetsRef.current, prevAssetsRef.current, now, slowRsiRef.current)
+      if (slowOversold.length) {
+        for (const item of slowOversold) {
+          const batchKey = [item.symbol, item.timeframe, item.type, item.signal].join('|')
+          if (firedBatchKeys.has(batchKey)) continue
+          firedBatchKeys.add(batchKey)
+          fired.push(item)
+        }
+      }
+    }
+
+    const shouldScanWatchPool = startupStateCheck || now - bgScan.watchPoolAt >= 15 * 60 * 1000
+    if (shouldScanWatchPool) {
+      bgScan.watchPoolAt = now
+      const watchPoolReviews = findWatchPoolReviewSignals(watchPoolItems, assetsRef.current, now, watchPoolReviewRef.current)
+      if (watchPoolReviews.length) {
+        for (const item of watchPoolReviews) {
+          const batchKey = [item.symbol, item.type, item.signal].join('|')
+          if (firedBatchKeys.has(batchKey)) continue
+          firedBatchKeys.add(batchKey)
+          fired.push(item)
+        }
       }
     }
 
@@ -625,9 +846,14 @@ export default function App() {
 
     updateFeed(feed => {
       let changed = false
+      const bySymbol = new Map()
+      for (const asset of assetsRef.current) {
+        if (asset.symbol) bySymbol.set(String(asset.symbol).toUpperCase(), asset)
+        if (asset.apiSymbol) bySymbol.set(String(asset.apiSymbol).toUpperCase(), asset)
+      }
       const next = feed.map(item => {
         if (!item.price || !item.ts) return item
-        const asset = assetsRef.current.find(a => matchesAssetRef(a, item.symbol))
+        const asset = bySymbol.get(String(item.symbol).toUpperCase())
         if (!asset?.price) return item
         const outcomes = { ...(item.outcomes ?? {}) }
         let itemChanged = false
@@ -735,6 +961,8 @@ export default function App() {
          : filter === 'crypto' ? assets.filter(a => a.type === 'crypto')
          : assets.filter(a => a.type !== 'crypto')
   }, [assets, filter])
+  const deferredAssets = useDeferredValue(filteredAssets)
+  const todayPicks = useMemo(() => getTodayPicks({ assets: deferredAssets, feed, watchPoolItems }), [deferredAssets, feed, watchPoolItems])
 
   return (
     <div className="app">
@@ -749,23 +977,26 @@ export default function App() {
 
       <div className={`app-shell ${chatOpen ? 'chat-open' : ''}`}>
         <div className="app-content">
-          {activeTab === 'manage' ? (
-            <ManagePage aiRequest={aiPlanRequest?.target === 'manage' ? aiPlanRequest : null} onSaved={() => { setActiveTab('market'); fetchData() }} />
-          ) : activeTab === 'alerts' ? (
-            <AlertPage aiRequest={aiPlanRequest?.target === 'alerts' ? aiPlanRequest : null} />
-          ) : activeTab === 'settings' ? (
-            <SettingsPage />
-          ) : activeTab === 'ai' ? (
-            <AiPage />
-          ) : activeTab === 'ai-review' ? (
-            <AiReviewPage />
-          ) : activeTab === 'trail' ? (
-            <SignalTrailPage />
-          ) : activeTab === 'watch-pool' ? (
-            <WatchPoolPage />
-          ) : activeTab === 'launch-review' ? (
-            <LaunchReviewPage />
-          ) : (
+          <Suspense fallback={<LazyFallback />}>
+            {activeTab === 'manage' ? (
+              <ManagePage aiRequest={aiPlanRequest?.target === 'manage' ? aiPlanRequest : null} onSaved={() => { setActiveTab('market'); fetchData() }} />
+            ) : activeTab === 'alerts' ? (
+              <AlertPage aiRequest={aiPlanRequest?.target === 'alerts' ? aiPlanRequest : null} />
+            ) : activeTab === 'settings' ? (
+              <SettingsPage />
+            ) : activeTab === 'ai' ? (
+              <AiPage />
+            ) : activeTab === 'opportunities' ? (
+              <OpportunityPage />
+            ) : activeTab === 'ai-review' ? (
+              <AiReviewPage />
+            ) : activeTab === 'trail' ? (
+              <SignalTrailPage />
+            ) : activeTab === 'watch-pool' ? (
+              <WatchPoolPage />
+            ) : activeTab === 'launch-review' ? (
+              <LaunchReviewPage />
+            ) : (
             <div className="main">
               {loading && !hasData && (
                 <div className="splash">
@@ -783,6 +1014,7 @@ export default function App() {
                   <div className="market-main-column">
                     {/* Summary cards */}
                     <SummaryBar assets={filteredAssets} timeframe={timeframe} />
+                    <TodayPicks picks={todayPicks} onSelect={setFlash} />
                     <StatusBanner />
 
                     {/* Heatmap */}
@@ -799,20 +1031,23 @@ export default function App() {
                 </div>
               )}
             </div>
-          )}
+            )}
+          </Suspense>
         </div>
         {chatOpen && (
           <aside className="chat-drawer">
-            <MarketChatPage
-              activeTab={activeTab}
-              drawer
-              onClose={() => setChatOpen(false)}
-              onGeneratePlan={(target, instruction) => {
-                const tab = target === 'manage' ? 'manage' : 'alerts'
-                setAiPlanRequest({ id: Date.now(), target: tab, instruction })
-                setActiveTab(tab)
-              }}
-            />
+            <Suspense fallback={<LazyFallback label="正在加载 AI 对话..." />}>
+              <MarketChatPage
+                activeTab={activeTab}
+                drawer
+                onClose={() => setChatOpen(false)}
+                onGeneratePlan={(target, instruction) => {
+                  const tab = target === 'manage' ? 'manage' : 'alerts'
+                  setAiPlanRequest({ id: Date.now(), target: tab, instruction })
+                  setActiveTab(tab)
+                }}
+              />
+            </Suspense>
           </aside>
         )}
       </div>

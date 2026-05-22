@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { lazy, Suspense, useMemo, useState } from 'react'
 import useWatchPoolStore from '../store/watchPoolStore'
 import useMarketStore from '../store/marketStore'
 import useSettingsStore from '../store/settingsStore'
-import ChartModal from './ChartModal'
+import useAlertStore from '../store/alertStore'
+const ChartModal = lazy(() => import('./ChartModal'))
 
 const STATUS_LABELS = {
   unmarked: '未标记',
@@ -27,6 +28,20 @@ function fmtPrice(v) {
   return Number(v).toPrecision(4)
 }
 
+function getReviewHint(item, asset) {
+  if (!asset) return null
+  const ageH = (Date.now() - (item.firstSeenAt ?? item.lastSeenAt ?? Date.now())) / 36e5
+  const move = Math.abs(asset.change24h ?? 0)
+  const rsi4h = asset.rsi?.['4h']
+  const rsi1d = asset.rsi?.['1d']
+  const cooled = ageH >= 36 && move <= 6
+  const normalized = (rsi4h != null && rsi4h >= 38 && rsi4h <= 58) || (rsi1d != null && rsi1d >= 38 && rsi1d <= 58)
+  if (cooled && normalized) return { tone: 'green', label: '可复看', detail: '波动已收敛，RSI 回到可重新观察区间。' }
+  if (ageH < 36) return { tone: 'muted', label: '冷却中', detail: '进入观察池时间还短，先不急着复看。' }
+  if (!cooled) return { tone: 'orange', label: '仍波动', detail: '24H 波动仍较大，继续冷却。' }
+  return { tone: 'blue', label: '待结构', detail: '波动已收敛，但 RSI/结构还没有明显回到复看区。' }
+}
+
 export default function WatchPoolPage() {
   const items = useWatchPoolStore(s => s.items)
   const setStatus = useWatchPoolStore(s => s.setStatus)
@@ -35,7 +50,7 @@ export default function WatchPoolPage() {
   const clear = useWatchPoolStore(s => s.clear)
   const cleanup = useWatchPoolStore(s => s.cleanup)
   const assets = useMarketStore(s => s.assets)
-  const setFlash = useMarketStore(s => s.setFlash)
+  const upsertAlert = useAlertStore(s => s.upsert)
   const retentionDays = useSettingsStore(s => s.watchPoolRetentionDays)
   const [filter, setFilter] = useState('active')
   const [query, setQuery] = useState('')
@@ -53,6 +68,28 @@ export default function WatchPoolPage() {
     ...item,
     asset: assets.find(a => a.symbol === item.symbol || a.apiSymbol === item.symbol),
   }))
+
+  const convertToRule = (item) => {
+    upsertAlert([item.symbol], {
+      timeframes: ['1h', '4h'],
+      requireAllTf: false,
+      alertLevel: item.status === 'interesting' ? 2 : 1,
+      special: item.status === 'interesting',
+      rsiAbove: null,
+      rsiBelow: 40,
+      changeAbove: null,
+      changeBelow: null,
+      priceAbove: null,
+      priceBelow: null,
+      divBull: true,
+      divBear: false,
+      volumeSignal: true,
+      strategies: ['volume_divergence', 'breakout'],
+      strategy: null,
+      minScore: 2,
+    })
+    setStatus(item.symbol, 'watch')
+  }
 
   return (
     <div className="watch-pool-page">
@@ -105,11 +142,12 @@ export default function WatchPoolPage() {
           <div className="pair-empty">暂无观察池记录</div>
         ) : enriched.map(item => {
           const asset = item.asset
+          const hint = getReviewHint(item, asset)
           const ageDays = Math.max(0, Math.ceil(((item.lastSeenAt ?? item.firstSeenAt ?? Date.now()) + retentionDays * 864e5 - Date.now()) / 864e5))
           return (
             <div key={item.id} className={`watch-row watch-status-${item.status}`}>
               <div>
-                <b>{item.symbol}</b>
+                <button className="symbol-link-btn" onClick={() => asset && setChartAsset(asset)}>{item.symbol}</button>
                 <em>{fmtTime(item.lastSeenAt)}</em>
               </div>
               <div className="watch-reason">
@@ -130,6 +168,11 @@ export default function WatchPoolPage() {
                 <span className={`rule-chip ${item.status === 'interesting' ? 'orange' : item.status === 'watch' ? 'blue' : 'muted'}`}>
                   {STATUS_LABELS[item.status] ?? item.status}
                 </span>
+                {hint && (
+                  <span className={`rule-chip ${hint.tone}`} title={hint.detail}>
+                    {hint.label}
+                  </span>
+                )}
                 <input
                   className="watch-note"
                   placeholder="备注..."
@@ -140,7 +183,8 @@ export default function WatchPoolPage() {
               <div className="watch-actions">
                 <button className="zone-btn" onClick={() => setStatus(item.symbol, 'watch')}>继续观察</button>
                 <button className="zone-btn" onClick={() => setStatus(item.symbol, 'interesting')}>有兴趣</button>
-                <button className="zone-btn" onClick={() => { setFlash(item.symbol); if (asset) setChartAsset(asset) }}>K线</button>
+                <button className="zone-btn" onClick={() => convertToRule(item)}>转规则</button>
+                <button className="zone-btn" onClick={() => asset && setChartAsset(asset)} disabled={!asset}>K线</button>
                 <button className="rule-del-btn" onClick={() => remove(item.symbol)}>移除</button>
               </div>
             </div>
@@ -148,7 +192,11 @@ export default function WatchPoolPage() {
         })}
       </div>
 
-      {chartAsset && <ChartModal asset={chartAsset} onClose={() => setChartAsset(null)} />}
+      {chartAsset && (
+        <Suspense fallback={null}>
+          <ChartModal asset={chartAsset} onClose={() => setChartAsset(null)} />
+        </Suspense>
+      )}
     </div>
   )
 }

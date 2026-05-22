@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { lazy, Suspense, useMemo, useState } from 'react'
 import useMarketStore from '../store/marketStore'
 import useAlertStore from '../store/alertStore'
 import useSettingsStore from '../store/settingsStore'
@@ -12,6 +12,8 @@ import {
   makeAiFeedItems,
   normalizeDecision,
 } from '../utils/aiCandidates'
+
+const ChartModal = lazy(() => import('./ChartModal'))
 
 const DECISION_CLASSES = {
   focus: 'ai-decision-focus',
@@ -62,8 +64,15 @@ export default function AiPage() {
   const [decisionFilter, setDecisionFilter] = useState('all')
   const [rowBusy, setRowBusy] = useState('')
   const [viewMode, setViewMode] = useState(aiLastSnapshot ? 'result' : 'current')
+  const [chartAsset, setChartAsset] = useState(null)
 
   const candidates = useMemo(() => buildCandidates(assets, 30, watchPoolItems), [assets, watchPoolItems])
+  const watchPoolCandidates = useMemo(() => {
+    const symbols = new Set(watchPoolItems
+      .filter(i => i.status === 'watch' || i.status === 'interesting')
+      .map(i => String(i.symbol).toUpperCase()))
+    return buildCandidates(assets.filter(a => symbols.has(String(a.symbol).toUpperCase())), 20, watchPoolItems)
+  }, [assets, watchPoolItems])
   const activeSnapshot = localSnapshot ?? aiLastSnapshot
   const snapshotCandidates = activeSnapshot?.candidates ?? []
   const hasSnapshot = snapshotCandidates.length > 0
@@ -76,6 +85,23 @@ export default function AiPage() {
     }
     return map
   }, [activeSnapshot])
+
+  const assetBySymbol = useMemo(() => {
+    const map = new Map()
+    for (const asset of assets) map.set(String(asset.symbol).toUpperCase(), asset)
+    return map
+  }, [assets])
+
+  const openChart = (candidate) => {
+    const asset = assetBySymbol.get(String(candidate.symbol).toUpperCase())
+    setChartAsset(asset ?? {
+      symbol: candidate.symbol,
+      apiSymbol: candidate.symbol,
+      source: candidate.source,
+      type: candidate.type,
+      price: candidate.price,
+    })
+  }
 
   const visible = useMemo(() => {
     if (decisionFilter === 'all') return tableCandidates
@@ -150,6 +176,78 @@ export default function AiPage() {
         error: err.message || String(err),
       })
       setStatus(`筛选失败：${err.message}`)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runWatchPool = async () => {
+    if (!watchPoolCandidates.length || busy) return
+    const runCandidates = watchPoolCandidates
+    const runStartedAt = Date.now()
+    setLocalSnapshot({
+      ts: runStartedAt,
+      mode: 'watch-pool',
+      candidates: runCandidates,
+      result: null,
+      summary: '观察池巡检中...',
+    })
+    setResult(null)
+    setBusy(true)
+    setStatus('正在运行 Codex 观察池巡检...')
+    setViewMode('result')
+    setPaths({})
+    try {
+      const payload = {
+        scope: 'watch-pool',
+        createdAt: new Date(runStartedAt).toISOString(),
+        updatedAt: updatedAt ? new Date(updatedAt).toISOString() : null,
+        note: '观察池巡检：只复看用户标记为继续观察/有兴趣的冷却标的，判断是否仍值得留意；不要给交易指令。',
+        candidates: runCandidates,
+      }
+      const res = await window.api.runCodexScreen(payload)
+      const elapsedMs = Date.now() - runStartedAt
+      setPaths({ screenDir: res.screenDir, reportPath: res.reportPath, resultPath: res.resultPath })
+      if (res.ok && res.result) {
+        setResult(res.result)
+        const snapshot = {
+          ts: Date.now(),
+          mode: 'watch-pool',
+          candidates: runCandidates,
+          result: res.result,
+          summary: res.result.summary ?? '',
+        }
+        setLocalSnapshot(snapshot)
+        updateSetting('aiLastRunAt', snapshot.ts)
+        updateSetting('aiLastRunMode', 'watch-pool')
+        updateSetting('aiLastRunCount', res.result.items?.length ?? 0)
+        updateSetting('aiLastSnapshot', snapshot)
+        addAiRunLog({ type: 'screen', mode: 'watch-pool', ok: true, inputCount: runCandidates.length, outputCount: res.result.items?.length ?? 0, elapsedMs, path: res.screenDir })
+        setStatus(`观察池巡检完成：${res.result.summary ?? res.screenName}`)
+      } else {
+        addAiRunLog({
+          type: 'screen',
+          mode: 'watch-pool',
+          ok: false,
+          inputCount: runCandidates.length,
+          outputCount: 0,
+          elapsedMs,
+          error: res.parseError || res.stderr || res.stdout || 'Codex 未返回可用结果',
+          path: res.screenDir,
+        })
+        setStatus(`观察池巡检失败：${res.parseError || res.stderr || res.stdout || '请检查 Codex 登录状态'}`)
+      }
+    } catch (err) {
+      addAiRunLog({
+        type: 'screen',
+        mode: 'watch-pool',
+        ok: false,
+        inputCount: runCandidates.length,
+        outputCount: 0,
+        elapsedMs: Date.now() - runStartedAt,
+        error: err.message || String(err),
+      })
+      setStatus(`观察池巡检失败：${err.message}`)
     } finally {
       setBusy(false)
     }
@@ -266,6 +364,9 @@ export default function AiPage() {
           <button className="zone-btn" onClick={runScreen} disabled={busy || !candidates.length}>
             {busy ? '筛选中...' : '运行 Codex 筛选'}
           </button>
+          <button className="zone-btn" onClick={runWatchPool} disabled={busy || !watchPoolCandidates.length}>
+            巡检观察池
+          </button>
           <button className="zone-btn" onClick={writeFocusAlerts} disabled={!activeSnapshot?.result?.items?.length}>
             写入重点提醒
           </button>
@@ -344,8 +445,12 @@ export default function AiPage() {
               const ai = decisionMap.get(c.symbol)
               const decision = normalizeDecision(ai?.decision)
               return (
-                <tr key={c.symbol}>
-                  <td><b>{c.symbol}</b></td>
+                <tr key={c.symbol} onDoubleClick={() => openChart(c)}>
+                  <td>
+                    <button className="symbol-link-btn" onClick={() => openChart(c)}>
+                      {c.symbol}
+                    </button>
+                  </td>
                   <td>{fmtPrice(c.price)}</td>
                   <td className={(c.change24h ?? 0) >= 0 ? 'pos' : 'neg'}>{fmtPct(c.change24h)}</td>
                   {TFS.map(tf => (
@@ -361,6 +466,12 @@ export default function AiPage() {
                   </td>
                   <td>{c.localReasons.join('，') || '-'}</td>
                   <td>
+                    <button
+                      className="ai-row-btn"
+                      onClick={() => openChart(c)}
+                    >
+                      K线
+                    </button>
                     <button
                       className="ai-row-btn"
                       disabled={busy || !!rowBusy}
@@ -397,6 +508,11 @@ export default function AiPage() {
           </tbody>
         </table>
       </div>
+      {chartAsset && (
+        <Suspense fallback={null}>
+          <ChartModal asset={chartAsset} onClose={() => setChartAsset(null)} />
+        </Suspense>
+      )}
     </div>
   )
 }

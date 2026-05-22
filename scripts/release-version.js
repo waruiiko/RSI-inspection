@@ -5,7 +5,7 @@ const root = path.resolve(__dirname, '..')
 const version = process.argv[2]
 
 if (!/^\d+\.\d+\.\d+$/.test(version || '')) {
-  console.error('Usage: npm run release:version -- 1.0.9')
+  console.error('Usage: npm run release:version -- 1.1.0')
   process.exit(1)
 }
 
@@ -35,7 +35,7 @@ edit('renderer/src/components/SettingsPage.jsx', text =>
 )
 
 edit('README.md', text =>
-  text.replace(/^# 市场 RSI 热力图 v\d+\.\d+\.\d+/m, `# 市场 RSI 热力图 v${version}`)
+  text.replace(/^# .+ v\d+\.\d+\.\d+/m, `# 市场 RSI 热力图 v${version}`)
 )
 
 console.log(`Version updated to ${version}`)

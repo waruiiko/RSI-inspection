@@ -1,5 +1,23 @@
 import { create } from 'zustand'
 
+let _feedSaveTimer = null
+
+function _saveFeedDebounced(feed, delay = 800) {
+  if (_feedSaveTimer) clearTimeout(_feedSaveTimer)
+  _feedSaveTimer = setTimeout(() => {
+    _feedSaveTimer = null
+    window.api.saveFeed(feed)
+  }, delay)
+}
+
+function _saveFeedNow(feed) {
+  if (_feedSaveTimer) {
+    clearTimeout(_feedSaveTimer)
+    _feedSaveTimer = null
+  }
+  window.api.saveFeed(feed)
+}
+
 // Config shape:
 // { id, symbol, special: bool, timeframes: ['1h','4h','1d'],
 //   rsiAbove: number|null, rsiBelow: number|null,
@@ -138,12 +156,12 @@ const useAlertStore = create((set, get) => ({
     const stamped = items.map((item, i) => ({ ...item, id: `${ts}_${i}`, ts }))
     const next = [...stamped, ...get().feed].slice(0, 200)
     set({ feed: next })
-    window.api.saveFeed(next)
+    _saveFeedDebounced(next)
   },
 
   clearFeed: () => {
     set({ feed: [] })
-    window.api.saveFeed([])
+    _saveFeedNow([])
   },
 
   updateFeed: (updater) => {
@@ -151,7 +169,7 @@ const useAlertStore = create((set, get) => ({
     const next = typeof updater === 'function' ? updater(current) : updater
     if (next === current) return
     set({ feed: next })
-    window.api.saveFeed(next)
+    _saveFeedDebounced(next)
   },
 
   updateLastFired: (id, key) => {

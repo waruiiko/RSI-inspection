@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, useMemo } from 'react'
-import * as echarts from 'echarts'
 import { getRsiColor } from '../utils/rsi'
 import useSettingsStore from '../store/settingsStore'
 
@@ -162,6 +161,19 @@ export default function ChartModal({ asset, onClose, alertItem = null }) {
   const rsiRef    = useRef(null)
   const candleChart = useRef(null)
   const rsiChart    = useRef(null)
+  const echartsRef  = useRef(null)
+  const [echartsLib, setEchartsLib] = useState(null)
+
+  useEffect(() => {
+    let cancelled = false
+    import('echarts').then(mod => {
+      if (!cancelled) {
+        echartsRef.current = mod
+        setEchartsLib(mod)
+      }
+    })
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     setLoading(true)
@@ -178,12 +190,12 @@ export default function ChartModal({ asset, onClose, alertItem = null }) {
   }, [onClose])
 
   useEffect(() => {
-    if (loading || !candleRef.current || !rsiRef.current) return
+    if (loading || !echartsLib || !candleRef.current || !rsiRef.current) return
 
     if (!candleChart.current) {
-      candleChart.current = echarts.init(candleRef.current, 'dark')
-      rsiChart.current    = echarts.init(rsiRef.current,    'dark')
-      echarts.connect([candleChart.current, rsiChart.current])
+      candleChart.current = echartsLib.init(candleRef.current, 'dark')
+      rsiChart.current    = echartsLib.init(rsiRef.current,    'dark')
+      echartsLib.connect([candleChart.current, rsiChart.current])
     }
 
     const candles = ohlcv[tf] ?? []
@@ -381,7 +393,7 @@ export default function ChartModal({ asset, onClose, alertItem = null }) {
     ro1.observe(candleRef.current)
     ro2.observe(rsiRef.current)
     return () => { ro1.disconnect(); ro2.disconnect() }
-  }, [ohlcv, tf, loading, rsiPeriod, rsiOverbought, rsiOversold, rsiMaType, rsiMaLength, rsiBbMult, alertItem])
+  }, [ohlcv, tf, loading, echartsLib, rsiPeriod, rsiOverbought, rsiOversold, rsiMaType, rsiMaLength, rsiBbMult, alertItem])
 
   useEffect(() => () => {
     candleChart.current?.dispose(); candleChart.current = null

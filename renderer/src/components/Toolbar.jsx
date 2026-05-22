@@ -164,6 +164,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
   const refreshInterval = useSettingsStore(s => s.refreshInterval)
 
   const [now, setNow] = useState(Date.now())
+  const [advancedOpen, setAdvancedOpen] = useState(false)
   const [usMarketOpen, setUsMarketOpen] = useState(() => isUSMarketOpen())
   useEffect(() => {
     const t = setInterval(() => {
@@ -198,17 +199,21 @@ export default function Toolbar({ activeTab, setActiveTab }) {
     }
   }, [assets, filter, liquidityLimit])
 
-  const TABS = [
+    const TABS = [
     { key: 'market',   label: '市场' },
     { key: 'manage',   label: '管理品种' },
     { key: 'alerts',   label: '提醒' },
+    { key: 'opportunities', label: '中线机会' },
     { key: 'ai',       label: 'AI' },
+    { key: 'settings', label: '设置' },
+  ]
+  const ADVANCED_TABS = [
     { key: 'ai-review', label: 'AI复盘' },
     { key: 'trail',    label: '信号轨迹' },
     { key: 'watch-pool', label: '观察池' },
     { key: 'launch-review', label: '启动复盘' },
-    { key: 'settings', label: '设置' },
   ]
+  const activeAdvanced = ADVANCED_TABS.find(t => t.key === activeTab)
 
   return (
     <div className="toolbar">
@@ -224,15 +229,15 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             boxShadow: '0 0 8px rgba(31,111,235,0.4)',
           }}>R</div>
           <h1 className="toolbar-title">市场 RSI 热力图</h1>
-          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.0.9</span>
+          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.1.0</span>
         </div>
 
         {/* Underline tab navigation */}
-        <nav style={{ display: 'flex', gap: 0, alignSelf: 'stretch' }}>
+        <nav style={{ display: 'flex', gap: 0, alignSelf: 'stretch', position: 'relative' }}>
           {TABS.map(({ key, label }) => (
             <button
               key={key}
-              onClick={() => setActiveTab(key)}
+              onClick={() => { setAdvancedOpen(false); setActiveTab(key) }}
               style={{
                 padding: '0 16px',
                 background: 'none',
@@ -254,6 +259,39 @@ export default function Toolbar({ activeTab, setActiveTab }) {
               {label}
             </button>
           ))}
+          <div className="toolbar-more">
+            <button
+              onClick={() => setAdvancedOpen(v => !v)}
+              style={{
+                padding: '0 16px',
+                background: 'none',
+                border: 'none',
+                borderBottom: activeAdvanced ? '2px solid var(--blue)' : '2px solid transparent',
+                color: activeAdvanced ? '#58a6ff' : 'var(--muted)',
+                cursor: 'pointer',
+                fontSize: 13,
+                fontWeight: activeAdvanced ? 600 : 400,
+                transition: 'color 0.12s, border-color 0.12s',
+                letterSpacing: '0.01em',
+                marginBottom: -1,
+              }}
+            >
+              工具箱
+            </button>
+            {advancedOpen && (
+              <div className="toolbar-more-menu">
+                {ADVANCED_TABS.map(({ key, label }) => (
+                  <button
+                    key={key}
+                    className={activeTab === key ? 'active' : ''}
+                    onClick={() => { setActiveTab(key); setAdvancedOpen(false) }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
         </nav>
       </div>
 

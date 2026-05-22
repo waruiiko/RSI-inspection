@@ -1,5 +1,4 @@
 import { useRef, useEffect, useMemo, useState } from 'react'
-import * as echarts from 'echarts'
 import useMarketStore   from '../store/marketStore'
 import useSettingsStore from '../store/settingsStore'
 import useGroupsStore   from '../store/groupsStore'
@@ -28,6 +27,15 @@ function buildRandomPositions(symbols) {
   return Object.fromEntries(raw.map(({ s, x }) => [s, Math.min(x, 100)]))
 }
 
+function runWhenIdle(fn, timeout = 700) {
+  if ('requestIdleCallback' in window) {
+    const id = window.requestIdleCallback(fn, { timeout })
+    return () => window.cancelIdleCallback(id)
+  }
+  const id = setTimeout(fn, 120)
+  return () => clearTimeout(id)
+}
+
 export default function Heatmap() {
   const containerRef      = useRef(null)
   const chartRef          = useRef(null)
@@ -36,6 +44,7 @@ export default function Heatmap() {
   const downplayTimer     = useRef(null)
   const currentHoveredRef = useRef(null)
   const renderTimer       = useRef(null)
+  const [chartReady, setChartReady] = useState(false)
 
   const assets        = useMarketStore(s => s.assets)
   const filter        = useMarketStore(s => s.filter)
@@ -97,32 +106,43 @@ export default function Heatmap() {
   // Init chart once
   useEffect(() => {
     if (!containerRef.current) return
-    const chart = echarts.init(containerRef.current, 'dark')
-    chartRef.current = chart
+    let disposed = false
+    let ro = null
+    const cancelIdle = runWhenIdle(() => {
+      import('echarts').then(echarts => {
+        if (disposed || !containerRef.current) return
+        const chart = echarts.init(containerRef.current, 'dark')
+        chartRef.current = chart
 
-    chart.on('click', (params) => {
-      if (params.componentType === 'series' && params.name) {
-        setFlashRef.current(params.name)
-      }
-    })
+        chart.on('click', (params) => {
+          if (params.componentType === 'series' && params.name) {
+            setFlashRef.current(params.name)
+          }
+        })
 
-    const ro = new ResizeObserver(() => {
-      if (!chartRef.current?.isDisposed()) chartRef.current?.resize()
+        ro = new ResizeObserver(() => {
+          if (!chartRef.current?.isDisposed()) chartRef.current?.resize()
+        })
+        ro.observe(containerRef.current)
+        setChartReady(true)
+      })
     })
-    ro.observe(containerRef.current)
     return () => {
-      ro.disconnect()
+      disposed = true
+      cancelIdle()
+      ro?.disconnect()
       if (downplayTimer.current) { clearTimeout(downplayTimer.current);  downplayTimer.current = null }
       if (flashTimer.current)    { clearInterval(flashTimer.current);     flashTimer.current    = null }
-      chart.dispose()
+      chartRef.current?.dispose()
       chartRef.current = null
+      setChartReady(false)
     }
   }, [])
 
   // Update chart data
   useEffect(() => {
     const chart = chartRef.current
-    if (!chart || !chartVisible.length) return
+    if (!chartReady || !chart || !chartVisible.length) return
 
     const isRandom = layout === 'random'
 
@@ -274,7 +294,7 @@ export default function Heatmap() {
         z: 9,
       }],
     }, true)
-  }, [chartVisible, timeframe, layout, avgRsi, randomPos, rsiOverbought, rsiOversold])
+  }, [chartReady, chartVisible, timeframe, layout, avgRsi, randomPos, rsiOverbought, rsiOversold])
 
   // Hover highlight with 1s delayed downplay of previous
   useEffect(() => {
@@ -328,7 +348,5 @@ export default function Heatmap() {
     }, 400)
   }, [flashSymbol])
 
-  return (
-    <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
-  )
+  return <div ref={containerRef} className="heatmap-canvas" />
 }
