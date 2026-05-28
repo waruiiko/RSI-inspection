@@ -204,6 +204,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
     { key: 'manage',   label: '管理品种' },
     { key: 'alerts',   label: '提醒' },
     { key: 'opportunities', label: '中线机会' },
+    { key: 'signal-hunter', label: 'Signal Hunter' },
     { key: 'ai',       label: 'AI' },
     { key: 'settings', label: '设置' },
   ]
@@ -229,7 +230,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             boxShadow: '0 0 8px rgba(31,111,235,0.4)',
           }}>R</div>
           <h1 className="toolbar-title">市场 RSI 热力图</h1>
-          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.1.0</span>
+          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.1.1</span>
         </div>
 
         {/* Underline tab navigation */}

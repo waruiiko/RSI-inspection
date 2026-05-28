@@ -62,6 +62,12 @@ function fmtDetail(item) {
     const move = item.priceMovePct != null ? `，K线 ${fmtPct(item.priceMovePct)}` : ''
     return ` (${item.timeframe}) ${item.signal ?? '量价结构'}，评分 ${item.value}${ratio}${move}`
   }
+  if (item.type === 'signal_hunter') {
+    const label = item.condition === 'triggered' ? '触发' : '预埋'
+    const side = item.side === 'short' ? '做空' : '做多'
+    const risk = item.risk ? `，风险：${item.risk}` : ''
+    return ` Signal Hunter ${side}${label}(${item.timeframe})，现价 ${fmtPrice(item.value)}，触发价 ${fmtPrice(item.threshold)}，${item.reason ?? '等待确认'}${risk}`
+  }
   if (item.type === 'ai') {
     const label = item.condition === 'focus' ? '重点' : item.condition === 'risk' ? '风险' : '观察'
     const confidence = item.value != null ? `，置信度 ${item.value}` : ''
@@ -89,6 +95,7 @@ function itemColor(item) {
   if (item.type === 'divergence') return item.condition === 'bull' ? 'feed-green' : 'feed-orange'
   if (item.type === 'ai') return item.condition === 'risk' ? 'feed-red' : item.condition === 'focus' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'watch_pool') return 'feed-sky'
+  if (item.type === 'signal_hunter') return item.side === 'short' ? 'feed-red' : item.condition === 'triggered' ? 'feed-green' : 'feed-orange'
   if (item.type === 'structure') {
     return item.condition === 'bullish'
       ? 'feed-green'
@@ -102,6 +109,7 @@ function itemColor(item) {
 function feedBucket(item) {
   if (item.type === 'ai') return 'ai'
   if (item.type === 'watch_pool') return 'cooldown'
+  if (item.type === 'signal_hunter') return 'opportunity'
   if (item.type === 'market_report') return 'opportunity'
   if (item.condition === 'risk') return 'risk'
   if (item.type === 'rsi') return item.condition === 'below' ? 'opportunity' : 'risk'
@@ -149,6 +157,7 @@ function exportFeedCsv(items, assets) {
 function signalBias(item) {
   if (String(item.signal || '').startsWith('慢速超卖观察')) return '偏中长线反弹观察'
   if (item.type === 'watch_pool') return '冷却后复看观察'
+  if (item.type === 'signal_hunter') return `${item.side === 'short' ? '做空' : '做多'} Signal Hunter ${item.condition === 'triggered' ? '触发' : '预埋'}`
   if (item.type === 'rsi') return item.condition === 'below' ? '偏反弹观察' : '偏过热观察'
   if (item.type === 'price') return item.condition === 'above' ? '偏突破跟踪' : '偏破位风险'
   if (item.type === 'divergence') return item.condition === 'bull' ? '偏底背离观察' : '偏顶背离风险'

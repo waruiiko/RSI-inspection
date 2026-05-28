@@ -36,6 +36,7 @@ function mergeAssetData(prev, next) {
     volumeSignal: { ...(prev.volumeSignal ?? {}), ...(next.volumeSignal ?? {}) },
     signalScore: { ...(prev.signalScore ?? {}), ...(next.signalScore ?? {}) },
     derivatives: next.derivatives ?? prev.derivatives,
+    signalHunter: next.signalHunter ?? prev.signalHunter,
     sparkline: next.sparkline?.length ? next.sparkline : prev.sparkline,
   }
 }
@@ -124,6 +125,17 @@ const useMarketStore = create((set, get) => ({
   setHovered:   (symbol)    => set({ hoveredSymbol: symbol }),
   setFlash:     (symbol)    => set({ flashSymbol: symbol ? { symbol, ts: Date.now() } : null }),
   clearStatus:  ()          => set({ statusEvents: [] }),
+  applySignalHunterAiResults: (items = []) => {
+    if (!Array.isArray(items) || !items.length) return
+    const byKey = new Map(items.map(item => [item.key ?? assetKey(item), item.signalHunter]))
+    const bySymbol = new Map(items.map(item => [String(item.symbol ?? '').toUpperCase(), item.signalHunter]))
+    set(state => ({
+      assets: state.assets.map(asset => {
+        const signalHunter = byKey.get(assetKey(asset)) ?? bySymbol.get(String(asset.symbol ?? '').toUpperCase())
+        return signalHunter ? { ...asset, signalHunter } : asset
+      }),
+    }))
+  },
   togglePin: (symbol) => {
     const next = new Set(get().pinnedSymbols)
     if (next.has(symbol)) next.delete(symbol); else next.add(symbol)

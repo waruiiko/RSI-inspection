@@ -2675,7 +2675,7 @@ body {
 .chat-fab {
   position: fixed;
   right: 18px;
-  bottom: 18px;
+  top: 44px;
   z-index: 50;
   width: 44px;
   height: 44px;
@@ -2725,4 +2725,339 @@ body {
 .toolbar-more-menu button.active {
   color: var(--text);
   background: var(--bg3);
+}
+
+.signal-hunter-page {
+  height: 100%;
+  min-height: 0;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.signal-hunter-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.signal-hunter-head h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.signal-hunter-head p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.signal-hunter-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(64px, 1fr));
+  gap: 8px;
+  min-width: 300px;
+}
+
+.signal-hunter-summary > div {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+
+.signal-hunter-summary b {
+  display: block;
+  font-size: 18px;
+}
+
+.signal-hunter-summary span {
+  color: var(--dim);
+  font-size: 11px;
+}
+
+.signal-hunter-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.signal-hunter-search {
+  max-width: 220px;
+}
+
+.signal-hunter-debug {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.signal-hunter-debug input {
+  accent-color: var(--blue);
+}
+
+.signal-hunter-ai-btn {
+  min-width: 92px;
+}
+
+.signal-hunter-ai-status {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.signal-hunter-ai-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin: -4px 0 10px;
+  color: var(--dim);
+  font-size: var(--text-sm);
+}
+
+.signal-hunter-ai-meta span {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg2);
+}
+
+.signal-hunter-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg1);
+}
+
+.signal-hunter-table th,
+.signal-hunter-table td {
+  white-space: nowrap;
+}
+
+.signal-hunter-table td:first-child small,
+.signal-hunter-table small,
+.signal-hunter-table .muted {
+  display: block;
+  color: var(--dim);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.signal-hunter-table .badge {
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.signal-hunter-new-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.14);
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+
+.signal-hunter-stale-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 6px;
+  min-width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.14);
+  font-size: 11px;
+  font-weight: 800;
+  vertical-align: middle;
+}
+
+.signal-hunter-index {
+  width: 42px;
+  min-width: 42px;
+  color: var(--dim);
+  text-align: center;
+}
+
+.signal-hunter-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.signal-hunter-side {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.signal-hunter-long {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.signal-hunter-short {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.signal-hunter-armed {
+  color: #ffd166;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.signal-hunter-triggered {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.signal-hunter-watch {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.13);
+}
+
+.signal-hunter-risk {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.14);
+}
+
+.signal-hunter-rejected {
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.signal-hunter-score {
+  width: 60px;
+  padding: 4px 0;
+  margin-bottom: 4px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  text-align: center;
+  font-weight: 800;
+}
+
+.signal-hunter-score.strong {
+  color: #ffd166;
+  background: rgba(245, 158, 11, 0.13);
+}
+
+.signal-hunter-score.hot {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.signal-hunter-factors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 120px;
+}
+
+.signal-hunter-factors span {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.signal-hunter-reasons,
+.signal-hunter-risks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 300px;
+  white-space: normal;
+}
+
+.signal-hunter-reasons span,
+.signal-hunter-risks span {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.signal-hunter-risks span {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.signal-hunter-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.signal-hunter-detail-row td {
+  background: rgba(13, 20, 33, 0.9);
+}
+
+.signal-hunter-detail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  white-space: normal;
+}
+
+.signal-hunter-detail div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.signal-hunter-detail b {
+  color: var(--text);
+}
+
+.signal-hunter-detail span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+@media (max-width: 980px) {
+  .signal-hunter-head,
+  .signal-hunter-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .signal-hunter-summary {
+    min-width: 0;
+  }
+
+  .signal-hunter-detail {
+    grid-template-columns: 1fr;
+  }
 }

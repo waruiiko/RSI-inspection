@@ -69,7 +69,7 @@ export default function SettingsPage() {
     observationEnabled, rsiSensitivity, startupStateAlerts,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook, codexCliPath,
-    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, watchPoolRetentionDays,
+    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, shAiInterval, watchPoolRetentionDays,
     update,
   } = useSettingsStore()
   const statusEvents = useMarketStore(s => s.statusEvents)
@@ -153,7 +153,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.1.0
+          v1.1.1
         </span>
       </div>
 
@@ -518,6 +518,15 @@ export default function SettingsPage() {
               options={[15, 30, 60, 120]}
               value={autoAiInterval}
               onChange={v => update('autoAiInterval', v)}
+              format={v => `${v} 分钟`}
+            />
+          </Row>
+
+          <Row label="SH AI 识别频率" hint="Signal Hunter 自动识别的最短间隔；手动识别不受限制">
+            <BtnGroup
+              options={[15, 30, 60, 120]}
+              value={shAiInterval}
+              onChange={v => update('shAiInterval', v)}
               format={v => `${v} 分钟`}
             />
           </Row>

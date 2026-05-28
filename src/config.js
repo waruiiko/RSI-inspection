@@ -46,6 +46,7 @@ const SETTINGS_DEFAULTS = {
   autoAiInterval:   30,
   autoAiLimit:      20,
   autoAiStartupDelay: 10,
+  shAiInterval:     30,
   watchPoolRetentionDays: 15,
   aiLastRunAt:      null,
   aiLastRunMode:    '',

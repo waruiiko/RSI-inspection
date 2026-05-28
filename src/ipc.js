@@ -486,7 +486,19 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
     ? await fetchDerivativesSnapshot(asset, closedCandlesByTf, rsi, volumeSignal, signalScore)
     : null
 
-  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives }
+  const signalHunter = buildSignalHunterSignal({
+    asset,
+    price,
+    change24h,
+    quoteVolume24h,
+    candlesByTf: closedCandlesByTf,
+    rsi,
+    volumeSignal,
+    signalScore,
+    derivatives,
+  })
+
+  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives, signalHunter }
 }
 
 async function fetchDerivativesSnapshot(asset, candlesByTf, rsi, volumeSignal, signalScore) {
@@ -593,6 +605,454 @@ function buildDerivativesSignal({ candlesByTf, rsi, volumeSignal, signalScore, o
   }
 }
 
+function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, candlesByTf, rsi, volumeSignal, signalScore, derivatives }) {
+  if (asset.source !== 'binance-futures' || price == null) return null
+  const candidates = ['15m', '1h', '4h']
+    .flatMap(tf => ['long', 'short'].map(side => evaluateSignalHunterTimeframe({
+      side,
+      tf,
+      price,
+      change24h,
+      quoteVolume24h,
+      candles: candlesByTf[tf],
+      rsiValue: rsi?.[tf],
+      volumeSignal: volumeSignal?.[tf],
+      signalScore: signalScore?.[tf],
+      derivatives,
+    })))
+    .filter(Boolean)
+
+  if (!candidates.length) return null
+  const accepted = candidates
+    .filter(c => !c.rejected)
+    .sort((a, b) => b.score.total - a.score.total)
+  if (accepted.length) return accepted[0]
+  return candidates.sort((a, b) => b.score.total - a.score.total)[0]
+}
+
+function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, quoteVolume24h, candles, rsiValue, volumeSignal, signalScore, derivatives }) {
+  if (!Array.isArray(candles) || candles.length < 36) return null
+  const isShort = side === 'short'
+  const lookback = candles.slice(-41, -1)
+  const recent = candles.slice(-10)
+  if (!candles.at(-1) || !candles.at(-2) || lookback.length < 20) return null
+
+  const resistanceZone = findSignalHunterResistance(lookback, price, tf)
+  const supportZone = findSignalHunterSupportZone(lookback, price, tf)
+  const support = findSignalHunterSupport(lookback)
+  if (!Number.isFinite(support) || support <= 0) return null
+  const highFallback = finiteMax(lookback.map(c => c.high))
+  const lowFallback = finiteMin(lookback.map(c => c.low))
+  const bufferPct = tf === '15m' ? 0.001 : tf === '1h' ? 0.0015 : 0.002
+  const resistance = resistanceZone ?? (Number.isFinite(highFallback) ? {
+    level: highFallback,
+    triggerPrice: highFallback * (1 + bufferPct),
+    touches: 0,
+    bufferPct: bufferPct * 100,
+    fallback: true,
+  } : null)
+  const supportArea = supportZone ?? (Number.isFinite(lowFallback) ? {
+    level: Math.max(lowFallback, support),
+    triggerPrice: Math.max(lowFallback, support) * (1 - bufferPct),
+    touches: 0,
+    bufferPct: bufferPct * 100,
+    fallback: true,
+  } : null)
+  if (!resistance || !supportArea) return null
+
+  const reject = (rejectReason, extra = {}) => ({
+    rejected: true,
+    status: 'rejected',
+    side,
+    timeframe: tf,
+    currentPrice: price,
+    score: { total: 0, chart: 0, data: 0, risk: 0, rr: 0, rewardRisk: 0 },
+    reasons: [],
+    riskFlags: [],
+    rejectReasons: [rejectReason],
+    ...extra,
+  })
+
+  const recentHigh = Math.max(...recent.map(c => c.high))
+  const recentLow = Math.min(...recent.map(c => c.low))
+  const recentRangePct = pctChange(recentLow, recentHigh)
+  const wider = candles.slice(-31, -10)
+  const widerHigh = Math.max(...wider.map(c => c.high))
+  const widerLow = Math.min(...wider.map(c => c.low))
+  const widerRangePct = pctChange(widerLow, widerHigh)
+  const avgVol20 = avg(lookback.slice(-20).map(candleVolume))
+  const avgVol5 = avg(recent.slice(-5).map(candleVolume))
+  const closes = candles.map(c => c.close).filter(Number.isFinite)
+  const ma21 = avg(candles.slice(-21).map(c => c.close))
+  const ema21 = ema(closes.slice(-80), 21)
+  const ema55 = ema(closes.slice(-120), 55)
+  const runup10 = candles.length >= 11 ? pctChange(candles.at(-11).close, price) : 0
+  const runup20 = candles.length >= 21 ? pctChange(candles.at(-21).close, price) : 0
+  const extensionPct = ma21 ? pctChange(ma21, price) : 0
+  const ema21DistancePct = ema21 ? pctChange(ema21, price) : 0
+  const volumeRatio = avgVol20 ? avgVol5 / avgVol20 : null
+  const compression = Number.isFinite(widerRangePct) && recentRangePct > 0 && (
+    recentRangePct <= widerRangePct * 0.72 ||
+    (tf === '15m' ? recentRangePct <= 2.2 : tf === '1h' ? recentRangePct <= 3.5 : recentRangePct <= 5.5)
+  )
+  const volumeDry = volumeRatio != null && volumeRatio <= 0.88
+  const confirmPrice = isShort ? supportArea.triggerPrice : resistance.triggerPrice
+  const distanceToConfirmPct = isShort ? pctChange(confirmPrice, price) : pctChange(price, confirmPrice)
+  const nearConfirm = distanceToConfirmPct >= -0.35 && distanceToConfirmPct <= (tf === '15m' ? 1.4 : tf === '1h' ? 2.2 : 3.2)
+  const breakoutAttempt = isShort
+    ? volumeSignal?.type === 'breakdown_attempt' || volumeSignal?.type === 'breakdown_confirmed'
+    : volumeSignal?.type === 'breakout_attempt' || volumeSignal?.type === 'breakout_confirmed'
+  const cleanFunding = derivatives?.fundingRate == null || Math.abs(derivatives.fundingRate) <= 0.03
+  const oiRising = (derivatives?.oiChange4h ?? derivatives?.oiChange1h ?? 0) >= 3
+  const maxRunup10 = tf === '15m' ? 3.5 : tf === '1h' ? 5.5 : 8
+  const maxRunup20 = tf === '15m' ? 6 : tf === '1h' ? 9 : 14
+  const maxExtension = tf === '15m' ? 2.8 : tf === '1h' ? 4.2 : 6.5
+  const overExtendedShape = isShort
+    ? runup10 < -maxRunup10 || runup20 < -maxRunup20 || extensionPct < -maxExtension
+    : runup10 > maxRunup10 || runup20 > maxRunup20 || extensionPct > maxExtension
+
+  if ((quoteVolume24h ?? 0) < 5_000_000) return reject('成交额不足')
+  if (overExtendedShape) return reject(isShort ? '已经下跌过远，等反抽' : '已经拉升过远，等回踩')
+
+  const baseBandPct = tf === '15m' ? 0.008 : tf === '1h' ? 0.012 : 0.018
+  const supportBaseCloses = recent.filter(c => Math.abs(pctChange(supportArea.level, c.close)) <= baseBandPct * 100).length
+  const resistanceBaseCloses = recent.filter(c => Math.abs(pctChange(resistance.level, c.close)) <= baseBandPct * 100).length
+  const emaPullbackLimit = tf === '15m' ? 1.2 : tf === '1h' ? 2.0 : 3.2
+  const retestLimit = tf === '15m' ? 1.2 : tf === '1h' ? 1.8 : 2.8
+  const entryBufferPct = tf === '15m' ? 0.001 : tf === '1h' ? 0.0015 : 0.002
+
+  const longEmaPullback = Number.isFinite(ema21) &&
+    price >= ema21 * 0.99 &&
+    price <= ema21 * (1 + emaPullbackLimit / 100) &&
+    (!Number.isFinite(ema55) || ema21 >= ema55 * 0.985)
+  const shortEmaRebound = Number.isFinite(ema21) &&
+    price <= ema21 * 1.01 &&
+    price >= ema21 * (1 - emaPullbackLimit / 100) &&
+    (!Number.isFinite(ema55) || ema21 <= ema55 * 1.015)
+  const longSupportRetest = price >= supportArea.level && pctChange(supportArea.level, price) <= retestLimit && (supportArea.touches >= 2 || compression)
+  const shortResistanceRetest = price <= resistance.level && pctChange(price, resistance.level) <= retestLimit && (resistance.touches >= 2 || compression)
+  const longBase = compression && supportBaseCloses >= 4
+  const shortBase = compression && resistanceBaseCloses >= 4
+
+  let setup = null
+  let setupLabel = ''
+  let entryBase = null
+  if (!isShort) {
+    if (longEmaPullback) { setup = 'pullback_long'; setupLabel = 'EMA 回踩多'; entryBase = ema21 }
+    else if (longSupportRetest) { setup = 'retest_long'; setupLabel = '支撑回踩多'; entryBase = supportArea.level }
+    else if (longBase) { setup = 'base_long'; setupLabel = '压缩基地多'; entryBase = supportArea.level }
+    else if (nearConfirm) { setup = 'confirm_long'; setupLabel = '突破确认观察'; entryBase = null }
+  } else {
+    if (shortEmaRebound) { setup = 'rebound_short'; setupLabel = 'EMA 反抽空'; entryBase = ema21 }
+    else if (shortResistanceRetest) { setup = 'retest_short'; setupLabel = '阻力反抽空'; entryBase = resistance.level }
+    else if (shortBase) { setup = 'base_short'; setupLabel = '压缩基地空'; entryBase = resistance.level }
+    else if (nearConfirm) { setup = 'confirm_short'; setupLabel = '跌破确认观察'; entryBase = null }
+  }
+
+  if (!setup) return reject('没有回踩/反抽/压缩基地形态')
+  const confirmOnly = setup === 'confirm_long' || setup === 'confirm_short'
+  if (confirmOnly) {
+    return reject('只有突破确认，没有回踩预埋', {
+      setup,
+      setupLabel,
+      confirmPrice,
+      distanceToConfirmPct,
+      reasons: [setupLabel],
+      score: { total: 0, chart: 0, data: 0, risk: 0, rr: 0, rewardRisk: 0 },
+    })
+  }
+
+  const rawEntryPrice = isShort
+    ? entryBase * (1 + entryBufferPct)
+    : entryBase * (1 - entryBufferPct)
+  const entryIsOnTradableSide = isShort
+    ? rawEntryPrice >= price * 0.999
+    : rawEntryPrice <= price * 1.001
+  if (!entryIsOnTradableSide) {
+    return reject(isShort ? '做空入场低于现价，位置无效' : '做多入场高于现价，位置无效', {
+      setup,
+      setupLabel,
+      entryPrice: rawEntryPrice,
+      confirmPrice,
+      distanceToConfirmPct,
+    })
+  }
+
+  const entryPrice = rawEntryPrice
+  const distanceToEntryPct = pctChange(price, entryPrice)
+  const nearEntry = Math.abs(distanceToEntryPct) <= (tf === '15m' ? 1.6 : tf === '1h' ? 2.6 : 4.0)
+  const triggerPrice = entryPrice
+  const triggered = isShort ? price <= entryPrice * 1.001 : price >= entryPrice * 0.999
+  const verticalNoChase = isShort
+    ? runup10 < -maxRunup10 * 0.7 || runup20 < -maxRunup20 * 0.7 || ema21DistancePct < -maxExtension * 0.55
+    : runup10 > maxRunup10 * 0.7 || runup20 > maxRunup20 * 0.7 || ema21DistancePct > maxExtension * 0.55
+  if (verticalNoChase) return reject(isShort ? '跌得太直，等反抽' : '涨得太直，等回踩')
+
+  let chart = 0
+  let data = 0
+  let risk = 0
+  const reasons = []
+  const riskFlags = []
+
+  if (nearEntry) { chart += 1; reasons.push(`距离入场价 ${distanceToEntryPct.toFixed(2)}%`) }
+  if (nearConfirm) { chart += 1; reasons.push(`距离确认价 ${distanceToConfirmPct.toFixed(2)}%`) }
+  if (compression) { chart += 1; reasons.push('短线波动压缩') }
+  if (setup === 'base_long' || setup === 'base_short') { chart += 2; reasons.push('压缩基地') }
+  if (setup === 'pullback_long' || setup === 'rebound_short') { chart += 2; reasons.push(isShort ? 'EMA21 反抽位' : 'EMA21 回踩位') }
+  if (setup === 'retest_long' || setup === 'retest_short') { chart += 2; reasons.push(isShort ? '阻力反抽' : '支撑回踩') }
+  if (volumeDry) { chart += 1; reasons.push(`缩量蓄势 ${volumeRatio.toFixed(2)}x`) }
+  if (breakoutAttempt) {
+    const confirmedType = isShort ? 'breakdown_confirmed' : 'breakout_confirmed'
+    chart += volumeSignal.type === confirmedType ? 3 : 1
+    reasons.push(volumeSignal.label ?? (isShort ? '跌破尝试' : '突破尝试'))
+  }
+  if (!isShort && rsiValue >= 45 && rsiValue <= 68) { chart += 1; reasons.push(`${tf} RSI ${rsiValue.toFixed(1)}`) }
+  if (isShort && rsiValue >= 32 && rsiValue <= 55) { chart += 1; reasons.push(`${tf} RSI ${rsiValue.toFixed(1)}`) }
+  if (!isShort && (signalScore ?? 0) >= 2) chart += 1
+  if (isShort && (signalScore ?? 0) <= -2) chart += 1
+
+  if (!isShort && derivatives?.stage === 'early_build') { data += 3; reasons.push('OI 早期蓄势') }
+  else if (!isShort && derivatives?.stage === 'long_build') { data += 2; reasons.push('多头增仓') }
+  else if (isShort && derivatives?.stage === 'short_build') { data += 3; reasons.push('空头增仓') }
+  else if (derivatives?.stage === 'oi_build') { data += 2; reasons.push('OI 增长') }
+  if (oiRising) data += 1
+  if (cleanFunding) data += 1
+  if ((quoteVolume24h ?? 0) >= 5_000_000) data += 1
+
+  if (!isShort && (change24h ?? 0) >= 12) { risk += 2; riskFlags.push(`24H 已涨 ${change24h.toFixed(1)}%`) }
+  if (isShort && (change24h ?? 0) <= -12) { risk += 2; riskFlags.push(`24H 已跌 ${change24h.toFixed(1)}%`) }
+  if (!isShort && rsiValue >= 75) { risk += 2; riskFlags.push(`${tf} RSI 过热`) }
+  if (isShort && rsiValue <= 25) { risk += 2; riskFlags.push(`${tf} RSI 过冷`) }
+  if (Math.abs(derivatives?.fundingRate ?? 0) >= 0.06) { risk += 2; riskFlags.push(`费率拥挤 ${derivatives.fundingRate.toFixed(4)}%`) }
+  if ((derivatives?.oiChange4h ?? 0) <= -5) { risk += 2; riskFlags.push(`OI 下降 ${derivatives.oiChange4h.toFixed(1)}%`) }
+  if (triggered && !breakoutAttempt) { risk += 1; riskFlags.push(isShort ? '跌破量能不足' : '突破量能不足') }
+
+  chart = Math.min(8, chart)
+  data = Math.min(6, data)
+  const earlyRiskScore = Math.min(6, risk)
+  const earlyTotal = Number(Math.max(0, Math.min(10,
+    (chart / 8) * 4 +
+    (data / 6) * 2 +
+    1 +
+    (1 - earlyRiskScore / 6) * 2
+  )).toFixed(1))
+  if (chart < 4) return reject('图表分不足', { setup, setupLabel, score: { total: earlyTotal, chart, data, risk: earlyRiskScore, rr: 0, rewardRisk: 0 }, reasons })
+  if (earlyTotal < 5) return reject('基础评分不足', { setup, setupLabel, score: { total: earlyTotal, chart, data, risk: earlyRiskScore, rr: 0, rewardRisk: 0 }, reasons })
+
+  const stopLoss = isShort
+    ? Math.max(resistance.level * (1 + entryBufferPct * 1.8), entryPrice * (tf === '15m' ? 1.012 : tf === '1h' ? 1.02 : 1.035))
+    : Math.min(supportArea.level * (1 - entryBufferPct * 1.8), entryPrice * (tf === '15m' ? 0.988 : tf === '1h' ? 0.98 : 0.965))
+  const riskPerUnit = Math.abs(triggerPrice - stopLoss)
+  if (!Number.isFinite(riskPerUnit) || riskPerUnit <= 0) return reject('止损无效', { setup, setupLabel, entryPrice, stopLoss })
+  const mainTarget = isShort
+    ? firstFinite(supportArea.level, lowFallback)
+    : firstFinite(resistance.level, highFallback)
+  const rewardToStructure = Math.abs(mainTarget - triggerPrice)
+  const rewardRisk = rewardToStructure / riskPerUnit
+  if (!Number.isFinite(rewardRisk) || rewardRisk < 1.5) {
+    return reject(`结构目标不足 1.5R (${Number.isFinite(rewardRisk) ? rewardRisk.toFixed(1) : '-'}R)`, {
+      setup,
+      setupLabel,
+      entryPrice,
+      confirmPrice,
+      stopLoss,
+      score: { total: earlyTotal, chart, data, risk: earlyRiskScore, rr: 0, rewardRisk: Number((rewardRisk || 0).toFixed(2)) },
+      reasons,
+    })
+  }
+  const rewardMove = Math.abs(mainTarget - triggerPrice)
+  const tp1Move = Math.min(Math.max(riskPerUnit, rewardMove * 0.5), rewardMove)
+  const tp1 = isShort ? triggerPrice - tp1Move : triggerPrice + tp1Move
+  const tp2 = mainTarget
+  const tp3Move = Math.max(rewardMove * 1.35, riskPerUnit * 2.2)
+  const tp3 = isShort ? triggerPrice - tp3Move : triggerPrice + tp3Move
+  const rrScore = rewardRisk >= 2.4 ? 3 : rewardRisk >= 1.8 ? 2 : 1
+  const riskScore = Math.min(6, risk)
+  const total = Number(Math.max(0, Math.min(10,
+    (chart / 8) * 4 +
+    (data / 6) * 2 +
+    (rrScore / 3) * 2 +
+    (1 - riskScore / 6) * 2
+  )).toFixed(1))
+  if (total < 6) return reject('最终评分不足', { setup, setupLabel, score: { total, chart, data, risk: riskScore, rr: rrScore, rewardRisk: Number(rewardRisk.toFixed(2)) }, reasons })
+
+  const status = risk >= 4 ? 'risk'
+    : triggered ? 'triggered'
+      : nearEntry ? 'armed'
+        : 'wait_entry'
+
+  return {
+    status,
+    side,
+    timeframe: tf,
+    currentPrice: price,
+    triggerPrice,
+    entryPrice,
+    confirmPrice,
+    distanceToTriggerPct: distanceToEntryPct,
+    distanceToEntryPct,
+    distanceToConfirmPct,
+    stopLoss,
+    stopLossPct: pctChange(triggerPrice, stopLoss),
+    tp1,
+    tp2,
+    tp3,
+    targetBasis: 'structure_target',
+    setup,
+    setupLabel,
+    score: {
+      total,
+      chart,
+      data,
+      risk: riskScore,
+      rr: rrScore,
+      rewardRisk: Number(rewardRisk.toFixed(2)),
+      weights: { chart: 4, data: 2, rewardRisk: 2, riskControl: 2 },
+    },
+    reasons: reasons.slice(0, 5),
+    riskFlags: riskFlags.slice(0, 4),
+    resistance: resistance.level,
+    resistanceTouches: resistance.touches,
+    support: supportArea.level ?? support,
+    supportTouches: supportArea.touches,
+    triggerBufferPct: isShort ? supportArea.bufferPct : resistance.bufferPct,
+    recentRangePct,
+    volumeRatio,
+    runup10,
+    runup20,
+    extensionPct,
+    ema21,
+    ema55,
+    ema21DistancePct,
+    rewardRisk: Number(rewardRisk.toFixed(2)),
+    rejectReasons: [],
+  }
+}
+
+function findSignalHunterResistance(candles, price, tf) {
+  if (!Array.isArray(candles) || candles.length < 20 || !price) return null
+  const highs = candles.map(c => c.high).filter(Number.isFinite)
+  if (!highs.length) return null
+
+  const sortedHighs = [...highs].sort((a, b) => a - b)
+  const pct = percentile(sortedHighs, 0.92)
+  const maxHigh = sortedHighs.at(-1)
+  const spikeTooFar = maxHigh > pct * 1.018
+  const ceiling = spikeTooFar ? pct : maxHigh
+  const bandPct = tf === '15m' ? 0.004 : tf === '1h' ? 0.006 : 0.009
+  const cluster = candles.filter(c =>
+    Number.isFinite(c.high) &&
+    c.high >= ceiling * (1 - bandPct) &&
+    c.high <= ceiling * (1 + bandPct)
+  )
+  const closeCluster = candles.filter(c =>
+    Number.isFinite(c.close) &&
+    c.close >= ceiling * (1 - bandPct * 1.4) &&
+    c.close <= ceiling * (1 + bandPct)
+  )
+  const touches = cluster.length
+  const hasCloseAcceptance = closeCluster.length >= 2
+  const levelSource = hasCloseAcceptance
+    ? avg(closeCluster.map(c => Math.max(c.close, c.high * (1 - bandPct * 0.5))))
+    : avg(cluster.map(c => c.high))
+  const level = levelSource ?? ceiling
+  if (!Number.isFinite(level) || level <= 0) return null
+
+  const bufferPct = tf === '15m' ? 0.001 : tf === '1h' ? 0.0015 : 0.002
+  const triggerPrice = level * (1 + bufferPct)
+  const distancePct = pctChange(price, triggerPrice)
+  const maxDistance = tf === '15m' ? 1.8 : tf === '1h' ? 2.8 : 4.0
+
+  if (touches < 2 && !hasCloseAcceptance) return null
+  if (distancePct > maxDistance || distancePct < -4) return null
+
+  return {
+    level,
+    triggerPrice,
+    touches,
+    bufferPct: bufferPct * 100,
+    spikeFiltered: spikeTooFar,
+  }
+}
+
+function findSignalHunterSupport(candles) {
+  if (!Array.isArray(candles) || candles.length < 10) return null
+  const lows = candles.map(c => c.low).filter(Number.isFinite)
+  if (!lows.length) return null
+  const sortedLows = [...lows].sort((a, b) => a - b)
+  const p10 = percentile(sortedLows, 0.1)
+  const recentLow = Math.min(...candles.slice(-12).map(c => c.low).filter(Number.isFinite))
+  if (!Number.isFinite(recentLow)) return p10
+  return Math.max(p10, recentLow)
+}
+
+function findSignalHunterSupportZone(candles, price, tf) {
+  if (!Array.isArray(candles) || candles.length < 20 || !price) return null
+  const lows = candles.map(c => c.low).filter(Number.isFinite)
+  if (!lows.length) return null
+
+  const sortedLows = [...lows].sort((a, b) => a - b)
+  const pct = percentile(sortedLows, 0.08)
+  const minLow = sortedLows[0]
+  const spikeTooFar = minLow < pct * 0.982
+  const floor = spikeTooFar ? pct : minLow
+  const bandPct = tf === '15m' ? 0.004 : tf === '1h' ? 0.006 : 0.009
+  const cluster = candles.filter(c =>
+    Number.isFinite(c.low) &&
+    c.low >= floor * (1 - bandPct) &&
+    c.low <= floor * (1 + bandPct)
+  )
+  const closeCluster = candles.filter(c =>
+    Number.isFinite(c.close) &&
+    c.close >= floor * (1 - bandPct) &&
+    c.close <= floor * (1 + bandPct * 1.4)
+  )
+  const touches = cluster.length
+  const hasCloseAcceptance = closeCluster.length >= 2
+  const levelSource = hasCloseAcceptance
+    ? avg(closeCluster.map(c => Math.min(c.close, c.low * (1 + bandPct * 0.5))))
+    : avg(cluster.map(c => c.low))
+  const level = levelSource ?? floor
+  if (!Number.isFinite(level) || level <= 0) return null
+
+  const bufferPct = tf === '15m' ? 0.001 : tf === '1h' ? 0.0015 : 0.002
+  const triggerPrice = level * (1 - bufferPct)
+  const distancePct = pctChange(triggerPrice, price)
+  const maxDistance = tf === '15m' ? 1.8 : tf === '1h' ? 2.8 : 4.0
+
+  if (touches < 2 && !hasCloseAcceptance) return null
+  if (distancePct > maxDistance || distancePct < -4) return null
+
+  return {
+    level,
+    triggerPrice,
+    touches,
+    bufferPct: bufferPct * 100,
+    spikeFiltered: spikeTooFar,
+  }
+}
+
+function percentile(sortedNums, p) {
+  const vals = sortedNums.filter(Number.isFinite)
+  if (!vals.length) return null
+  const idx = Math.min(vals.length - 1, Math.max(0, Math.floor((vals.length - 1) * p)))
+  return vals[idx]
+}
+
+function firstFinite(...values) {
+  return values.find(Number.isFinite) ?? null
+}
+
+function finiteMax(values) {
+  const vals = values.filter(Number.isFinite)
+  return vals.length ? Math.max(...vals) : null
+}
+
+function finiteMin(values) {
+  const vals = values.filter(Number.isFinite)
+  return vals.length ? Math.min(...vals) : null
+}
+
 async function fetchOHLCVWithRetry(asset, timeframe, attempts = 3) {
   const cacheKey = `${asset.source}:${asset.apiSymbol}:${timeframe}`
   const ttlMs = cacheTtlMs(timeframe)
@@ -694,6 +1154,17 @@ function candleTurnover(candle) {
 function avg(nums) {
   const vals = nums.filter(v => Number.isFinite(v))
   return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null
+}
+
+function ema(nums, period) {
+  const vals = nums.filter(v => Number.isFinite(v))
+  if (vals.length < period) return null
+  const k = 2 / (period + 1)
+  let value = avg(vals.slice(0, period))
+  for (const next of vals.slice(period)) {
+    value = next * k + value * (1 - k)
+  }
+  return value
 }
 
 function pctChange(from, to) {

@@ -202,7 +202,54 @@ async function runReview(payload, settings = {}) {
   }
 }
 
+function buildSignalHunterScreenPrompt(payload) {
+  return [
+    '你是 RSI-inspection 的 Signal Hunter 形态识别助手。',
+    '任务：只根据输入 JSON 中的市场快照，识别是否存在可观察的结构候选，并给出方向、周期、关键位、目标位、评分和风险。',
+    '这不是交易建议，不要鼓励下单，不要使用外部新闻、基本面或链上数据。',
+    '',
+    '请严格输出 JSON，不要 Markdown，不要代码块。',
+    'JSON 格式：',
+    '{',
+    '  "summary": "一句话说明本批候选质量",',
+    '  "items": [',
+    '    {',
+    '      "key": "source:apiSymbol，可直接复制输入里的 key",',
+    '      "symbol": "BTC",',
+    '      "status": "armed | wait_entry | triggered | watch | risk | rejected",',
+    '      "side": "long | short",',
+    '      "timeframe": "15m | 1h | 4h",',
+    '      "setup": "pullback_long | rebound_short | base_long | base_short | retest_long | retest_short | range_break | ai_structure",',
+    '      "setupLabel": "中文形态名，最多 12 字",',
+    '      "entryPrice": 0,',
+    '      "confirmPrice": 0,',
+    '      "stopLoss": 0,',
+    '      "targets": [0, 0, 0],',
+    '      "rewardRisk": 1.5,',
+    '      "score": { "total": 0, "chart": 0, "data": 0, "risk": 0 },',
+    '      "reasons": ["最多 5 条中文依据"],',
+    '      "riskFlags": ["最多 4 条中文风险"],',
+    '      "rejectReasons": []',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    '硬性规则：',
+    '- 每个输入候选都必须返回一个 item；看不懂结构就 status=rejected，并写 rejectReasons。',
+    '- 非 rejected 的 rewardRisk 必须 >= 1.5，目标位必须来自结构空间，不要机械按固定百分比外推。',
+    '- total 用 0-10 整数；chart 最多 7，data 最多 3，risk 可为 -3 到 2。分数低于 7 的必须 rejected。',
+    '- 做多：失效价必须低于入场价，目标位必须高于入场价。做空：失效价必须高于入场价，目标位必须低于入场价。',
+    '- 如果价格已经越过入场位，可以标 triggered；如果只是在等回踩/反抽，用 wait_entry。',
+    '- 优先识别：突破后回踩、支阻互换、震荡区上下沿、三角/旗形收敛、反抽做空、回踩做多。',
+    '- 不要为了凑数量而给机会；没有结构、R 不够、量能/资金不配合，都 rejected。',
+    '',
+    '输入 JSON：',
+    JSON.stringify(payload, null, 2),
+  ].join('\n')
+}
+
 function buildScreenPrompt(payload) {
+  if (payload?.scope === 'signal-hunter') return buildSignalHunterScreenPrompt(payload)
   return [
     '你是 RSI-inspection 的市场候选筛选助手。',
     '你的任务不是给买卖建议，也不是预测价格；你只负责把本地规则筛出来的候选进一步分类，帮助用户减少噪音。',

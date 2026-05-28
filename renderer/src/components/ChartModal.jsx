@@ -145,6 +145,43 @@ function findDivergencePoints(candles, rsiVals) {
   return null
 }
 
+function signalHunterMarkLines(signal) {
+  if (!signal) return []
+  const entryPrice = Number.isFinite(signal.entryPrice) ? signal.entryPrice : signal.triggerPrice
+  const confirmPrice = Number.isFinite(signal.confirmPrice) ? signal.confirmPrice : null
+  const tooClose = (a, b, pct = 0.0015) =>
+    Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) <= Math.max(Math.abs(a), Math.abs(b)) * pct
+  const target = n => {
+    if (Number.isFinite(signal[`tp${n}`])) return signal[`tp${n}`]
+    if (!Number.isFinite(entryPrice) || !Number.isFinite(signal.stopLoss)) return null
+    const unit = Math.max(Math.abs(entryPrice - signal.stopLoss), entryPrice * 0.018)
+    const mult = n === 1 ? 1 : n === 2 ? 1.5 : 2.2
+    return signal.side === 'short'
+      ? entryPrice - unit * mult
+      : entryPrice + unit * mult
+  }
+  const line = (name, value, color, type = 'dashed', labelOffset = 0) => Number.isFinite(value) ? ({
+    name,
+    yAxis: value,
+    lineStyle: { color, type, width: 1.1 },
+    label: {
+      formatter: `${name} ${Number(value).toLocaleString('en', { maximumFractionDigits: 6 })}`,
+      color,
+      fontSize: 10,
+      distance: labelOffset,
+    },
+  }) : null
+  const showConfirm = !tooClose(entryPrice, confirmPrice)
+  return [
+    line('入场', entryPrice, '#58a6ff', 'solid'),
+    showConfirm ? line('确认', confirmPrice, '#fbbf24', 'dashed', 10) : null,
+    line('止损', signal.stopLoss, '#f85149', 'dashed', 16),
+    line('TP1', target(1), '#3fb950', 'dashed', 6),
+    line('TP2', target(2), '#2dd4bf', 'dashed', 12),
+    line('TP3', target(3), '#a7f3d0', 'dashed', 18),
+  ].filter(Boolean)
+}
+
 export default function ChartModal({ asset, onClose, alertItem = null }) {
   const rsiPeriod     = useSettingsStore(s => s.rsiPeriod)
   const rsiOverbought = useSettingsStore(s => s.rsiOverbought)
@@ -203,6 +240,9 @@ export default function ChartModal({ asset, onClose, alertItem = null }) {
     const rsiVals = computeRsi(candles, rsiPeriod)
     const divPts  = findDivergencePoints(candles, rsiVals)
     const divColor = divPts?.type === 'bearish' ? '#f97316' : '#22c55e'
+    const hunterLines = alertItem?.signalHunter && alertItem.signalHunter.timeframe === tf
+      ? signalHunterMarkLines(alertItem.signalHunter)
+      : []
     const alertIndex = alertItem?.ts && candles.length
       ? candles.reduce((best, c, i) => Math.abs(c.time - alertItem.ts) < Math.abs(candles[best].time - alertItem.ts) ? i : best, 0)
       : -1
@@ -277,12 +317,15 @@ export default function ChartModal({ asset, onClose, alertItem = null }) {
             color: '#3fb950', color0: '#f85149',
             borderColor: '#3fb950', borderColor0: '#f85149',
           },
-          markLine: alertIndex >= 0 ? {
+          markLine: alertIndex >= 0 || hunterLines.length ? {
             silent: true,
             symbol: 'none',
             lineStyle: { color: '#eab308', type: 'dotted', width: 1.2 },
             label: { formatter: '提醒', color: '#eab308', fontSize: 10 },
-            data: [{ xAxis: times[alertIndex] }],
+            data: [
+              ...(alertIndex >= 0 ? [{ xAxis: times[alertIndex] }] : []),
+              ...hunterLines,
+            ],
           } : undefined,
         },
         {

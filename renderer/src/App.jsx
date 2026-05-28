@@ -26,6 +26,7 @@ const LaunchReviewPage = lazy(() => import('./components/LaunchReviewPage'))
 const MarketChatPage = lazy(() => import('./components/MarketChatPage'))
 const WatchPoolPage = lazy(() => import('./components/WatchPoolPage'))
 const OpportunityPage = lazy(() => import('./components/OpportunityPage'))
+const SignalHunterPage = lazy(() => import('./components/SignalHunterPage'))
 
 function LazyFallback({ label = '正在加载...' }) {
   return <div className="lazy-fallback">{label}</div>
@@ -356,7 +357,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.1.0'
+const APP_VERSION = 'v1.1.1'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
@@ -988,6 +989,8 @@ export default function App() {
               <AiPage />
             ) : activeTab === 'opportunities' ? (
               <OpportunityPage />
+            ) : activeTab === 'signal-hunter' ? (
+              <SignalHunterPage />
             ) : activeTab === 'ai-review' ? (
               <AiReviewPage />
             ) : activeTab === 'trail' ? (
