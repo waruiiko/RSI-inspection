@@ -4,6 +4,7 @@ import useGroupsStore from '../store/groupsStore'
 import useMarketStore from '../store/marketStore'
 import useAiRunLogStore from '../store/aiRunLogStore'
 import { getQuoteVolume } from '../utils/liquidity'
+import { CORE_CRYPTO_SYMBOLS, STOCK_UNIVERSES, stockUniverseEntries } from '../utils/stockUniverse'
 
 function uniqByApiSymbol(items) {
   const seen = new Set()
@@ -24,6 +25,14 @@ function countPlan(plan) {
     symbols: actions.reduce((n, a) => n + (Array.isArray(a.apiSymbols) ? a.apiSymbols.length : 0), 0),
     groups: groups.length,
   }
+}
+
+function mergeKnownStocks(prev, incoming) {
+  const bySymbol = new Map(prev.map(item => [item.apiSymbol, item]))
+  for (const item of incoming) {
+    bySymbol.set(item.apiSymbol, { ...bySymbol.get(item.apiSymbol), ...item })
+  }
+  return Array.from(bySymbol.values()).sort((a, b) => a.symbol.localeCompare(b.symbol))
 }
 
 export default function ManagePage({ onSaved, aiRequest }) {
@@ -143,6 +152,23 @@ export default function ManagePage({ onSaved, aiRequest }) {
     setStockInput('')
     setValidateResult(null)
   }, [validateResult, knownStocks])
+
+  const importStockUniverse = useCallback((keys) => {
+    const incoming = stockUniverseEntries(Array.isArray(keys) ? keys : [keys])
+    const symbols = incoming.map(item => item.apiSymbol)
+    setKnownStocks(prev => mergeKnownStocks(prev, incoming))
+    setTrackedStocks(prev => new Set([...prev, ...symbols]))
+  }, [])
+
+  const keepCoreCryptoOnly = useCallback(() => {
+    const bySymbol = new Map()
+    for (const pair of [...futuresPairs, ...spotPairs]) {
+      if (!CORE_CRYPTO_SYMBOLS.has(pair.symbol)) continue
+      if (pair.contractType === 'TRADIFI_PERPETUAL') continue
+      bySymbol.set(pair.symbol, pair.apiSymbol)
+    }
+    setTrackedCrypto(new Set(bySymbol.values()))
+  }, [spotPairs, futuresPairs])
 
   // ── Save ───────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
@@ -462,6 +488,11 @@ export default function ManagePage({ onSaved, aiRequest }) {
                   {allFilteredCryptoSelected ? '取消全选' : '全选'}
                 </button>
               )}
+              {!pairsLoading && (
+                <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={keepCoreCryptoOnly}>
+                  Core 15
+                </button>
+              )}
             </div>
           </div>
 
@@ -503,7 +534,18 @@ export default function ManagePage({ onSaved, aiRequest }) {
                   {allFilteredStocksSelected ? '取消全选' : '全选'}
                 </button>
               )}
+              <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => importStockUniverse(Object.keys(STOCK_UNIVERSES))}>
+                Import All
+              </button>
             </div>
+          </div>
+
+          <div className="stock-preset-row">
+            {Object.entries(STOCK_UNIVERSES).map(([key, preset]) => (
+              <button key={key} className="feed-type-btn" onClick={() => importStockUniverse(key)}>
+                + {preset.label}
+              </button>
+            ))}
           </div>
 
           {knownStocks.length > 0 && (

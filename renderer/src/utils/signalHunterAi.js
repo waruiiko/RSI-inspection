@@ -1,7 +1,7 @@
 import { assetKey } from './assetKey'
 import { getQuoteVolume } from './liquidity'
 
-const TFS = ['15m', '1h', '4h']
+const TFS = ['1h', '4h']
 const VALID_STATUSES = new Set(['armed', 'wait_entry', 'triggered', 'watch', 'risk', 'rejected'])
 const VALID_SIDES = new Set(['long', 'short'])
 
@@ -27,7 +27,7 @@ function pickTf(asset) {
   const scores = asset.signalScore ?? {}
   return TFS
     .map(tf => [tf, Math.abs(Number(scores[tf]) || 0)])
-    .sort((a, b) => b[1] - a[1])[0]?.[0] ?? '15m'
+    .sort((a, b) => b[1] - a[1])[0]?.[0] ?? '1h'
 }
 
 function candidatePriority(asset) {
@@ -36,18 +36,20 @@ function candidatePriority(asset) {
   const derivativeScore = Math.abs(Number(asset.derivatives?.score) || 0)
   const localScore = Number(asset.signalHunter?.score?.total) || 0
   const move = Math.abs(Number(asset.change24h) || 0)
-  return score * 16 + derivativeScore * 10 + localScore * 8 + Math.min(20, move * 2) + Math.min(12, Math.log10(turnover / 1_000_000 + 1) * 4)
+  const stockBias = asset.type === 'stock' ? 24 : asset.type === 'tradfi' ? 12 : -8
+  return stockBias + score * 16 + derivativeScore * 10 + localScore * 8 + Math.min(20, move * 2) + Math.min(12, Math.log10(turnover / 1_000_000 + 1) * 4)
 }
 
 export function buildSignalHunterAiCandidates(assets, limit = 60) {
   return assets
-    .filter(asset => asset?.source === 'binance-futures' && Number.isFinite(Number(asset.price)))
+    .filter(asset => Number.isFinite(Number(asset?.price)))
     .map(asset => {
       const tf = pickTf(asset)
-      const signal = asset.signalHunter ?? null
+      const signal = TFS.includes(asset.signalHunter?.timeframe) ? asset.signalHunter : null
       return {
         key: assetKey(asset),
         symbol: asset.symbol,
+        name: asset.name,
         apiSymbol: asset.apiSymbol,
         source: asset.source,
         type: asset.type,
@@ -73,14 +75,28 @@ export function buildSignalHunterAiCandidates(assets, limit = 60) {
           rewardRisk: finite(signal.rewardRisk ?? signal.score?.rewardRisk),
           reasons: signal.reasons ?? [],
           riskFlags: signal.riskFlags ?? [],
+          narrativeSummary: signal.narrativeSummary ?? '',
+          narrativeTags: signal.narrativeTags ?? [],
           rejectReasons: signal.rejectReasons ?? [],
         } : null,
         priority: Math.round(candidatePriority(asset)),
       }
     })
-    .filter(c => c.priority >= 10 || c.turnover >= 1_000_000)
+    .filter(c => {
+      const minPriority = c.type === 'crypto' ? 14 : 8
+      return c.priority >= minPriority || c.turnover >= 1_000_000
+    })
     .sort((a, b) => b.priority - a.priority)
     .slice(0, limit)
+}
+
+function localRiskFlags(asset) {
+  const flags = []
+  const turnover = getQuoteVolume(asset)
+  if (!turnover) flags.push('成交额缺失，流动性风险待确认')
+  else if (turnover < 5_000_000) flags.push(`24h成交额 ${Math.round(turnover).toLocaleString()} < 5M，流动性不足`)
+  if (asset.source === 'binance-futures' && !asset.derivatives) flags.push('OI / 资金费率数据缺失')
+  return flags
 }
 
 export function signalHunterCandidateSignature(candidates) {
@@ -105,6 +121,25 @@ function deriveRewardRisk(side, entry, stop, targets) {
   return Number((reward / risk).toFixed(2))
 }
 
+export function minExecutableStopDistance(asset, sig) {
+  const entry = finite(sig.entryPrice)
+  if (!Number.isFinite(entry) || entry <= 0) return null
+
+  const tfMult = sig.timeframe === '4h' ? 2 : sig.timeframe === '1h' ? 1.4 : 1
+  if (asset.type === 'stock' || asset.type === 'tradfi') {
+    const minPct = entry < 50 ? 0.018 : entry < 200 ? 0.015 : 0.012
+    const minAbs = entry < 50 ? 0.50 : entry < 200 ? 1.00 : 2.00
+    return Math.max(entry * minPct * tfMult, minAbs * tfMult)
+  }
+  return entry * (sig.timeframe === '4h' ? 0.018 : sig.timeframe === '1h' ? 0.012 : 0.008)
+}
+
+export function hasExecutableStopDistance(asset, sig) {
+  const minDistance = minExecutableStopDistance(asset, sig)
+  if (!Number.isFinite(minDistance) || !Number.isFinite(sig?.entryPrice) || !Number.isFinite(sig?.stopLoss)) return false
+  return Math.abs(sig.entryPrice - sig.stopLoss) >= minDistance
+}
+
 function legalizeStatus(side, status, currentPrice, entryPrice) {
   if (!Number.isFinite(currentPrice) || !Number.isFinite(entryPrice)) return status
   if (side === 'short' && entryPrice <= currentPrice) return 'triggered'
@@ -112,7 +147,7 @@ function legalizeStatus(side, status, currentPrice, entryPrice) {
   return status
 }
 
-function validateSignal(sig) {
+function validateSignal(sig, asset) {
   const reasons = []
   const targets = Array.isArray(sig.targets) ? sig.targets : []
   if (!VALID_SIDES.has(sig.side)) reasons.push('方向无效')
@@ -126,6 +161,13 @@ function validateSignal(sig) {
   if (sig.side === 'short' && Number.isFinite(sig.stopLoss) && Number.isFinite(sig.entryPrice) && sig.stopLoss <= sig.entryPrice) reasons.push('做空失效价应高于入场')
   if (sig.side === 'long' && targets.some(target => !Number.isFinite(target) || target <= sig.entryPrice)) reasons.push('做多目标位应高于入场')
   if (sig.side === 'short' && targets.some(target => !Number.isFinite(target) || target >= sig.entryPrice)) reasons.push('做空目标位应低于入场')
+  const minStopDistance = minExecutableStopDistance(asset, sig)
+  if (Number.isFinite(minStopDistance) && Number.isFinite(sig.entryPrice) && Number.isFinite(sig.stopLoss)) {
+    const stopDistance = Math.abs(sig.entryPrice - sig.stopLoss)
+    if (stopDistance < minStopDistance) {
+      reasons.push(`失效距离过窄：${stopDistance.toFixed(2)} < 最小可执行 ${minStopDistance.toFixed(2)}`)
+    }
+  }
   return reasons
 }
 
@@ -151,19 +193,24 @@ export function normalizeSignalHunterAiResults(aiResult, assets) {
     const targets = normalizeTargets(item)
     const rewardRisk = finite(item.rewardRisk ?? item.rr) ?? deriveRewardRisk(side, entryPrice, stopLoss, targets)
     const rawStatus = VALID_STATUSES.has(String(item.status)) ? String(item.status) : 'watch'
-    const total = Math.round(clamp(item.score?.total ?? item.totalScore ?? item.score, 0, 10))
-    const chart = Math.round(clamp(item.score?.chart ?? item.chartScore, 0, 7))
-    const data = Math.round(clamp(item.score?.data ?? item.dataScore, 0, 3))
-    const risk = Math.round(clamp(item.score?.risk ?? item.riskScore, -3, 2))
+    const total = Number(clamp(item.score?.total ?? item.totalScore ?? item.score, 0, 10).toFixed(1))
+    const chart = Number(clamp(item.score?.chart ?? item.chartScore, 0, 10).toFixed(1))
+    const data = Number(clamp(item.score?.data ?? item.dataScore, 0, 10).toFixed(1))
+    const risk = Number(clamp(item.score?.risk ?? item.riskScore, -3, 2).toFixed(1))
     const status = legalizeStatus(side, rawStatus, currentPrice, entryPrice)
     const baseReasons = Array.isArray(item.reasons) ? item.reasons : [item.reason].filter(Boolean)
     const riskFlags = Array.isArray(item.riskFlags) ? item.riskFlags : [item.risk].filter(Boolean)
+    const narrativeTags = Array.isArray(item.narrativeTags) ? item.narrativeTags : []
 
     const sig = {
       source: 'ai',
       status,
       side,
-      timeframe: TFS.includes(item.timeframe) ? item.timeframe : (asset.signalHunter?.timeframe ?? '15m'),
+      timeframe: TFS.includes(item.timeframe)
+        ? item.timeframe
+        : TFS.includes(asset.signalHunter?.timeframe)
+          ? asset.signalHunter.timeframe
+          : '1h',
       setup: item.setup ?? 'ai_structure',
       setupLabel: item.setupLabel ?? item.pattern ?? 'AI 结构候选',
       currentPrice,
@@ -190,12 +237,14 @@ export function normalizeSignalHunterAiResults(aiResult, assets) {
         weights: 'AI structure + hard guards',
       },
       reasons: baseReasons.slice(0, 5),
-      riskFlags: riskFlags.slice(0, 4),
+      riskFlags: [...new Set([...riskFlags, ...localRiskFlags(asset)])].slice(0, 8),
+      narrativeSummary: String(item.narrativeSummary ?? item.narrative ?? '').trim(),
+      narrativeTags: narrativeTags.map(tag => String(tag).trim()).filter(Boolean).slice(0, 5),
       rejectReasons: Array.isArray(item.rejectReasons) ? item.rejectReasons : [],
       rejected: status === 'rejected',
     }
 
-    const guardReasons = validateSignal(sig)
+    const guardReasons = validateSignal(sig, asset)
     if (guardReasons.length || sig.rejected) {
       sig.status = 'rejected'
       sig.rejected = true

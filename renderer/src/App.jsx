@@ -357,7 +357,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.1.1'
+const APP_VERSION = 'v1.1.2'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')

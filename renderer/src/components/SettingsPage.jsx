@@ -153,7 +153,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.1.1
+          v1.1.2
         </span>
       </div>
 

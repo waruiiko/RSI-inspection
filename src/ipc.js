@@ -607,7 +607,7 @@ function buildDerivativesSignal({ candlesByTf, rsi, volumeSignal, signalScore, o
 
 function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, candlesByTf, rsi, volumeSignal, signalScore, derivatives }) {
   if (asset.source !== 'binance-futures' || price == null) return null
-  const candidates = ['15m', '1h', '4h']
+  const candidates = ['1h', '4h']
     .flatMap(tf => ['long', 'short'].map(side => evaluateSignalHunterTimeframe({
       side,
       tf,

@@ -1761,6 +1761,7 @@ body {
 .pair-empty  { padding: 20px; text-align: center; color: var(--dim); font-size: var(--text-sm); }
 
 .stock-validate  { flex-shrink: 0; padding-top: 4px; }
+.stock-preset-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .validate-label  { font-size: var(--text-sm); color: var(--muted); margin-bottom: 6px; font-weight: 600; }
 .validate-row    { display: flex; gap: 6px; }
 .validate-ticker { flex: 1; }
@@ -2757,9 +2758,9 @@ body {
 
 .signal-hunter-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(64px, 1fr));
+  grid-template-columns: repeat(5, minmax(58px, 1fr));
   gap: 8px;
-  min-width: 300px;
+  min-width: 360px;
 }
 
 .signal-hunter-summary > div {
@@ -2829,6 +2830,23 @@ body {
   background: var(--bg2);
 }
 
+.signal-hunter-empty-diag {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.signal-hunter-empty-diag span {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--dim);
+  font-size: var(--text-sm);
+}
+
 .signal-hunter-table-wrap {
   flex: 1;
   min-height: 0;
@@ -2841,6 +2859,14 @@ body {
 .signal-hunter-table th,
 .signal-hunter-table td {
   white-space: nowrap;
+}
+
+.signal-hunter-row {
+  cursor: pointer;
+}
+
+.signal-hunter-row:hover td {
+  background: rgba(88, 166, 255, 0.04);
 }
 
 .signal-hunter-table td:first-child small,
@@ -2914,6 +2940,38 @@ body {
   border-radius: 999px;
   font-size: 12px;
   font-weight: 700;
+}
+
+.signal-hunter-exec {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 40px;
+  margin-top: 4px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.signal-hunter-exec-ready {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.16);
+}
+
+.signal-hunter-exec-wait {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.13);
+}
+
+.signal-hunter-exec-risk {
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.signal-hunter-exec-muted {
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.1);
 }
 
 .signal-hunter-long {
@@ -3018,10 +3076,7 @@ body {
   background: rgba(13, 20, 33, 0.9);
 }
 
-.signal-hunter-detail {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(180px, 1fr));
-  gap: 10px;
+.signal-hunter-card {
   padding: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -3029,21 +3084,89 @@ body {
   white-space: normal;
 }
 
-.signal-hunter-detail div {
+.signal-hunter-card-head,
+.signal-hunter-card-badges,
+.signal-hunter-card-grid,
+.signal-hunter-card-grid section {
+  display: flex;
+}
+
+.signal-hunter-card-head {
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.signal-hunter-card-head div:first-child,
+.signal-hunter-card-grid section {
   display: flex;
   flex-direction: column;
   gap: 4px;
   min-width: 0;
 }
 
-.signal-hunter-detail b {
+.signal-hunter-card-badges {
+  flex-direction: row;
+  gap: 6px;
+}
+
+.signal-hunter-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(180px, 1fr));
+  gap: 10px;
+  padding-top: 10px;
+}
+
+.signal-hunter-card-grid section {
+  padding-right: 10px;
+  border-right: 1px solid var(--border);
+}
+
+.signal-hunter-card-grid section:last-child {
+  padding-right: 0;
+  border-right: 0;
+}
+
+.signal-hunter-card b {
   color: var(--text);
 }
 
-.signal-hunter-detail span {
+.signal-hunter-card span,
+.signal-hunter-card em {
   color: var(--muted);
   font-size: 11px;
   line-height: 1.45;
+}
+
+.signal-hunter-card em {
+  font-style: normal;
+}
+
+.signal-hunter-score-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(54px, 1fr));
+  gap: 6px;
+}
+
+.signal-hunter-score-grid span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg3);
+}
+
+.signal-hunter-score-grid strong {
+  color: #86efac;
+  font-size: 13px;
+}
+
+.signal-hunter-score-grid small {
+  color: var(--dim);
+  font-size: 10px;
 }
 
 @media (max-width: 980px) {
@@ -3057,7 +3180,19 @@ body {
     min-width: 0;
   }
 
-  .signal-hunter-detail {
+  .signal-hunter-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  .signal-hunter-card-grid section {
+    padding-right: 0;
+    padding-bottom: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .signal-hunter-card-grid section:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
   }
 }
