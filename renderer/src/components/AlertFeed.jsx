@@ -68,6 +68,15 @@ function fmtDetail(item) {
     const risk = item.risk ? `，风险：${item.risk}` : ''
     return ` Signal Hunter ${side}${label}(${item.timeframe})，现价 ${fmtPrice(item.value)}，触发价 ${fmtPrice(item.threshold)}，${item.reason ?? '等待确认'}${risk}`
   }
+  if (item.type === 'signal_hunter_ai') {
+    const label = item.condition === 'risk' ? '风险' : item.condition === 'focus' ? '重点' : '观察'
+    const side = item.side === 'short' ? '做空' : '做多'
+    const score = item.score != null ? `，评分 ${item.score}` : ''
+    const status = item.status ? `，状态 ${item.status}` : ''
+    const risk = item.risk ? `，风险：${item.risk}` : ''
+    const next = item.nextCheck ? `，${item.nextCheck}` : ''
+    return ` SH AI：${side}${label}${score}${status}，${item.reason ?? '等待复核'}${risk}${next}`
+  }
   if (item.type === 'ai') {
     const label = item.condition === 'focus' ? '重点' : item.condition === 'risk' ? '风险' : '观察'
     const confidence = item.value != null ? `，置信度 ${item.value}` : ''
@@ -93,6 +102,7 @@ function itemColor(item) {
   if (item.type === 'rsi') return item.condition === 'above' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'price') return item.condition === 'above' ? 'feed-red' : 'feed-green'
   if (item.type === 'divergence') return item.condition === 'bull' ? 'feed-green' : 'feed-orange'
+  if (item.type === 'signal_hunter_ai') return item.condition === 'risk' ? 'feed-red' : item.condition === 'focus' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'ai') return item.condition === 'risk' ? 'feed-red' : item.condition === 'focus' ? 'feed-orange' : 'feed-sky'
   if (item.type === 'watch_pool') return 'feed-sky'
   if (item.type === 'signal_hunter') return item.side === 'short' ? 'feed-red' : item.condition === 'triggered' ? 'feed-green' : 'feed-orange'
@@ -107,6 +117,7 @@ function itemColor(item) {
 }
 
 function feedBucket(item) {
+  if (item.type === 'signal_hunter_ai') return item.condition === 'risk' ? 'risk' : item.condition === 'focus' ? 'opportunity' : 'ai'
   if (item.type === 'ai') return 'ai'
   if (item.type === 'watch_pool') return 'cooldown'
   if (item.type === 'signal_hunter') return 'opportunity'

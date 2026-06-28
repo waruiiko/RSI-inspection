@@ -29,6 +29,7 @@ contextBridge.exposeInMainWorld('api', {
   getAssetsConfig:  ()       => ipcRenderer.invoke('assets:getConfig'),
   saveAssetsConfig: (cfg)    => ipcRenderer.invoke('assets:saveConfig', cfg),
   getBinancePairs:  ()       => ipcRenderer.invoke('assets:getBinancePairs'),
+  getTopFuturesByVolume: (opts) => ipcRenderer.invoke('assets:getTopFuturesByVolume', opts),
   validateStock:    (ticker) => ipcRenderer.invoke('assets:validateStock', ticker),
 
   // Alert rules

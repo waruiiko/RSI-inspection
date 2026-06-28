@@ -35,6 +35,27 @@ function mergeKnownStocks(prev, incoming) {
   return Array.from(bySymbol.values()).sort((a, b) => a.symbol.localeCompare(b.symbol))
 }
 
+async function fetchTopFuturesByVolume(perpetuals, limit = 50) {
+  const symbols = perpetuals.map(p => p.apiSymbol)
+  if (window.api.getTopFuturesByVolume) {
+    return window.api.getTopFuturesByVolume({ symbols, limit })
+  }
+  const res = await fetch('https://fapi.binance.com/fapi/v1/ticker/24hr')
+  if (!res.ok) throw new Error(`Binance Futures ticker ${res.status}`)
+  const allowed = new Set(symbols)
+  const all = await res.json()
+  return all
+    .filter(t => allowed.has(t.symbol))
+    .map(t => ({
+      symbol: t.symbol,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+      change24h: parseFloat(t.priceChangePercent),
+      price: parseFloat(t.lastPrice),
+    }))
+    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+    .slice(0, limit)
+}
+
 export default function ManagePage({ onSaved, aiRequest }) {
   // ── Config ─────────────────────────────────────────────────
   const [trackedCrypto,  setTrackedCrypto]  = useState(new Set()) // Set<apiSymbol>
@@ -51,6 +72,8 @@ export default function ManagePage({ onSaved, aiRequest }) {
   const loadPairs    = usePairsStore(s => s.load)
   const [cryptoSearch,   setCryptoSearch]   = useState('')
   const [cryptoMarket,   setCryptoMarket]   = useState('spot') // 'spot' | 'futures' | 'tradifi'
+  const [topFuturesBusy, setTopFuturesBusy] = useState(false)
+  const [topFuturesStatus, setTopFuturesStatus] = useState('')
 
   // ── Stock panel ────────────────────────────────────────────
   const [stockInput,     setStockInput]     = useState('')
@@ -169,6 +192,29 @@ export default function ManagePage({ onSaved, aiRequest }) {
     }
     setTrackedCrypto(new Set(bySymbol.values()))
   }, [spotPairs, futuresPairs])
+
+  const replaceWithTopFutures = useCallback(async () => {
+    const perpetuals = futuresPairs.filter(p => p.contractType === 'PERPETUAL')
+    if (!perpetuals.length || topFuturesBusy) return
+    setTopFuturesBusy(true)
+    setTopFuturesStatus('正在按 24h 成交额筛选合约 Top50...')
+    try {
+      const top = await fetchTopFuturesByVolume(perpetuals, 50)
+      const topSet = new Set((top ?? []).map(item => item.symbol))
+      const perpetualSet = new Set(perpetuals.map(p => p.apiSymbol))
+      setTrackedCrypto(prev => {
+        const next = new Set([...prev].filter(apiSymbol => !perpetualSet.has(apiSymbol)))
+        topSet.forEach(apiSymbol => next.add(apiSymbol))
+        return next
+      })
+      setCryptoMarket('futures')
+      setTopFuturesStatus(`已替换为合约成交额 Top ${topSet.size}，保存后生效。`)
+    } catch (err) {
+      setTopFuturesStatus(`Top50 获取失败：${err.message || String(err)}`)
+    } finally {
+      setTopFuturesBusy(false)
+    }
+  }, [futuresPairs, topFuturesBusy])
 
   // ── Save ───────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
@@ -493,6 +539,11 @@ export default function ManagePage({ onSaved, aiRequest }) {
                   Core 15
                 </button>
               )}
+              {!pairsLoading && cryptoMarket === 'futures' && (
+                <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={replaceWithTopFutures} disabled={topFuturesBusy}>
+                  {topFuturesBusy ? '筛选中' : '合约Top50'}
+                </button>
+              )}
             </div>
           </div>
 
@@ -505,6 +556,7 @@ export default function ManagePage({ onSaved, aiRequest }) {
               onChange={e => setCryptoSearch(e.target.value)}
             />
           </div>
+          {topFuturesStatus && <div className="manage-inline-status">{topFuturesStatus}</div>}
 
           <div className="pair-list">
             {filteredPairs.map(pair => {

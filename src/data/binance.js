@@ -112,6 +112,25 @@ async function fetchFuturesTickers(symbols) {
   )
 }
 
+async function fetchTopFuturesByVolume(symbols, limit = 50) {
+  const url = `${FAPI_BASE}/fapi/v1/ticker/24hr`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`Binance Futures ticker ${res.status}`)
+  const all = await res.json()
+  const allowed = new Set(symbols ?? [])
+  return all
+    .filter(t => t.symbol?.endsWith('USDT'))
+    .filter(t => !allowed.size || allowed.has(t.symbol))
+    .map(t => ({
+      symbol: t.symbol,
+      quoteVolume24h: parseFloat(t.quoteVolume) || 0,
+      change24h: parseFloat(t.priceChangePercent),
+      price: parseFloat(t.lastPrice),
+    }))
+    .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+    .slice(0, limit)
+}
+
 async function fetchFuturesOpenInterestHist(symbol, period = '1h', limit = 24) {
   const KEY = `binance:futures:oi:${symbol}:${period}:${limit}`, TTL = 5 * 60 * 1000
   const cached = cache.get(KEY)
@@ -172,5 +191,6 @@ async function fetchAllFuturesPairs() {
 module.exports = {
   fetchKlines, fetchTickers, fetchAllUsdtPairs,
   fetchFuturesKlines, fetchFuturesTickers, fetchAllFuturesPairs,
+  fetchTopFuturesByVolume,
   fetchFuturesOpenInterestHist, fetchFuturesPremiumIndex,
 }

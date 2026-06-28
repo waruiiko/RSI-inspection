@@ -147,6 +147,10 @@ exports.register = (ipcMain) => {
     return { spot, futures }
   })
 
+  ipcMain.handle('assets:getTopFuturesByVolume', async (_, { symbols = [], limit = 50 } = {}) => {
+    return binance.fetchTopFuturesByVolume(symbols, limit)
+  })
+
   ipcMain.handle('assets:validateStock', async (_, ticker) => {
     return yahoo.validateTicker(ticker)
   })
@@ -740,16 +744,16 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   if (!isShort) {
     if (longEmaPullback) { setup = 'pullback_long'; setupLabel = 'EMA 回踩多'; entryBase = ema21 }
     else if (longSupportRetest) { setup = 'retest_long'; setupLabel = '支撑回踩多'; entryBase = supportArea.level }
-    else if (longBase) { setup = 'base_long'; setupLabel = '压缩基地多'; entryBase = supportArea.level }
+    else if (longBase) { setup = 'base_long'; setupLabel = '窄幅蓄势做多'; entryBase = supportArea.level }
     else if (nearConfirm) { setup = 'confirm_long'; setupLabel = '突破确认观察'; entryBase = null }
   } else {
     if (shortEmaRebound) { setup = 'rebound_short'; setupLabel = 'EMA 反抽空'; entryBase = ema21 }
     else if (shortResistanceRetest) { setup = 'retest_short'; setupLabel = '阻力反抽空'; entryBase = resistance.level }
-    else if (shortBase) { setup = 'base_short'; setupLabel = '压缩基地空'; entryBase = resistance.level }
+    else if (shortBase) { setup = 'base_short'; setupLabel = '窄幅蓄势做空'; entryBase = resistance.level }
     else if (nearConfirm) { setup = 'confirm_short'; setupLabel = '跌破确认观察'; entryBase = null }
   }
 
-  if (!setup) return reject('没有回踩/反抽/压缩基地形态')
+  if (!setup) return reject('没有回踩/反抽/窄幅蓄势形态')
   const confirmOnly = setup === 'confirm_long' || setup === 'confirm_short'
   if (confirmOnly) {
     return reject('只有突破确认，没有回踩预埋', {
@@ -797,7 +801,7 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   if (nearEntry) { chart += 1; reasons.push(`距离入场价 ${distanceToEntryPct.toFixed(2)}%`) }
   if (nearConfirm) { chart += 1; reasons.push(`距离确认价 ${distanceToConfirmPct.toFixed(2)}%`) }
   if (compression) { chart += 1; reasons.push('短线波动压缩') }
-  if (setup === 'base_long' || setup === 'base_short') { chart += 2; reasons.push('压缩基地') }
+  if (setup === 'base_long' || setup === 'base_short') { chart += 2; reasons.push('窄幅蓄势') }
   if (setup === 'pullback_long' || setup === 'rebound_short') { chart += 2; reasons.push(isShort ? 'EMA21 反抽位' : 'EMA21 回踩位') }
   if (setup === 'retest_long' || setup === 'retest_short') { chart += 2; reasons.push(isShort ? '阻力反抽' : '支撑回踩') }
   if (volumeDry) { chart += 1; reasons.push(`缩量蓄势 ${volumeRatio.toFixed(2)}x`) }

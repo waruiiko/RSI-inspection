@@ -1,9 +1,10 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import useMarketStore from '../store/marketStore'
+import useAlertStore from '../store/alertStore'
 import useSettingsStore from '../store/settingsStore'
 import { formatPrice } from '../utils/rsi'
 import { formatTurnover, getQuoteVolume } from '../utils/liquidity'
-import { buildSignalHunterAiCandidates, hasExecutableStopDistance, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
+import { buildSignalHunterAiCandidates, hasExecutableStopDistance, makeSignalHunterAiFeedItems, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
 
 const ChartModal = lazy(() => import('./ChartModal'))
 
@@ -43,7 +44,9 @@ const SCORE_FILTERS = [
 ]
 
 const SORT_MODES = [
+  { key: 'priority', label: '优先级' },
   { key: 'execution', label: '执行优先' },
+  { key: 'ai', label: 'AI优先' },
   { key: 'score', label: '高评分' },
   { key: 'entry', label: '近入场' },
 ]
@@ -59,6 +62,12 @@ const ACTIONABLE_TIMEFRAMES = new Set(['1h', '4h'])
 
 const SH_AI_CACHE_KEY = 'rsi:signalHunter:aiCache'
 const SH_AI_SEEN_KEY = 'rsi:signalHunter:seen'
+const SH_AI_CHANGES_KEY = 'rsi:signalHunter:changes'
+const SH_AI_PINNED_KEY = 'rsi:signalHunter:pinned'
+const SH_AI_DIFF_KEY = 'rsi:signalHunter:diff'
+const SH_AI_PROCESSED_KEY = 'rsi:signalHunter:processed'
+const SH_FOCUS_KEY = 'rsi:signalHunter:focus'
+const SH_SCORE_THRESHOLD_KEY = 'rsi:signalHunter:scoreThreshold'
 
 const STATUS_META = {
   armed: { label: '预埋', cls: 'signal-hunter-armed' },
@@ -76,8 +85,8 @@ const SIDE_META = {
 }
 
 const SETUP_META = {
-  base_long: '压缩基地多',
-  base_short: '压缩基地空',
+  base_long: '窄幅蓄势做多',
+  base_short: '窄幅蓄势做空',
   pullback_long: 'EMA 回踩多',
   rebound_short: 'EMA 反抽空',
   retest_long: '支撑回踩多',
@@ -188,6 +197,197 @@ function visibleSignal(asset, showRejected, scoreThreshold = 7, currentPrice = a
   return Number.isFinite(rewardRisk) && rewardRisk >= 1.5
 }
 
+function firstText(values) {
+  return values?.find(Boolean) ?? ''
+}
+
+function nextStepText(asset, expired) {
+  const sig = asset?.signalHunter
+  if (!sig) return { label: '等待数据', detail: '' }
+  if (expired) return { label: '先重新识别', detail: 'AI结果已过期' }
+  if (sig.rejected || sig.status === 'rejected') {
+    return { label: '暂时回避', detail: firstText(sig.rejectReasons) || '已被AI剔除' }
+  }
+  if (sig.status === 'risk') {
+    return { label: '暂时回避', detail: firstText(sig.riskFlags) || '风险信号' }
+  }
+  if (sig.status === 'triggered') {
+    return { label: '重点盯确认', detail: `确认 ${formatPrice(confirmPriceOf(sig))}` }
+  }
+  if (sig.status === 'armed' || sig.status === 'wait_entry') {
+    const distance = distanceToEntryOf(sig, livePriceOf(asset))
+    return { label: '等待入场距离', detail: Number.isFinite(distance) ? `距入场 ${fmtPct(distance)}` : '' }
+  }
+  if (sig.status === 'wait_confirm') {
+    return { label: '等待确认价', detail: `确认 ${formatPrice(confirmPriceOf(sig))}` }
+  }
+  if (sig.status === 'watch') {
+    return { label: '保持观察', detail: firstText(sig.reasons) || '结构未触发' }
+  }
+  return { label: '继续观察', detail: '' }
+}
+
+function matchesAiView(asset, aiView, changedKeys = null, pinnedKeys = null) {
+  const sig = asset?.signalHunter ?? asset
+  if (aiView === 'all') return true
+  if (aiView === 'pinned') return pinnedKeys?.has(signalPinnedKey(asset)) ?? false
+  if (aiView === 'actionable') return ['triggered', 'armed', 'wait_entry', 'wait_confirm'].includes(sig?.status)
+  if (aiView === 'changed') return changedKeys?.has(signalHistoryKey(asset)) ?? false
+  if (aiView === 'changed_up' || aiView === 'changed_down') {
+    const change = changedKeys?.get?.(signalHistoryKey(asset))
+    const direction = statusChangeDirection(change, sig?.status)
+    return aiView === 'changed_up' ? direction === 'up' : direction === 'down'
+  }
+  if (aiView === 'focus') return sig?.status === 'triggered'
+  if (aiView === 'pending') return ['armed', 'wait_entry', 'wait_confirm'].includes(sig?.status)
+  return sig?.status === aiView
+}
+
+function signalHistoryKey(item) {
+  const sig = item?.signalHunter ?? {}
+  return [item?.key ?? signalKey(item), sig.side ?? '', sig.timeframe ?? ''].join('|')
+}
+
+function signalPinnedKey(item) {
+  const sig = item?.signalHunter ?? {}
+  return [item?.symbol ?? item?.apiSymbol ?? item?.key ?? signalKey(item), sig.side ?? '', sig.timeframe ?? ''].join('|')
+}
+
+function signalTrackKey(item) {
+  const sig = item?.signalHunter ?? {}
+  return [item?.symbol ?? item?.apiSymbol ?? item?.key ?? signalKey(item), sig.side ?? ''].join('|')
+}
+
+function collectStatusChanges(previousItems, nextItems, now) {
+  const previous = new Map((previousItems ?? []).map(item => [signalHistoryKey(item), item?.signalHunter?.status]))
+  return (nextItems ?? []).flatMap(item => {
+    const key = signalHistoryKey(item)
+    const from = previous.get(key)
+    const to = item?.signalHunter?.status
+    if (!from || !to || from === to) return []
+    return [{ key, symbol: item.symbol, from, to, ts: now }]
+  })
+}
+
+function collectAiDiff(previousItems, nextItems, now) {
+  const previous = new Map((previousItems ?? []).map(item => [signalHistoryKey(item), item]))
+  const next = new Map((nextItems ?? []).map(item => [signalHistoryKey(item), item]))
+  const added = []
+  const removed = []
+  const scoreChanged = []
+  for (const [key, item] of next) {
+    const before = previous.get(key)
+    if (!before) {
+      added.push({ key, symbol: item.symbol, ts: now })
+      continue
+    }
+    const from = before.signalHunter?.score?.total
+    const to = item.signalHunter?.score?.total
+    if (Number.isFinite(from) && Number.isFinite(to) && Math.abs(to - from) >= 0.5) {
+      scoreChanged.push({ key, symbol: item.symbol, from, to, ts: now })
+    }
+  }
+  for (const [key, item] of previous) {
+    if (!next.has(key)) removed.push({ key, symbol: item.symbol, ts: now })
+  }
+  return { added, removed, scoreChanged, ts: now }
+}
+
+function diffByKey(diff, field) {
+  return new Map((diff?.[field] ?? []).map(item => [item.key, item]))
+}
+
+function statusChangeText(change, fallbackStatus) {
+  if (!change) return ''
+  const from = statusMeta(change.from).label
+  const to = statusMeta(change.to ?? fallbackStatus).label
+  return `${from} → ${to}`
+}
+
+function riskGradeText(text) {
+  const value = String(text ?? '')
+  if (/止损|不可执行|方向|剔除|R 值|R值|reward|risk\/reward/i.test(value)) return 'hard'
+  if (/漂移|距离|确认|偏远|结构|等待|波动/i.test(value)) return 'soft'
+  return 'soft'
+}
+
+function riskItems(asset, stale, drift) {
+  const sig = asset?.signalHunter ?? {}
+  return [
+    stale ? `价格漂移 ${fmtPct(drift)}` : null,
+    ...(sig.riskFlags ?? []),
+    ...(sig.rejectReasons ?? []),
+  ].filter(Boolean).map(text => ({ text, grade: riskGradeText(text) }))
+}
+
+function signalPriority(asset) {
+  const sig = asset?.signalHunter ?? {}
+  const score = Number(sig.score?.total) || 0
+  const rewardRisk = rewardRiskFallback(sig)
+  const distance = absDistanceToEntry(asset)
+  const drift = Math.abs(priceDriftPct(asset) ?? 0)
+  const turnover = getQuoteVolume(asset) || 0
+  const stopInfo = stopDistanceInfo(asset, sig)
+  const exec = executionMeta(asset)
+  const statusBonus = sig.status === 'triggered' ? 8
+    : sig.status === 'armed' || sig.status === 'wait_entry' ? 5
+      : sig.status === 'wait_confirm' ? 3
+        : sig.status === 'watch' ? 1
+          : sig.status === 'risk' ? -10
+            : sig.status === 'rejected' ? -18
+              : 0
+  const scorePart = score * 6
+  const rrPart = Number.isFinite(rewardRisk) ? Math.min(18, Math.max(0, (rewardRisk - 1.5) * 12)) : 0
+  const entryPart = Math.max(0, 12 - Math.min(12, distance * 2.2))
+  const liquidityPart = Math.min(8, Math.log10(turnover / 1_000_000 + 1) * 3)
+  const execPart = exec.key === 'ready' ? 8 : exec.key === 'wait' ? 3 : exec.key === 'risk' ? -8 : -2
+  const riskPenalty = (sig.riskFlags?.length ?? 0) * 2.5 + (stopInfo?.ok === false ? 8 : 0) + Math.min(10, drift * 2)
+  return Number(Math.max(0, Math.min(100,
+    scorePart + rrPart + entryPart + liquidityPart + execPart + statusBonus - riskPenalty
+  )).toFixed(1))
+}
+
+function dedupeSignalRows(rows) {
+  const best = new Map()
+  const rank = asset => {
+    const sig = asset.signalHunter ?? {}
+    const statusScore = 10 - statusRank(sig.status)
+    const score = sig.score?.total ?? 0
+    const rr = rewardRiskFallback(sig) ?? 0
+    return statusScore * 100 + signalPriority(asset) + score * 10 + rr - absDistanceToEntry(asset) * 0.01
+  }
+  for (const asset of rows) {
+    const key = signalTrackKey(asset)
+    const current = best.get(key)
+    if (!current || rank(asset) > rank(current)) best.set(key, asset)
+  }
+  return [...best.values()]
+}
+
+function statusStrength(status) {
+  if (status === 'triggered') return 5
+  if (status === 'armed' || status === 'wait_entry' || status === 'wait_confirm') return 4
+  if (status === 'watch') return 3
+  if (status === 'risk') return 2
+  if (status === 'rejected') return 1
+  return 0
+}
+
+function statusChangeDirection(change, fallbackStatus) {
+  if (!change) return 'flat'
+  const from = statusStrength(change.from)
+  const to = statusStrength(change.to ?? fallbackStatus)
+  if (to > from) return 'up'
+  if (to < from) return 'down'
+  return 'flat'
+}
+
+function isSignalHunterAiExpired(runAt, intervalMinutes, now) {
+  if (!Number.isFinite(runAt) || runAt <= 0) return false
+  const intervalMs = Math.max(1, Number(intervalMinutes) || 30) * 60 * 1000
+  return now - runAt > Math.max(90 * 60 * 1000, intervalMs * 2)
+}
+
 function distanceToEntryOf(sig, currentPrice = sig?.currentPrice) {
   const entryPrice = entryPriceOf(sig)
   if (!Number.isFinite(entryPrice) || !Number.isFinite(currentPrice) || !currentPrice) return null
@@ -233,8 +433,32 @@ function scoreClass(score) {
   return ''
 }
 
+function matchesSignalHunterQuery(asset, q) {
+  if (!q) return true
+  const sig = asset.signalHunter ?? {}
+  return [
+    asset.symbol,
+    asset.apiSymbol,
+    asset.name,
+    sig.status,
+    statusMeta(sig.status).label,
+    sig.side,
+    sideMeta(sig.side).label,
+    sig.timeframe,
+    sig.setup,
+    sig.setupLabel,
+    setupLabel(sig.setup),
+    ...(sig.reasons ?? []),
+    ...(sig.riskFlags ?? []),
+    ...(sig.rejectReasons ?? []),
+  ].some(value => String(value ?? '').toUpperCase().includes(q))
+}
+
 function buildEmptyDiagnostics(assets, {
   filter,
+  aiView,
+  changedKeys,
+  pinnedKeys,
   sideFilter,
   categoryFilter,
   timeframeFilter,
@@ -247,7 +471,8 @@ function buildEmptyDiagnostics(assets, {
 }) {
   const q = query.trim().toUpperCase()
   const base = assets.filter(asset => asset.signalHunter)
-  const byStatus = base.filter(asset => filter === 'all' || asset.signalHunter.status === filter)
+  const byAiView = base.filter(asset => matchesAiView(asset, aiView, changedKeys, pinnedKeys))
+  const byStatus = byAiView.filter(asset => aiView !== 'all' || filter === 'all' || asset.signalHunter.status === filter)
   const bySide = byStatus.filter(asset => sideFilter === 'all' || asset.signalHunter.side === sideFilter)
   const byCategory = bySide.filter(asset => categoryFilter === 'all' || asset.type === categoryFilter)
   const byTimeframe = byCategory.filter(asset => timeframeFilter === 'all' || asset.signalHunter.timeframe === timeframeFilter)
@@ -277,11 +502,12 @@ function buildEmptyDiagnostics(assets, {
     return Number.isFinite(rewardRisk) && rewardRisk >= 1.5
   })
   const byQuality = byRewardRisk
-  const byQuery = byQuality.filter(asset => !q || asset.symbol.toUpperCase().includes(q))
+  const byQuery = byQuality.filter(asset => matchesSignalHunterQuery(asset, q))
   const byNew = byQuery.filter(asset => !showNewOnly || !seenKeys.has(signalSeenKey(asset)))
   const byDrift = byNew.filter(asset => !hideDrifted || showRejected || Math.abs(priceDriftPct(asset) ?? 0) < 3)
   return {
     ai: base.length,
+    aiView: byAiView.length,
     status: byStatus.length,
     side: bySide.length,
     category: byCategory.length,
@@ -335,6 +561,23 @@ async function copyText(text) {
 
 function loadSeenKeys() {
   return new Set(loadJson(SH_AI_SEEN_KEY, []))
+}
+
+function loadScoreThreshold() {
+  const value = Number(localStorage.getItem(SH_SCORE_THRESHOLD_KEY))
+  return Number.isFinite(value) ? value : 7
+}
+
+function saveScoreThreshold(value) {
+  localStorage.setItem(SH_SCORE_THRESHOLD_KEY, String(value))
+}
+
+function loadPinnedKeys() {
+  return new Set(loadJson(SH_AI_PINNED_KEY, []))
+}
+
+function loadProcessedKeys() {
+  return new Set(loadJson(SH_AI_PROCESSED_KEY, []))
 }
 
 function signalSeenKey(asset) {
@@ -395,18 +638,85 @@ function signalPlanText(asset) {
   ].join('\n')
 }
 
+function signalHunterHealth(aiRunMeta, aiSummary, aiExpired) {
+  if (!aiRunMeta || !aiSummary?.total) {
+    return { key: 'empty', label: '无结果', cls: 'muted', note: '还没有 AI 识别结果' }
+  }
+  if (aiExpired) {
+    return { key: 'expired', label: '过期', cls: 'warn', note: '建议重新识别' }
+  }
+  if ((aiRunMeta.live ?? 0) < 3 || aiSummary.total < 5) {
+    return { key: 'thin', label: '候选不足', cls: 'warn', note: '覆盖样本偏少' }
+  }
+  const weak = aiSummary.risk + aiSummary.rejected
+  if (aiSummary.total && weak / aiSummary.total >= 0.45) {
+    return { key: 'review', label: '需复核', cls: 'risk', note: '风险/剔除偏多' }
+  }
+  return { key: 'healthy', label: '健康', cls: 'good', note: '结果可用' }
+}
+
+function signalHunterReviewText(aiSummary, statusChanges) {
+  if (!aiSummary?.total) return '暂无 AI 结果，先运行一次 AI 识别。'
+  const changedUp = aiSummary.changedUp || 0
+  const changedDown = aiSummary.changedDown || 0
+  const tone = changedUp > changedDown ? '偏积极' : changedDown > changedUp ? '偏谨慎' : '中性'
+  return `本轮重点 ${aiSummary.focus} 个，待确认 ${aiSummary.pending} 个，风险 ${aiSummary.risk} 个，变强 ${changedUp} 个，变弱 ${changedDown} 个，整体 ${tone}。`
+}
+
+function signalHunterViewSummaryText({
+  rows,
+  aiView,
+  aiHealth,
+  aiReview,
+  statusChangeByKey,
+  pinnedKeys,
+  processedKeys,
+  aiDiff,
+  aiExpired,
+  filters,
+}) {
+  const picked = rows.slice(0, 12)
+  const header = [
+    `Signal Hunter 当前视图摘要 · ${new Date().toLocaleString('zh-CN')}`,
+    `视图: ${aiView} | 健康度: ${aiHealth.label} (${aiHealth.note})`,
+    `筛选: ${filters.category}/${filters.timeframe}/${filters.side} | ${filters.score}+ | ${filters.execution} | ${filters.sort}`,
+    `数量: ${picked.length}/${rows.length}`,
+    `小结: ${aiReview}`,
+  ].join('\n')
+  const body = picked.map((asset, index) => {
+    const sig = asset.signalHunter
+    const change = statusChangeByKey.get(signalHistoryKey(asset))
+    const next = nextStepText(asset, aiExpired)
+    const pinned = pinnedKeys?.has(signalPinnedKey(asset))
+    const processed = processedKeys?.has(signalPinnedKey(asset))
+    return [
+      `${index + 1}. ${pinned ? '[关注] ' : ''}${processed ? '[已处理] ' : ''}${asset.symbol} ${sig.timeframe} ${sideMeta(sig.side).label} · ${statusMeta(sig.status).label}`,
+      `下一步: ${next.label}${next.detail ? ` (${next.detail})` : ''}`,
+      change ? `变化: ${statusChangeText(change, sig.status)}` : null,
+      `评分: ${sig.score?.total ?? '-'}/10 | R: ${Number.isFinite(rewardRiskFallback(sig)) ? rewardRiskFallback(sig).toFixed(1) : '-'}`,
+      sig.riskFlags?.length ? `风险: ${sig.riskFlags.join(' / ')}` : null,
+    ].filter(Boolean).join('\n')
+  })
+  const diffLine = aiDiff
+    ? `对比上一轮: 新增 ${aiDiff.added?.length ?? 0} / 消失 ${aiDiff.removed?.length ?? 0} / 分数变化 ${aiDiff.scoreChanged?.length ?? 0}`
+    : ''
+  return [header, diffLine, ...body].filter(Boolean).join('\n\n')
+}
+
 export default function SignalHunterPage() {
   const assets = useMarketStore(s => s.assets)
   const updatedAt = useMarketStore(s => s.updatedAt)
   const applySignalHunterAiResults = useMarketStore(s => s.applySignalHunterAiResults)
+  const addFeedItems = useAlertStore(s => s.addFeedItems)
   const shAiInterval = useSettingsStore(s => s.shAiInterval ?? 30)
   const [filter, setFilter] = useState('all')
   const [sideFilter, setSideFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [timeframeFilter, setTimeframeFilter] = useState('all')
-  const [scoreThreshold, setScoreThreshold] = useState(7)
+  const [scoreThreshold, setScoreThresholdState] = useState(() => loadScoreThreshold())
   const [stockFocus, setStockFocus] = useState(true)
-  const [sortMode, setSortMode] = useState('execution')
+  const [sortMode, setSortMode] = useState('priority')
+  const [aiView, setAiView] = useState('all')
   const [executionFilter, setExecutionFilter] = useState('all')
   const [showRejected, setShowRejected] = useState(false)
   const [showNewOnly, setShowNewOnly] = useState(false)
@@ -418,11 +728,53 @@ export default function SignalHunterPage() {
   const [aiBusy, setAiBusy] = useState(false)
   const [aiStatus, setAiStatus] = useState('')
   const [aiRunMeta, setAiRunMeta] = useState(() => loadJson(SH_AI_CACHE_KEY, null)?.meta ?? null)
+  const [statusChanges, setStatusChanges] = useState(() => loadJson(SH_AI_CHANGES_KEY, []))
+  const [aiDiff, setAiDiff] = useState(() => loadJson(SH_AI_DIFF_KEY, { added: [], removed: [], scoreChanged: [], ts: 0 }))
   const [seenKeys, setSeenKeys] = useState(() => loadSeenKeys())
+  const [pinnedKeys, setPinnedKeys] = useState(() => loadPinnedKeys())
+  const [processedKeys, setProcessedKeys] = useState(() => loadProcessedKeys())
+  const [mergeBySymbol, setMergeBySymbol] = useState(false)
+  const [now, setNow] = useState(() => Date.now())
   const aiBusyRef = useRef(false)
   const lastAiSignatureRef = useRef('')
   const pendingAutoRef = useRef(false)
   const appliedCacheRef = useRef('')
+
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60 * 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const setScoreThreshold = (value) => {
+    const n = Number(value)
+    const next = Number.isFinite(n) ? Math.min(10, Math.max(0, n)) : 7
+    setScoreThresholdState(next)
+    saveScoreThreshold(next)
+  }
+
+  useEffect(() => {
+    const raw = localStorage.getItem(SH_FOCUS_KEY)
+    if (!raw) return
+    localStorage.removeItem(SH_FOCUS_KEY)
+    try {
+      const focus = JSON.parse(raw)
+      if (!focus?.symbol) return
+      setQuery(String(focus.symbol).toUpperCase())
+      setAiView('all')
+      setFilter('all')
+      setSideFilter('all')
+      setCategoryFilter('all')
+      setTimeframeFilter(focus.timeframe && ACTIONABLE_TIMEFRAMES.has(focus.timeframe) ? focus.timeframe : 'all')
+      setExecutionFilter('all')
+      setShowRejected(true)
+      setShowNewOnly(false)
+      setHideDrifted(false)
+      setMergeBySymbol(false)
+      setAiStatus(`已从 SH复盘定位 ${focus.symbol}；若列表为空，说明它不在当前 SH 快照或当前管理品种中。`)
+    } catch {
+      // ignore malformed focus payload
+    }
+  }, [])
 
   function markSeen(asset) {
     const key = signalSeenKey(asset)
@@ -477,6 +829,56 @@ export default function SignalHunterPage() {
     }
   }
 
+  function togglePinned(asset) {
+    const key = signalPinnedKey(asset)
+    setPinnedKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      saveJson(SH_AI_PINNED_KEY, [...next])
+      return next
+    })
+  }
+
+  function toggleProcessed(asset) {
+    const key = signalPinnedKey(asset)
+    setProcessedKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      saveJson(SH_AI_PROCESSED_KEY, [...next])
+      return next
+    })
+  }
+
+  const copyVisibleSummary = async () => {
+    if (!rows.length) return
+    try {
+      await copyText(signalHunterViewSummaryText({
+        rows,
+        aiView,
+        aiHealth,
+        aiReview,
+        statusChangeByKey,
+        pinnedKeys,
+        processedKeys,
+        aiDiff,
+        aiExpired,
+        filters: {
+          category: categoryFilter,
+          timeframe: timeframeFilter,
+          side: sideFilter,
+          score: scoreThreshold,
+          execution: executionFilter,
+          sort: sortMode,
+        },
+      }))
+      setAiStatus(`已复制当前视图摘要 ${Math.min(rows.length, 12)}/${rows.length}`)
+    } catch (err) {
+      setAiStatus(`复制失败：${err.message}`)
+    }
+  }
+
   const runAiSignalHunter = async ({ auto = false } = {}) => {
     if (!window.api?.runCodexScreen) return
     if (aiBusyRef.current) {
@@ -504,16 +906,31 @@ export default function SignalHunterPage() {
       const res = await window.api.runCodexScreen(payload)
       if (!res?.ok || !res.result) throw new Error(res?.parseError || res?.error || 'AI 未返回有效 JSON')
       const normalized = normalizeSignalHunterAiResults(res.result, assets)
+      const runAt = Date.now()
+      const previousItems = loadJson(SH_AI_CACHE_KEY, null)?.items ?? []
+      const changes = collectStatusChanges(previousItems, normalized, runAt)
+      const diff = collectAiDiff(previousItems, normalized, runAt)
       applySignalHunterAiResults(normalized)
+      const feedItems = makeSignalHunterAiFeedItems(normalized, Date.now())
+      if (feedItems.length) addFeedItems(feedItems)
       const live = normalized.filter(item => item.signalHunter?.status !== 'rejected').length
       const meta = {
-        runAt: Date.now(),
+        runAt,
         snapshotAt: updatedAt ?? Date.now(),
         total: normalized.length,
         live,
         candidateSignature: signature,
       }
       saveJson(SH_AI_CACHE_KEY, { meta, items: normalized })
+      saveJson(SH_AI_DIFF_KEY, diff)
+      setAiDiff(diff)
+      if (changes.length) {
+        setStatusChanges(prev => {
+          const next = [...changes, ...prev].slice(0, 100)
+          saveJson(SH_AI_CHANGES_KEY, next)
+          return next
+        })
+      }
       setAiRunMeta(meta)
       lastAiSignatureRef.current = signature
       setAiStatus(`AI 已写入 ${live}/${normalized.length} 个 SH 结果`)
@@ -550,30 +967,64 @@ export default function SignalHunterPage() {
     if (cached.meta?.candidateSignature) lastAiSignatureRef.current = cached.meta.candidateSignature
   }, [assets.length, applySignalHunterAiResults])
 
+  const statusChangeByKey = useMemo(() => new Map(statusChanges.map(change => [change.key, change])), [statusChanges])
+  const changedKeys = statusChangeByKey
+  const aiExpired = isSignalHunterAiExpired(aiRunMeta?.runAt, shAiInterval, now)
+
   const rows = useMemo(() => {
     const q = query.trim().toUpperCase()
-    return assets
+    const filtered = assets
       .filter(asset => asset.signalHunter)
-      .filter(asset => filter === 'all' || asset.signalHunter.status === filter)
+      .filter(asset => aiView !== 'all' || filter === 'all' || asset.signalHunter.status === filter)
+      .filter(asset => matchesAiView(asset, aiView, changedKeys, pinnedKeys))
+      .filter(asset => aiView !== 'focus' || !aiExpired)
       .filter(asset => sideFilter === 'all' || asset.signalHunter.side === sideFilter)
       .filter(asset => categoryFilter === 'all' || asset.type === categoryFilter)
       .filter(asset => timeframeFilter === 'all' || asset.signalHunter.timeframe === timeframeFilter)
-      .filter(asset => visibleSignal(asset, showRejected, scoreThreshold, livePriceOf(asset)))
-      .filter(asset => executionFilter === 'all' || executionMeta(asset).key === executionFilter)
+      .filter(asset => {
+        if (aiView === 'pinned' || aiView === 'risk' || aiView === 'rejected' || aiView === 'changed' || aiView === 'changed_up' || aiView === 'changed_down') {
+          return ACTIONABLE_TIMEFRAMES.has(asset.signalHunter.timeframe)
+        }
+        return visibleSignal(asset, showRejected, scoreThreshold, livePriceOf(asset))
+      })
+      .filter(asset => aiView !== 'all' || executionFilter === 'all' || executionMeta(asset).key === executionFilter)
       .filter(asset => !q || asset.symbol.toUpperCase().includes(q))
       .filter(asset => !showNewOnly || !seenKeys.has(signalSeenKey(asset)))
       .filter(asset => !hideDrifted || showRejected || Math.abs(priceDriftPct(asset) ?? 0) < 3)
       .sort((a, b) => {
+        if (aiView === 'changed') {
+          const changeDelta = (statusChangeByKey.get(signalHistoryKey(b))?.ts ?? 0) - (statusChangeByKey.get(signalHistoryKey(a))?.ts ?? 0)
+          if (changeDelta) return changeDelta
+        }
         const newDelta = Number(!seenKeys.has(signalSeenKey(b))) - Number(!seenKeys.has(signalSeenKey(a)))
         if (newDelta) return newDelta
         const driftDelta = Number(Math.abs(priceDriftPct(a) ?? 0) >= 1.5) - Number(Math.abs(priceDriftPct(b) ?? 0) >= 1.5)
         if (driftDelta) return driftDelta
+        if (sortMode === 'ai') {
+          const aiRank = asset => {
+            const status = asset.signalHunter?.status
+            if (status === 'risk') return 0
+            if (status === 'triggered') return 1
+            if (status === 'armed' || status === 'wait_entry' || status === 'wait_confirm') return 2
+            if (status === 'watch') return 3
+            if (status === 'rejected') return 5
+            return 4
+          }
+          const aiDelta = aiRank(a) - aiRank(b)
+          if (aiDelta) return aiDelta
+          const aiScoreDelta = (b.signalHunter?.score?.total ?? 0) - (a.signalHunter?.score?.total ?? 0)
+          if (aiScoreDelta) return aiScoreDelta
+          const aiRRDelta = (rewardRiskFallback(b.signalHunter) ?? 0) - (rewardRiskFallback(a.signalHunter) ?? 0)
+          if (aiRRDelta) return aiRRDelta
+          return absDistanceToEntry(a) - absDistanceToEntry(b)
+        }
+        if (sortMode === 'priority') return signalPriority(b) - signalPriority(a)
         if (sortMode === 'entry') return absDistanceToEntry(a) - absDistanceToEntry(b)
         const sa = a.signalHunter?.score?.total ?? 0
         const sb = b.signalHunter?.score?.total ?? 0
         if (sortMode === 'score') {
           if (sb !== sa) return sb - sa
-          return absDistanceToEntry(a) - absDistanceToEntry(b)
+          return signalPriority(b) - signalPriority(a)
         }
         if (stockFocus) {
           const rank = asset => asset.type === 'stock' ? 0 : asset.type === 'tradfi' ? 1 : 2
@@ -586,14 +1037,19 @@ export default function SignalHunterPage() {
         if (statusDelta) return statusDelta
         const entryDelta = absDistanceToEntry(a) - absDistanceToEntry(b)
         if (Math.abs(entryDelta) > 0.25) return entryDelta
+        const priorityDelta = signalPriority(b) - signalPriority(a)
+        if (priorityDelta) return priorityDelta
         if (sb !== sa) return sb - sa
         return (rewardRiskFallback(b.signalHunter) ?? 0) - (rewardRiskFallback(a.signalHunter) ?? 0)
       })
-      .slice(0, 120)
-  }, [assets, filter, sideFilter, categoryFilter, timeframeFilter, scoreThreshold, stockFocus, sortMode, executionFilter, showRejected, query, showNewOnly, hideDrifted, seenKeys])
+    return (mergeBySymbol ? dedupeSignalRows(filtered) : filtered).slice(0, 120)
+  }, [assets, filter, sideFilter, categoryFilter, timeframeFilter, scoreThreshold, stockFocus, sortMode, aiView, executionFilter, showRejected, query, showNewOnly, hideDrifted, seenKeys, changedKeys, pinnedKeys, statusChangeByKey, aiExpired, mergeBySymbol])
 
   const emptyDiagnostics = useMemo(() => buildEmptyDiagnostics(assets, {
     filter,
+    aiView,
+    changedKeys,
+    pinnedKeys,
     sideFilter,
     categoryFilter,
     timeframeFilter,
@@ -603,7 +1059,7 @@ export default function SignalHunterPage() {
     showNewOnly,
     hideDrifted,
     seenKeys,
-  }), [assets, filter, sideFilter, categoryFilter, timeframeFilter, scoreThreshold, showRejected, query, showNewOnly, hideDrifted, seenKeys])
+  }), [assets, filter, aiView, changedKeys, pinnedKeys, sideFilter, categoryFilter, timeframeFilter, scoreThreshold, showRejected, query, showNewOnly, hideDrifted, seenKeys])
 
   const newVisibleCount = useMemo(
     () => rows.filter(asset => !seenKeys.has(signalSeenKey(asset))).length,
@@ -619,10 +1075,30 @@ export default function SignalHunterPage() {
     })
   }
 
+  const markVisibleProcessed = () => {
+    setProcessedKeys(prev => {
+      const next = new Set(prev)
+      for (const asset of rows) next.add(signalPinnedKey(asset))
+      saveJson(SH_AI_PROCESSED_KEY, [...next])
+      return next
+    })
+    setAiStatus(`已标记当前视图 ${rows.length} 条为已处理`)
+  }
+
+  const clearStatusChanges = () => {
+    saveJson(SH_AI_CHANGES_KEY, [])
+    setStatusChanges([])
+    if (aiView === 'changed' || aiView === 'changed_up' || aiView === 'changed_down') setAiView('all')
+  }
+
   const clearAiCache = () => {
     saveJson(SH_AI_CACHE_KEY, null)
     saveJson(SH_AI_SEEN_KEY, [])
+    saveJson(SH_AI_CHANGES_KEY, [])
+    saveJson(SH_AI_DIFF_KEY, { added: [], removed: [], scoreChanged: [], ts: 0 })
     setAiRunMeta(null)
+    setStatusChanges([])
+    setAiDiff({ added: [], removed: [], scoreChanged: [], ts: 0 })
     setSeenKeys(new Set())
     lastAiSignatureRef.current = ''
     appliedCacheRef.current = ''
@@ -636,11 +1112,13 @@ export default function SignalHunterPage() {
     setTimeframeFilter('all')
     setScoreThreshold(7)
     setStockFocus(true)
-    setSortMode('execution')
+    setSortMode('priority')
+    setAiView('all')
     setExecutionFilter('all')
     setShowRejected(false)
     setShowNewOnly(false)
     setHideDrifted(false)
+    setMergeBySymbol(false)
     setQuery('')
   }
 
@@ -655,6 +1133,34 @@ export default function SignalHunterPage() {
       avgScore: all.length ? (scoreSum / all.length).toFixed(1) : '-',
     }
   }, [assets, scoreThreshold])
+
+  const aiSummary = useMemo(() => {
+    const all = assets.filter(asset => asset.signalHunter)
+    const count = status => all.filter(asset => asset.signalHunter?.status === status).length
+    return {
+      total: all.length,
+      pinned: all.filter(asset => pinnedKeys.has(signalPinnedKey(asset))).length,
+      actionable: all.filter(asset => matchesAiView(asset, 'actionable')).length,
+      focus: count('triggered'),
+      risk: count('risk'),
+      pending: count('armed') + count('wait_entry') + count('wait_confirm'),
+      watch: count('watch'),
+      rejected: count('rejected'),
+      changed: all.filter(asset => changedKeys.has(signalHistoryKey(asset))).length,
+      changedUp: all.filter(asset => matchesAiView(asset, 'changed_up', changedKeys)).length,
+      changedDown: all.filter(asset => matchesAiView(asset, 'changed_down', changedKeys)).length,
+    }
+  }, [assets, changedKeys, pinnedKeys])
+
+  const aiHealth = useMemo(() => signalHunterHealth(aiRunMeta, aiSummary, aiExpired), [aiRunMeta, aiSummary, aiExpired])
+  const aiReview = useMemo(() => signalHunterReviewText(aiSummary, statusChanges), [aiSummary, statusChanges])
+
+  const selectAiView = view => {
+    setAiView(view)
+    setFilter('all')
+    setExecutionFilter('all')
+    setSortMode('ai')
+  }
 
   return (
     <div className="page signal-hunter-page">
@@ -672,13 +1178,60 @@ export default function SignalHunterPage() {
         </div>
       </div>
 
+      <div className="signal-hunter-ai-summary signal-hunter-ai-summary-priority">
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-all ${aiView === 'all' ? 'active' : ''}`} onClick={() => selectAiView('all')}>
+          <b>{aiSummary.total}</b>
+          <span>AI全部</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-pinned ${aiView === 'pinned' ? 'active' : ''}`} onClick={() => selectAiView('pinned')}>
+          <b>{aiSummary.pinned}</b>
+          <span>关注</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-actionable ${aiView === 'actionable' ? 'active' : ''}`} onClick={() => selectAiView('actionable')}>
+          <b>{aiSummary.actionable}</b>
+          <span>可执行</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-focus ${aiView === 'focus' ? 'active' : ''}`} onClick={() => selectAiView('focus')}>
+          <b>{aiSummary.focus}</b>
+          <span>重点</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-risk ${aiView === 'risk' ? 'active' : ''}`} onClick={() => selectAiView('risk')}>
+          <b>{aiSummary.risk}</b>
+          <span>风险</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-pending ${aiView === 'pending' ? 'active' : ''}`} onClick={() => selectAiView('pending')}>
+          <b>{aiSummary.pending}</b>
+          <span>待确认</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-watch ${aiView === 'watch' ? 'active' : ''}`} onClick={() => selectAiView('watch')}>
+          <b>{aiSummary.watch}</b>
+          <span>观察</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-rejected ${aiView === 'rejected' ? 'active' : ''}`} onClick={() => selectAiView('rejected')}>
+          <b>{aiSummary.rejected}</b>
+          <span>剔除</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-changed ${aiView === 'changed' ? 'active' : ''}`} onClick={() => selectAiView('changed')}>
+          <b>{aiSummary.changed}</b>
+          <span>变化</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-changed-up ${aiView === 'changed_up' ? 'active' : ''}`} onClick={() => selectAiView('changed_up')}>
+          <b>{aiSummary.changedUp}</b>
+          <span>变强</span>
+        </button>
+        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-changed-down ${aiView === 'changed_down' ? 'active' : ''}`} onClick={() => selectAiView('changed_down')}>
+          <b>{aiSummary.changedDown}</b>
+          <span>变弱</span>
+        </button>
+      </div>
+
       <div className="signal-hunter-controls">
         <div className="feed-type-btns">
           {FILTERS.map(item => (
             <button
               key={item.key}
               className={`feed-type-btn ${filter === item.key ? 'active' : ''}`}
-              onClick={() => setFilter(item.key)}
+              onClick={() => { setAiView('all'); setFilter(item.key) }}
             >
               {item.label}
             </button>
@@ -728,11 +1281,28 @@ export default function SignalHunterPage() {
             </button>
           ))}
         </div>
+        <label className="signal-hunter-score-control">
+          <span>最低评分 ≥</span>
+          <input
+            type="number"
+            min="0"
+            max="10"
+            step="0.1"
+            value={scoreThreshold}
+            onChange={e => setScoreThreshold(e.target.value)}
+          />
+        </label>
         <button
           className={`feed-type-btn ${stockFocus ? 'active' : ''}`}
           onClick={() => setStockFocus(v => !v)}
         >
           Stock Focus
+        </button>
+        <button
+          className={`feed-type-btn ${mergeBySymbol ? 'active' : ''}`}
+          onClick={() => setMergeBySymbol(v => !v)}
+        >
+          按标的合并
         </button>
         <div className="feed-type-btns">
           {SORT_MODES.map(item => (
@@ -750,19 +1320,12 @@ export default function SignalHunterPage() {
             <button
               key={item.key}
               className={`feed-type-btn ${executionFilter === item.key ? 'active' : ''}`}
-              onClick={() => setExecutionFilter(item.key)}
+              onClick={() => { setAiView('all'); setExecutionFilter(item.key) }}
             >
               {item.label}
             </button>
           ))}
         </div>
-        <input
-          type="search"
-          className="search-input signal-hunter-search"
-          placeholder="搜索品种..."
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-        />
         <label className="signal-hunter-debug">
           <input
             type="checkbox"
@@ -780,8 +1343,14 @@ export default function SignalHunterPage() {
         <button className="feed-type-btn" onClick={markVisibleSeen} disabled={!rows.length}>
           标记已看
         </button>
+        <button className="feed-type-btn" onClick={markVisibleProcessed} disabled={!rows.length}>
+          标记已处理
+        </button>
         <button className="feed-type-btn" onClick={copyVisiblePlans} disabled={!rows.length}>
           复制前10
+        </button>
+        <button className="feed-type-btn" onClick={copyVisibleSummary} disabled={!rows.length}>
+          复制摘要
         </button>
         <button
           className={`feed-type-btn ${hideDrifted ? 'active' : ''}`}
@@ -795,10 +1364,15 @@ export default function SignalHunterPage() {
         <button className="feed-type-btn" onClick={clearAiCache}>
           清缓存
         </button>
-        <button className="zone-btn signal-hunter-ai-btn" onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
+        <button className={`zone-btn signal-hunter-ai-btn ${aiExpired ? 'signal-hunter-ai-main-btn' : ''}`} onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
           {aiBusy ? 'AI识别中' : 'AI识别SH'}
         </button>
         {aiStatus && <span className="signal-hunter-ai-status">{aiStatus}</span>}
+      </div>
+
+      <div className="signal-hunter-ai-insight">
+        <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI健康 {aiHealth.label}</span>
+        <span>{aiReview}</span>
       </div>
 
       {aiRunMeta && (
@@ -806,8 +1380,28 @@ export default function SignalHunterPage() {
           <span>AI识别 {formatAiTime(aiRunMeta.runAt)}</span>
           <span>行情快照 {formatAiTime(aiRunMeta.snapshotAt)}</span>
           <span>写入 {aiRunMeta.live}/{aiRunMeta.total}</span>
+          <span>已处理 {processedKeys.size}</span>
+          <span>新增 {aiDiff.added?.length ?? 0} / 消失 {aiDiff.removed?.length ?? 0} / 分数变 {aiDiff.scoreChanged?.length ?? 0}</span>
+          {aiExpired && <span className="signal-hunter-ai-expired-meta">AI结果已过期，建议重新识别</span>}
+          {statusChanges.length > 0 && <span>状态变化 {statusChanges.length}</span>}
+          {statusChanges.length > 0 && <button type="button" onClick={clearStatusChanges}>清变化</button>}
         </div>
       )}
+
+      <div className="signal-hunter-table-tools">
+        <div className="signal-hunter-table-search">
+          <span>表格搜索</span>
+          <input
+            type="search"
+            className="search-input signal-hunter-search"
+            placeholder="搜索代码 / 形态 / 状态 / 风险..."
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+          />
+          {query && <button className="feed-type-btn" onClick={() => setQuery('')}>清除</button>}
+        </div>
+        <span className="signal-hunter-table-count">当前 {rows.length} / AI结果 {aiSummary.total}</span>
+      </div>
 
       <div className="signal-hunter-table-wrap">
         <table className="stats-table signal-hunter-table">
@@ -834,7 +1428,7 @@ export default function SignalHunterPage() {
                 <td colSpan={13} className="ai-empty">
                   <div>暂无 Signal Hunter 候选。刷新行情或等待下一次 AI 自动识别后会重新写入。</div>
                   <div className="signal-hunter-empty-diag">
-                    <span>AI结果 {emptyDiagnostics.ai}</span>
+                    <span>AI结果 {emptyDiagnostics.aiView}/{emptyDiagnostics.ai}</span>
                     <span>状态 {emptyDiagnostics.status}</span>
                     <span>方向 {emptyDiagnostics.side}</span>
                     <span>类别 {emptyDiagnostics.category}</span>
@@ -859,6 +1453,7 @@ export default function SignalHunterPage() {
               const t2 = targetFallback(sig, 2)
               const t3 = targetFallback(sig, 3)
               const rewardRisk = rewardRiskFallback(sig)
+              const priority = signalPriority(asset)
               const entryPrice = entryPriceOf(sig)
               const confirmPrice = confirmPriceOf(sig)
               const livePrice = livePriceOf(asset)
@@ -868,18 +1463,40 @@ export default function SignalHunterPage() {
               const distanceToEntry = distanceToEntryOf(sig, livePrice)
               const rejected = sig.rejected || sig.status === 'rejected'
               const isNew = !seenKeys.has(signalSeenKey(asset))
+              const isPinned = pinnedKeys.has(signalPinnedKey(asset))
+              const isProcessed = processedKeys.has(signalPinnedKey(asset))
               const exec = executionMeta(asset)
+              const expired = aiExpired
+              const statusChange = statusChangeByKey.get(signalHistoryKey(asset))
+              const addedDiff = diffByKey(aiDiff, 'added').get(signalHistoryKey(asset))
+              const scoreDiff = diffByKey(aiDiff, 'scoreChanged').get(signalHistoryKey(asset))
+              const rowClasses = [
+                'signal-hunter-row',
+                sig.status === 'risk' ? 'signal-hunter-row-risk' : '',
+                sig.status === 'triggered' ? 'signal-hunter-row-focus' : '',
+                expired ? 'signal-hunter-row-expired' : '',
+              ].filter(Boolean).join(' ')
+              const indexClasses = [
+                'signal-hunter-index',
+                'signal-hunter-priority-index',
+                sig.status === 'risk' ? 'signal-hunter-row-risk' : '',
+                sig.status === 'triggered' ? 'signal-hunter-row-focus' : '',
+                expired ? 'signal-hunter-row-expired' : '',
+              ].filter(Boolean).join(' ')
+              const nextStep = nextStepText(asset, expired)
+              const changeText = statusChangeText(statusChange, sig.status)
+              const changeDirection = statusChangeDirection(statusChange, sig.status)
               return (
                 <>
                   <tr
                     key={key}
-                    className="signal-hunter-row"
+                    className={rowClasses}
                     onClick={() => {
                       setExpanded(expanded === key ? null : key)
                     }}
                     onDoubleClick={() => openChart(asset)}
                   >
-                    <td className="signal-hunter-index">{index + 1}</td>
+                    <td className={indexClasses}>{index + 1}</td>
                     <td>
                       <button className="symbol-link-btn" onClick={e => {
                         e.stopPropagation()
@@ -888,6 +1505,8 @@ export default function SignalHunterPage() {
                         {asset.symbol}
                       </button>
                       <span className={`badge badge-${asset.type}`}>{categoryBadge(asset)}</span>
+                      {isPinned && <span className="signal-hunter-pin-badge">关注</span>}
+                      {isProcessed && <span className="signal-hunter-processed-badge">已处理</span>}
                       {isNew && <span className="signal-hunter-new-badge">新</span>}
                       {stale && <span className="signal-hunter-stale-badge">漂</span>}
                       <small>{formatTurnover(getQuoteVolume(asset))}</small>
@@ -895,6 +1514,10 @@ export default function SignalHunterPage() {
                     <td>
                       <span className={`signal-hunter-status ${meta.cls}`}>{meta.label}</span>
                       <span className={`signal-hunter-exec ${exec.cls}`}>{exec.label}</span>
+                      {expired && <span className="signal-hunter-expired-badge">过期</span>}
+                      {addedDiff && <span className="signal-hunter-added-badge">新增</span>}
+                      {scoreDiff && <span className={`signal-hunter-score-change-badge ${scoreDiff.to > scoreDiff.from ? 'up' : 'down'}`}>{scoreDiff.from.toFixed(1)}→{scoreDiff.to.toFixed(1)}</span>}
+                      {statusChange && <span className={`signal-hunter-change-badge ${changeDirection}`} title={changeText}>{changeText}</span>}
                     </td>
                     <td><span className={`signal-hunter-side ${side.cls}`}>{side.label}</span></td>
                     <td>{sig.timeframe}</td>
@@ -906,6 +1529,7 @@ export default function SignalHunterPage() {
                     <td className={distanceToEntry <= 0 ? 'pos' : ''}>{fmtPct(distanceToEntry)}</td>
                     <td>
                       <div className={`signal-hunter-score ${scoreClass(sig.score.total)}`}>{sig.score.total}/10</div>
+                      <div className="signal-hunter-priority-score">优 {priority}</div>
                       <div className="signal-hunter-factors">
                         <span>图 {sig.score.chart}/10</span>
                         <span>数 {sig.score.data}/10</span>
@@ -927,18 +1551,10 @@ export default function SignalHunterPage() {
                       <small>形态 {sig.setupLabel || setupLabel(sig.setup)} <span className="muted">{rewardRisk ? `${rewardRisk.toFixed(1)}R` : ''}</span></small>
                     </td>
                     <td>
-                      {sig.riskFlags?.length ? (
+                      {riskItems(asset, stale, drift).length ? (
                         <div className="signal-hunter-risks">
-                          {stale && <span>价格漂移 {fmtPct(drift)}</span>}
-                          {sig.riskFlags.map(flag => <span key={flag}>{flag}</span>)}
+                          {riskItems(asset, stale, drift).map(item => <span className={item.grade} key={item.text}>{item.grade === 'hard' ? '硬' : '软'} · {item.text}</span>)}
                         </div>
-                      ) : sig.rejectReasons?.length ? (
-                        <div className="signal-hunter-risks">
-                          {stale && <span>价格漂移 {fmtPct(drift)}</span>}
-                          {sig.rejectReasons.map(reason => <span key={reason}>{reason}</span>)}
-                        </div>
-                      ) : stale ? (
-                        <div className="signal-hunter-risks"><span>价格漂移 {fmtPct(drift)}</span></div>
                       ) : <span className="muted">-</span>}
                     </td>
                     <td>
@@ -947,6 +1563,10 @@ export default function SignalHunterPage() {
                       </div>
                     </td>
                     <td>
+                      <div className={`signal-hunter-next-step ${expired ? 'expired' : exec.key}`}>
+                        <b>{nextStep.label}</b>
+                        {nextStep.detail && <small>{nextStep.detail}</small>}
+                      </div>
                       <div className="signal-hunter-actions">
                         <button className="zone-btn" onClick={e => {
                           e.stopPropagation()
@@ -957,6 +1577,18 @@ export default function SignalHunterPage() {
                           copyPlan(asset)
                         }}>
                           复制
+                        </button>
+                        <button className="zone-btn" onClick={e => {
+                          e.stopPropagation()
+                          togglePinned(asset)
+                        }}>
+                          {isPinned ? '取消关注' : '关注'}
+                        </button>
+                        <button className="zone-btn" onClick={e => {
+                          e.stopPropagation()
+                          toggleProcessed(asset)
+                        }}>
+                          {isProcessed ? '取消处理' : '已处理'}
                         </button>
                         <button className="zone-btn" onClick={e => {
                           e.stopPropagation()
@@ -1019,15 +1651,32 @@ export default function SignalHunterPage() {
                             <section>
                               <b>风险标记</b>
                               <div className="signal-hunter-risks">
-                                {stale && <span>价格漂移 {fmtPct(drift)}</span>}
-                                {sig.riskFlags?.map(flag => <span key={flag}>{flag}</span>)}
-                                {!stale && !sig.riskFlags?.length && <em>暂无额外风险标记</em>}
+                                {riskItems(asset, stale, drift).map(item => <span className={item.grade} key={item.text}>{item.grade === 'hard' ? '硬' : '软'} · {item.text}</span>)}
+                                {!riskItems(asset, stale, drift).length && <em>暂无额外风险标记</em>}
                               </div>
+                            </section>
+                            <section>
+                              <b>上一轮对比</b>
+                              <span>{addedDiff ? '本轮新增' : '本轮延续'}</span>
+                              <span>{scoreDiff ? `评分 ${scoreDiff.from.toFixed(1)} → ${scoreDiff.to.toFixed(1)}` : '评分无明显变化'}</span>
+                              <span>{statusChange ? `状态 ${changeText}` : '状态无变化'}</span>
                             </section>
                             <section>
                               <b>判定依据</b>
                               <span>{sig.reasons?.length ? sig.reasons.join(' / ') : '-'}</span>
                               <span>{rejected ? `剔除：${sig.rejectReasons?.join(' / ') || '-'}` : '通过：位置、评分、R 值均达标'}</span>
+                            </section>
+                            <section>
+                              <b>AI判断路径</b>
+                              <span>状态 {statusChange ? changeText : meta.label} · 执行 {exec.label}</span>
+                              <span>下一步 {nextStep.label}{nextStep.detail ? ` · ${nextStep.detail}` : ''}</span>
+                              <span>方向 {side.label} · 结构 {sig.setupLabel || setupLabel(sig.setup)}</span>
+                            </section>
+                            <section>
+                              <b>观察点</b>
+                              <span>确认 {formatPrice(confirmPrice)} · 入场 {rejected ? '-' : formatPrice(entryPrice)}</span>
+                              <span>失效 {formatPrice(sig.stopLoss)} · 距入场 {fmtPct(distanceToEntry)}</span>
+                              <span>{sig.riskFlags?.length ? `先排除：${sig.riskFlags.join(' / ')}` : rejected ? `剔除原因：${sig.rejectReasons?.join(' / ') || '-'}` : '未出现额外风险标记'}</span>
                             </section>
                           </div>
                         </div>

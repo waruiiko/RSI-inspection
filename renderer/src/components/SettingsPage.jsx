@@ -13,6 +13,11 @@ const RSI_MA_LENGTHS = [5, 9, 14, 21]
 const RSI_BB_MULTS = [1.5, 2.0, 2.5, 3.0]
 const LEVEL_OPTIONS = [1, 2, 3]
 const RSI_SENS_OPTIONS = ['strict', 'standard', 'loose']
+const THEME_OPTIONS = [
+  { key: 'system', label: '系统' },
+  { key: 'light', label: '浅色' },
+  { key: 'dark', label: '深色' },
+]
 const RSI_SENS_LABELS = {
   strict: '严格',
   standard: '标准',
@@ -60,6 +65,19 @@ function Toggle({ checked, onChange, disabled }) {
   )
 }
 
+function ThemePreview({ mode, active, onClick }) {
+  return (
+    <button className={`theme-preview-card ${mode.key} ${active ? 'active' : ''}`} onClick={onClick}>
+      <div className="theme-preview-art">
+        <span />
+        <span />
+        <span />
+      </div>
+      <strong>{mode.label}</strong>
+    </button>
+  )
+}
+
 export default function SettingsPage() {
   const {
     refreshInterval, alertCooldown, popupEnabled, soundEnabled,
@@ -70,6 +88,7 @@ export default function SettingsPage() {
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook, codexCliPath,
     autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, shAiInterval, watchPoolRetentionDays,
+    themeMode,
     update,
   } = useSettingsStore()
   const statusEvents = useMarketStore(s => s.statusEvents)
@@ -153,11 +172,43 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.1.2
+          v1.1.3
         </span>
       </div>
 
       <div className="settings-body">
+        <div className="settings-section settings-appearance-section">
+          <SectionTitle>外观</SectionTitle>
+
+          <div className="theme-preview-grid">
+            {THEME_OPTIONS.map(mode => (
+              <ThemePreview
+                key={mode.key}
+                mode={mode}
+                active={(themeMode || 'light') === mode.key}
+                onClick={() => update('themeMode', mode.key)}
+              />
+            ))}
+          </div>
+
+          <div className="theme-code-preview">
+            <div><span>1</span><code>const themePreview: ThemeConfig = {'{'}</code></div>
+            <div className="removed"><span>2</span><code>surface: "sidebar",</code></div>
+            <div className="removed"><span>3</span><code>accent: "#2563eb",</code></div>
+            <div className="added"><span>2</span><code>surface: "sidebar-elevated",</code></div>
+            <div className="added"><span>3</span><code>accent: "#339cff",</code></div>
+            <div><span>4</span><code>{'}'};</code></div>
+          </div>
+
+          <div className="theme-config-table">
+            <div><span>当前主题</span><b>{THEME_OPTIONS.find(mode => mode.key === (themeMode || 'light'))?.label ?? '浅色'}</b></div>
+            <div><span>强调色</span><b className="theme-color-pill blue">#339CFF</b></div>
+            <div><span>背景</span><b className="theme-color-pill white">#FFFFFF</b></div>
+            <div><span>前景</span><b className="theme-color-pill dark">#1A1C1F</b></div>
+            <div><span>UI 字体</span><b>-apple-system, BlinkMacSystemFont</b></div>
+          </div>
+        </div>
+
         <div className="settings-section">
           <SectionTitle>系统</SectionTitle>
 

@@ -254,3 +254,72 @@ export function normalizeSignalHunterAiResults(aiResult, assets) {
     return { key: assetKey(asset), symbol: asset.symbol, signalHunter: sig }
   }).filter(Boolean)
 }
+
+function signalHunterAiCondition(sig) {
+  if (sig.status === 'risk') return 'risk'
+  if (sig.status === 'triggered') return 'focus'
+  return 'watch'
+}
+
+function signalHunterAiNextCheck(sig) {
+  if (sig.status === 'risk') return '优先回避，等待风险解除'
+  if (sig.status === 'triggered') return '重点盯住 1h / 4h 的确认和回踩'
+  if (sig.status === 'armed' || sig.status === 'wait_entry') return '继续观察入场距离和结构变化'
+  return '保持观察，等待下一次结构确认'
+}
+
+function signalHunterAiRisk(sig) {
+  const flags = Array.isArray(sig.riskFlags) ? sig.riskFlags.filter(Boolean) : []
+  if (flags.length) return flags[0]
+  const rejects = Array.isArray(sig.rejectReasons) ? sig.rejectReasons.filter(Boolean) : []
+  if (rejects.length) return rejects[0]
+  return sig.narrativeSummary?.trim() || ''
+}
+
+export function signalHunterAiAlertKey(item) {
+  const sig = item?.signalHunter ?? {}
+  return [
+    item?.symbol ?? '',
+    sig.side ?? '',
+    sig.timeframe ?? '',
+    sig.status ?? '',
+    sig.setupLabel ?? sig.setup ?? '',
+  ].join('|')
+}
+
+export function makeSignalHunterAiFeedItems(items, now = Date.now()) {
+  return (items ?? [])
+    .map(item => {
+      const sig = item?.signalHunter
+      if (!sig || sig.status === 'rejected') return null
+      const score = Number(sig.score?.total ?? 0)
+      if (sig.status !== 'risk' && sig.status !== 'triggered' && score < 7) return null
+
+      const condition = signalHunterAiCondition(sig)
+      if (condition === 'watch') return null
+      return {
+        id: `signal-hunter-ai-${item.symbol}-${now}`,
+        ts: now,
+        symbol: item.symbol,
+        type: 'signal_hunter_ai',
+        alertKey: signalHunterAiAlertKey(item),
+        condition,
+        value: score,
+        price: sig.currentPrice ?? null,
+        level: sig.status === 'risk' ? 3 : sig.status === 'triggered' ? 2 : 1,
+        special: sig.status === 'risk' || sig.status === 'triggered',
+        status: sig.status,
+        side: sig.side,
+        timeframe: sig.timeframe,
+        signal: sig.setupLabel || sig.setup || 'Signal Hunter AI',
+        reason: sig.narrativeSummary || sig.reasons?.[0] || `AI ${sig.status}`,
+        risk: signalHunterAiRisk(sig),
+        nextCheck: signalHunterAiNextCheck(sig),
+        entryPrice: sig.entryPrice ?? null,
+        stopLoss: sig.stopLoss ?? null,
+        rewardRisk: sig.rewardRisk ?? null,
+        score: sig.score?.total ?? null,
+      }
+    })
+    .filter(Boolean)
+}

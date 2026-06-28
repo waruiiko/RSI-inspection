@@ -1,10 +1,11 @@
-import { lazy, Suspense, useDeferredValue, useEffect, useRef, useState, useMemo } from 'react'
+﻿import { lazy, Suspense, useDeferredValue, useEffect, useRef, useState, useMemo } from 'react'
 import useMarketStore   from './store/marketStore'
 import useAlertStore    from './store/alertStore'
 import useSettingsStore from './store/settingsStore'
 import useGroupsStore   from './store/groupsStore'
 import useSignalTrailStore from './store/signalTrailStore'
 import useWatchPoolStore from './store/watchPoolStore'
+import useSignalReviewStore from './store/signalReviewStore'
 import { isUSMarketOpen } from './utils/marketHours'
 import { playAlertSound } from './utils/sound'
 import { sendWebhooks }  from './utils/webhook'
@@ -17,12 +18,14 @@ const Heatmap = lazy(() => import('./components/Heatmap'))
 const StatsTable = lazy(() => import('./components/StatsTable'))
 const ManagePage = lazy(() => import('./components/ManagePage'))
 const AlertPage = lazy(() => import('./components/AlertPage'))
+const AlertEventPage = lazy(() => import('./components/AlertEventPage'))
 const AlertFeed = lazy(() => import('./components/AlertFeed'))
 const SettingsPage = lazy(() => import('./components/SettingsPage'))
 const AiPage = lazy(() => import('./components/AiPage'))
 const SignalTrailPage = lazy(() => import('./components/SignalTrailPage'))
 const AiReviewPage = lazy(() => import('./components/AiReviewPage'))
 const LaunchReviewPage = lazy(() => import('./components/LaunchReviewPage'))
+const SignalReviewPage = lazy(() => import('./components/SignalReviewPage'))
 const MarketChatPage = lazy(() => import('./components/MarketChatPage'))
 const WatchPoolPage = lazy(() => import('./components/WatchPoolPage'))
 const OpportunityPage = lazy(() => import('./components/OpportunityPage'))
@@ -357,7 +360,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.1.2'
+const APP_VERSION = 'v1.1.3'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
@@ -512,7 +515,7 @@ export default function App() {
     webhookAiOnly,
     observationEnabled, rsiSensitivity, startupStateAlerts,
     autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay,
-    watchPoolRetentionDays,
+    watchPoolRetentionDays, themeMode,
     loaded: settingsLoaded, load: loadSettings,
   } = useSettingsStore()
 
@@ -533,6 +536,18 @@ export default function App() {
   const watchPoolReviewRef = useRef({})
   const backgroundScanRef = useRef({ slowRsiAt: 0, watchPoolAt: 0 })
   const startupReportRef = useRef(false)
+  useEffect(() => {
+    const applyTheme = () => {
+      const systemDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches
+      const resolved = themeMode === 'system' ? (systemDark ? 'dark' : 'light') : (themeMode || 'light')
+      document.documentElement.dataset.theme = resolved
+    }
+    applyTheme()
+    if (themeMode !== 'system' || !window.matchMedia) return
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    media.addEventListener?.('change', applyTheme)
+    return () => media.removeEventListener?.('change', applyTheme)
+  }, [themeMode])
   const appStartedAtRef = useRef(Date.now())
   configsRef.current  = configs
   assetsRef.current   = assets
@@ -555,6 +570,8 @@ export default function App() {
 
   const loadGroups = useGroupsStore(s => s.load)
   const updateSignalTrail = useSignalTrailStore(s => s.updateFromAssets)
+  const syncSignalReviews = useSignalReviewStore(s => s.syncFromAssets)
+  const updateSignalReviews = useSignalReviewStore(s => s.updateFromAssets)
 
   useEffect(() => {
     loadSettings()
@@ -631,6 +648,7 @@ export default function App() {
     const marketOpen = isUSMarketOpen()
     const margin = rsiMargin(alertModeRef.current.rsiSensitivity)
     const observationOn = alertModeRef.current.observationEnabled
+    const legacyAlertsEnabled = false
     if (completedMeta?.scope === 'startup-full' && !startupReportRef.current) {
       const report = buildStartupHealthReport(assetsRef.current, '4h')
       if (report) fired.push(report)
@@ -831,6 +849,8 @@ export default function App() {
 
     prevAssetsRef.current = [...assetsRef.current]
 
+    if (!legacyAlertsEnabled) fired.length = 0
+
     if (fired.length > 0) {
       addFeedItems(fired)
       const silent = isSilentHours(silentRef.current.start, silentRef.current.end)
@@ -954,7 +974,9 @@ export default function App() {
   useEffect(() => {
     if (!completedAt || !assets.length) return
     updateSignalTrail(assets)
-  }, [completedAt, assets, updateSignalTrail])
+    syncSignalReviews(assets)
+    updateSignalReviews(assets)
+  }, [completedAt, assets, updateSignalTrail, syncSignalReviews, updateSignalReviews])
 
   /* 鈹€鈹€ Filtered assets for summary bar 鈹€鈹€ */
   const filteredAssets = useMemo(() => {
@@ -982,6 +1004,8 @@ export default function App() {
             {activeTab === 'manage' ? (
               <ManagePage aiRequest={aiPlanRequest?.target === 'manage' ? aiPlanRequest : null} onSaved={() => { setActiveTab('market'); fetchData() }} />
             ) : activeTab === 'alerts' ? (
+              <AlertEventPage onNavigate={setActiveTab} />
+            ) : activeTab === 'alert-settings' ? (
               <AlertPage aiRequest={aiPlanRequest?.target === 'alerts' ? aiPlanRequest : null} />
             ) : activeTab === 'settings' ? (
               <SettingsPage />
@@ -999,6 +1023,8 @@ export default function App() {
               <WatchPoolPage />
             ) : activeTab === 'launch-review' ? (
               <LaunchReviewPage />
+            ) : activeTab === 'signal-review' ? (
+              <SignalReviewPage onNavigate={setActiveTab} />
             ) : (
             <div className="main">
               {loading && !hasData && (

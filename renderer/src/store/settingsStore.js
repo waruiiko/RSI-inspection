@@ -33,6 +33,7 @@ const useSettingsStore = create((set, get) => ({
   autoAiStartupDelay: 10,
   shAiInterval:     30,
   watchPoolRetentionDays: 15,
+  themeMode:        'light',
   aiLastRunAt:      null,
   aiLastRunMode:    '',
   aiLastRunCount:   0,

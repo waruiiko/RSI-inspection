@@ -162,6 +162,8 @@ export default function Toolbar({ activeTab, setActiveTab }) {
   const setLiquidityLimit = useMarketStore(s => s.setLiquidityLimit)
   const fetchData    = useMarketStore(s => s.fetchData)
   const refreshInterval = useSettingsStore(s => s.refreshInterval)
+  const themeMode = useSettingsStore(s => s.themeMode)
+  const updateSetting = useSettingsStore(s => s.update)
 
   const [now, setNow] = useState(Date.now())
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -203,6 +205,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
     { key: 'market',   label: '市场' },
     { key: 'manage',   label: '管理品种' },
     { key: 'alerts',   label: '提醒' },
+    { key: 'alert-settings', label: '提醒设置' },
     { key: 'opportunities', label: '中线机会' },
     { key: 'signal-hunter', label: 'Signal Hunter' },
     { key: 'ai',       label: 'AI' },
@@ -210,6 +213,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
   ]
   const ADVANCED_TABS = [
     { key: 'ai-review', label: 'AI复盘' },
+    { key: 'signal-review', label: 'SH复盘' },
     { key: 'trail',    label: '信号轨迹' },
     { key: 'watch-pool', label: '观察池' },
     { key: 'launch-review', label: '启动复盘' },
@@ -230,7 +234,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             boxShadow: '0 0 8px rgba(31,111,235,0.4)',
           }}>R</div>
           <h1 className="toolbar-title">市场 RSI 热力图</h1>
-          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.1.2</span>
+          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.1.3</span>
         </div>
 
         {/* Underline tab navigation */}
@@ -294,6 +298,21 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             )}
           </div>
         </nav>
+
+        <div className="toolbar-theme-switch" title="切换背景主题">
+          <button
+            className={(themeMode || 'light') === 'light' ? 'active' : ''}
+            onClick={() => updateSetting('themeMode', 'light')}
+          >
+            浅色
+          </button>
+          <button
+            className={themeMode === 'dark' ? 'active' : ''}
+            onClick={() => updateSetting('themeMode', 'dark')}
+          >
+            深色
+          </button>
+        </div>
       </div>
 
       {/* ── Row 2: market controls ── */}
