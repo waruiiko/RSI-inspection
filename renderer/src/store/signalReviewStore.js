@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { signalIdFromAsset, signalIdFromReviewItem } from '../utils/signalId'
 
 const KEY = 'rsi:signalReview'
 const TRADE_LOG_KEY = 'rsi:signalReviewTradeLog'
@@ -154,6 +155,7 @@ function sampleFromAsset(asset, now) {
   return {
     id: `shr-${reviewKey(asset, sig)}`,
     key: reviewKey(asset, sig),
+    signalId: signalIdFromAsset(asset),
     symbol: asset.symbol,
     type: asset.type,
     side: sig.side,
@@ -233,6 +235,7 @@ function tradeLogFromItem(item, now) {
     id,
     reviewId: item.id,
     key: item.key,
+    signalId: item.signalId ?? signalIdFromReviewItem(item),
     symbol: item.symbol,
     type: item.type,
     side: item.side,
@@ -260,13 +263,17 @@ function tradeLogFromItem(item, now) {
 }
 
 function normalizeTradeLog(log) {
-  if (log?.result !== 'loss') return log
-  const exitPrice = log.stopLoss
-  return {
+  const withSignalId = {
     ...log,
+    signalId: log?.signalId ?? signalIdFromReviewItem(log),
+  }
+  if (withSignalId?.result !== 'loss') return withSignalId
+  const exitPrice = withSignalId.stopLoss
+  return {
+    ...withSignalId,
     exitPrice,
-    returnPct: pct(log.side, log.entryPrice, exitPrice),
-    rMultiple: Number.isFinite(exitPrice) ? -1 : log.rMultiple,
+    returnPct: pct(withSignalId.side, withSignalId.entryPrice, exitPrice),
+    rMultiple: Number.isFinite(exitPrice) ? -1 : withSignalId.rMultiple,
   }
 }
 
@@ -291,13 +298,17 @@ function dedupeSimilarTradeLogs(logs) {
 }
 
 function migrateLoadedItem(item) {
-  if (item?.result !== 'win') return item
-  const multiple = riskMultiple(item, item.lastPrice)
-  if (!Number.isFinite(multiple) || multiple >= MIN_TAKE_PROFIT_R) return item
-  return {
+  const withSignalId = {
     ...item,
-    result: item.enteredAt ? 'open' : 'tracking',
-    resultLabel: item.enteredAt ? '已入场' : '跟踪中',
+    signalId: item?.signalId ?? signalIdFromReviewItem(item),
+  }
+  if (withSignalId?.result !== 'win') return withSignalId
+  const multiple = riskMultiple(withSignalId, withSignalId.lastPrice)
+  if (!Number.isFinite(multiple) || multiple >= MIN_TAKE_PROFIT_R) return withSignalId
+  return {
+    ...withSignalId,
+    result: withSignalId.enteredAt ? 'open' : 'tracking',
+    resultLabel: withSignalId.enteredAt ? '已入场' : '跟踪中',
     closedAt: null,
     tradeLoggedAt: null,
     tradeLogId: null,

@@ -5,6 +5,7 @@ import useSettingsStore from '../store/settingsStore'
 import { formatPrice } from '../utils/rsi'
 import { formatTurnover, getQuoteVolume } from '../utils/liquidity'
 import { buildSignalHunterAiCandidates, hasExecutableStopDistance, makeSignalHunterAiFeedItems, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
+import { signalIdFromAsset } from '../utils/signalId'
 
 const ChartModal = lazy(() => import('./ChartModal'))
 
@@ -56,6 +57,14 @@ const EXECUTION_FILTERS = [
   { key: 'ready', label: '可盯' },
   { key: 'wait', label: '等待' },
   { key: 'risk', label: '风险' },
+]
+
+const OI_FILTERS = [
+  { key: 'all', label: '全部资金' },
+  { key: 'aligned', label: '资金配合' },
+  { key: 'diverged', label: '资金背离' },
+  { key: 'crowded', label: '费率拥挤' },
+  { key: 'missing', label: 'OI缺失' },
 ]
 
 const ACTIONABLE_TIMEFRAMES = new Set(['1h', '4h'])
@@ -117,6 +126,59 @@ function categoryBadge(asset) {
 
 function setupLabel(setup) {
   return SETUP_META[setup] ?? '结构候选'
+}
+
+function labelOf(items, key) {
+  return items.find(item => item.key === key)?.label ?? key
+}
+
+function oiReference(asset) {
+  const d = asset?.derivatives
+  if (!d) return { oi: null, funding: null, tf: '', label: '' }
+  const oi4h = Number(d.oiChange4h)
+  const oi1h = Number(d.oiChange1h)
+  return {
+    oi: Number.isFinite(oi4h) ? oi4h : Number.isFinite(oi1h) ? oi1h : null,
+    funding: Number.isFinite(Number(d.fundingRate)) ? Number(d.fundingRate) : null,
+    tf: Number.isFinite(oi4h) ? '4h' : Number.isFinite(oi1h) ? '1h' : '',
+    label: d.label || '',
+  }
+}
+
+function oiInsight(asset) {
+  const sig = asset?.signalHunter
+  const ref = oiReference(asset)
+  if (!asset?.derivatives || !Number.isFinite(ref.oi)) return { key: 'missing', label: 'OI缺失', tone: 'neutral' }
+  if (Number.isFinite(ref.funding) && Math.abs(ref.funding) >= 0.06) return { key: 'crowded', label: '费率拥挤', tone: 'negative' }
+  const change = Number(asset?.change24h)
+  const directionAligned = sig?.side === 'short'
+    ? !Number.isFinite(change) || change <= 0.3
+    : !Number.isFinite(change) || change >= -0.3
+  if (ref.oi <= -3) return { key: 'diverged', label: 'OI下降', tone: 'negative' }
+  if (ref.oi >= 3 && directionAligned) return { key: 'aligned', label: '资金配合', tone: 'positive' }
+  if (ref.oi >= 3 && !directionAligned) return { key: 'diverged', label: '增仓背离', tone: 'negative' }
+  return { key: 'neutral', label: '资金中性', tone: 'neutral' }
+}
+
+function derivativesLine(asset) {
+  const ref = oiReference(asset)
+  if (!asset?.derivatives) return ''
+  const insight = oiInsight(asset)
+  const parts = []
+  if (Number.isFinite(ref.oi)) parts.push(`OI${ref.tf} ${fmtPct(ref.oi)}`)
+  if (Number.isFinite(ref.funding)) parts.push(`费率 ${ref.funding.toFixed(3)}%`)
+  if (insight.key !== 'neutral' && insight.key !== 'missing') parts.push(insight.label)
+  else if (ref.label) parts.push(ref.label)
+  return parts.join(' · ')
+}
+
+function derivativesTone(asset) {
+  return oiInsight(asset).tone
+}
+
+function matchesOiFilter(asset, filter) {
+  if (filter === 'all') return true
+  return oiInsight(asset).key === filter
 }
 
 function entryPriceOf(sig) {
@@ -185,6 +247,25 @@ function hasTradableEntrySide(sig, currentPrice = sig?.currentPrice) {
     : entryPrice <= currentPrice * 1.001
 }
 
+function targetProgressInfo(asset, currentPrice = livePriceOf(asset)) {
+  const sig = asset?.signalHunter
+  if (!sig || !Number.isFinite(currentPrice)) return null
+  const targets = [1, 2, 3]
+    .map(n => [n, targetFallback(sig, n)])
+    .filter(([, target]) => Number.isFinite(target))
+  if (!targets.length) return null
+  const reached = targets.filter(([, target]) => sig.side === 'short'
+    ? currentPrice <= target * 1.001
+    : currentPrice >= target * 0.999)
+  if (!reached.length) return null
+  const [level, target] = reached[reached.length - 1]
+  return { level, target, text: `已到TP${level}，避免追单` }
+}
+
+function hasRemainingTargetRoom(asset, currentPrice = livePriceOf(asset)) {
+  return !targetProgressInfo(asset, currentPrice)
+}
+
 function visibleSignal(asset, showRejected, scoreThreshold = 7, currentPrice = asset?.signalHunter?.currentPrice) {
   const sig = asset?.signalHunter
   if (!sig) return false
@@ -192,6 +273,7 @@ function visibleSignal(asset, showRejected, scoreThreshold = 7, currentPrice = a
   if (sig.rejected || sig.status === 'rejected') return showRejected
   if (!hasExecutableStopDistance(asset, sig)) return false
   if (!hasTradableEntrySide(sig, currentPrice)) return false
+  if (!hasRemainingTargetRoom(asset, currentPrice)) return false
   if ((sig.score?.total ?? 0) < scoreThreshold) return false
   const rewardRisk = rewardRiskFallback(sig)
   return Number.isFinite(rewardRisk) && rewardRisk >= 1.5
@@ -207,6 +289,10 @@ function nextStepText(asset, expired) {
   if (expired) return { label: '先重新识别', detail: 'AI结果已过期' }
   if (sig.rejected || sig.status === 'rejected') {
     return { label: '暂时回避', detail: firstText(sig.rejectReasons) || '已被AI剔除' }
+  }
+  const targetProgress = targetProgressInfo(asset)
+  if (targetProgress) {
+    return { label: '已过入场窗口', detail: targetProgress.text }
   }
   if (sig.status === 'risk') {
     return { label: '暂时回避', detail: firstText(sig.riskFlags) || '风险信号' }
@@ -306,15 +392,17 @@ function statusChangeText(change, fallbackStatus) {
 
 function riskGradeText(text) {
   const value = String(text ?? '')
-  if (/止损|不可执行|方向|剔除|R 值|R值|reward|risk\/reward/i.test(value)) return 'hard'
+  if (/止损|不可执行|方向|剔除|TP|追单|R 值|R值|reward|risk\/reward/i.test(value)) return 'hard'
   if (/漂移|距离|确认|偏远|结构|等待|波动/i.test(value)) return 'soft'
   return 'soft'
 }
 
 function riskItems(asset, stale, drift) {
   const sig = asset?.signalHunter ?? {}
+  const targetProgress = targetProgressInfo(asset)
   return [
     stale ? `价格漂移 ${fmtPct(drift)}` : null,
+    targetProgress?.text,
     ...(sig.riskFlags ?? []),
     ...(sig.rejectReasons ?? []),
   ].filter(Boolean).map(text => ({ text, grade: riskGradeText(text) }))
@@ -417,7 +505,7 @@ function executionMeta(asset) {
   }
   const drift = Math.abs(priceDriftPct(asset) ?? 0)
   const stopInfo = stopDistanceInfo(asset, sig)
-  if (sig.status === 'risk' || drift >= 1.5 || stopInfo?.ok === false) {
+  if (sig.status === 'risk' || drift >= 1.5 || stopInfo?.ok === false || targetProgressInfo(asset)) {
     return { key: 'risk', label: '风险', cls: 'signal-hunter-exec-risk', rank: 6 }
   }
   const entryDistance = absDistanceToEntry(asset)
@@ -438,6 +526,7 @@ function matchesSignalHunterQuery(asset, q) {
   const sig = asset.signalHunter ?? {}
   return [
     asset.symbol,
+    signalIdFromAsset(asset),
     asset.apiSymbol,
     asset.name,
     sig.status,
@@ -448,6 +537,8 @@ function matchesSignalHunterQuery(asset, q) {
     sig.setup,
     sig.setupLabel,
     setupLabel(sig.setup),
+    derivativesLine(asset),
+    oiInsight(asset).label,
     ...(sig.reasons ?? []),
     ...(sig.riskFlags ?? []),
     ...(sig.rejectReasons ?? []),
@@ -462,6 +553,7 @@ function buildEmptyDiagnostics(assets, {
   sideFilter,
   categoryFilter,
   timeframeFilter,
+  oiFilter,
   scoreThreshold,
   showRejected,
   query,
@@ -476,7 +568,8 @@ function buildEmptyDiagnostics(assets, {
   const bySide = byStatus.filter(asset => sideFilter === 'all' || asset.signalHunter.side === sideFilter)
   const byCategory = bySide.filter(asset => categoryFilter === 'all' || asset.type === categoryFilter)
   const byTimeframe = byCategory.filter(asset => timeframeFilter === 'all' || asset.signalHunter.timeframe === timeframeFilter)
-  const byActionableTf = byTimeframe.filter(asset => ACTIONABLE_TIMEFRAMES.has(asset.signalHunter.timeframe))
+  const byOi = byTimeframe.filter(asset => matchesOiFilter(asset, oiFilter))
+  const byActionableTf = byOi.filter(asset => ACTIONABLE_TIMEFRAMES.has(asset.signalHunter.timeframe))
   const byExecutableStop = byActionableTf.filter(asset => {
     const sig = asset.signalHunter
     return showRejected && (sig.rejected || sig.status === 'rejected')
@@ -489,7 +582,8 @@ function buildEmptyDiagnostics(assets, {
       ? true
       : hasTradableEntrySide(sig, livePriceOf(asset))
   })
-  const byScore = byEntrySide.filter(asset => {
+  const byTargetRoom = byEntrySide.filter(asset => showRejected || hasRemainingTargetRoom(asset, livePriceOf(asset)))
+  const byScore = byTargetRoom.filter(asset => {
     const sig = asset.signalHunter
     return showRejected && (sig.rejected || sig.status === 'rejected')
       ? true
@@ -512,9 +606,11 @@ function buildEmptyDiagnostics(assets, {
     side: bySide.length,
     category: byCategory.length,
     timeframe: byTimeframe.length,
+    oi: byOi.length,
     actionableTf: byActionableTf.length,
     executableStop: byExecutableStop.length,
     entrySide: byEntrySide.length,
+    targetRoom: byTargetRoom.length,
     score: byScore.length,
     rewardRisk: byRewardRisk.length,
     quality: byQuality.length,
@@ -605,6 +701,7 @@ function formatAiTime(ts) {
 function signalPlanText(asset) {
   const sig = asset?.signalHunter
   if (!sig) return ''
+  const signalId = signalIdFromAsset(asset)
   const meta = statusMeta(sig.status)
   const side = sideMeta(sig.side)
   const exec = executionMeta(asset)
@@ -617,13 +714,14 @@ function signalPlanText(asset) {
   const t2 = targetFallback(sig, 2)
   const t3 = targetFallback(sig, 3)
   const drift = priceDriftPct(asset)
+  const derivativeInfo = derivativesLine(asset)
   const riskLines = [
     Number.isFinite(drift) && Math.abs(drift) >= 0.5 ? `价格漂移 ${fmtPct(drift)}` : null,
     ...(sig.riskFlags ?? []),
     ...(sig.rejectReasons ?? []),
   ].filter(Boolean)
   return [
-    `[Signal Hunter] ${asset.symbol} ${sig.timeframe} ${side.label} · ${meta.label} · ${exec.label}`,
+    `[Signal Hunter] ${signalId} · ${asset.symbol} ${sig.timeframe} ${side.label} · ${meta.label} · ${exec.label}`,
     `现价: ${formatPrice(livePrice)}`,
     `入场: ${formatPrice(entryPrice)} | 确认: ${formatPrice(confirmPrice)} | 失效: ${formatPrice(sig.stopLoss)}`,
     `目标: ${formatPrice(t1)} / ${formatPrice(t2)} / ${formatPrice(t3)} | R: ${Number.isFinite(rewardRisk) ? rewardRisk.toFixed(1) : '-'}`,
@@ -631,6 +729,7 @@ function signalPlanText(asset) {
       ? `风险宽: ${formatPrice(stopInfo.distance)} (${stopInfo.pct.toFixed(1)}%)${Number.isFinite(stopInfo.minDistance) ? ` | 最小可执行: ${formatPrice(stopInfo.minDistance)}` : ''}`
       : '风险宽: -',
     `评分: ${sig.score?.total ?? '-'}/10 | 图表 ${sig.score?.chart ?? '-'}/10 | 数据 ${sig.score?.data ?? '-'}/10 | 风险 ${sig.score?.risk ?? '-'}`,
+    `资金: ${derivativeInfo || '-'}`,
     `形态: ${sig.setupLabel || setupLabel(sig.setup)}`,
     `依据: ${sig.reasons?.length ? sig.reasons.join(' / ') : '-'}`,
     `风险: ${riskLines.length ? riskLines.join(' / ') : '-'}`,
@@ -679,7 +778,7 @@ function signalHunterViewSummaryText({
   const header = [
     `Signal Hunter 当前视图摘要 · ${new Date().toLocaleString('zh-CN')}`,
     `视图: ${aiView} | 健康度: ${aiHealth.label} (${aiHealth.note})`,
-    `筛选: ${filters.category}/${filters.timeframe}/${filters.side} | ${filters.score}+ | ${filters.execution} | ${filters.sort}`,
+    `筛选: ${filters.category}/${filters.timeframe}/${filters.side} | 资金 ${filters.oi} | ${filters.score}+ | ${filters.execution} | ${filters.sort}`,
     `数量: ${picked.length}/${rows.length}`,
     `小结: ${aiReview}`,
   ].join('\n')
@@ -713,6 +812,7 @@ export default function SignalHunterPage() {
   const [sideFilter, setSideFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
   const [timeframeFilter, setTimeframeFilter] = useState('all')
+  const [oiFilter, setOiFilter] = useState('all')
   const [scoreThreshold, setScoreThresholdState] = useState(() => loadScoreThreshold())
   const [stockFocus, setStockFocus] = useState(true)
   const [sortMode, setSortMode] = useState('priority')
@@ -722,6 +822,8 @@ export default function SignalHunterPage() {
   const [showNewOnly, setShowNewOnly] = useState(false)
   const [hideDrifted, setHideDrifted] = useState(true)
   const [query, setQuery] = useState('')
+  const [tableMode, setTableMode] = useState('detail')
+  const [showFilters, setShowFilters] = useState(false)
   const [expanded, setExpanded] = useState(null)
   const [chartAsset, setChartAsset] = useState(null)
   const [chartSignal, setChartSignal] = useState(null)
@@ -759,7 +861,7 @@ export default function SignalHunterPage() {
     try {
       const focus = JSON.parse(raw)
       if (!focus?.symbol) return
-      setQuery(String(focus.symbol).toUpperCase())
+      setQuery(String(focus.signalId || focus.symbol).toUpperCase())
       setAiView('all')
       setFilter('all')
       setSideFilter('all')
@@ -813,7 +915,7 @@ export default function SignalHunterPage() {
     try {
       const header = [
         `Signal Hunter Watchlist · ${new Date().toLocaleString('zh-CN')}`,
-        `筛选: ${categoryFilter}/${timeframeFilter}/${sideFilter} · ${scoreThreshold}+ · ${executionFilter} · ${sortMode}`,
+        `筛选: ${categoryFilter}/${timeframeFilter}/${sideFilter} · 资金 ${oiFilter} · ${scoreThreshold}+ · ${executionFilter} · ${sortMode}`,
         `数量: ${picked.length}/${rows.length}`,
       ].join('\n')
       await copyText([header, ...picked.map(signalPlanText)].join('\n\n---\n\n'))
@@ -868,6 +970,7 @@ export default function SignalHunterPage() {
           category: categoryFilter,
           timeframe: timeframeFilter,
           side: sideFilter,
+          oi: oiFilter,
           score: scoreThreshold,
           execution: executionFilter,
           sort: sortMode,
@@ -981,12 +1084,14 @@ export default function SignalHunterPage() {
       .filter(asset => sideFilter === 'all' || asset.signalHunter.side === sideFilter)
       .filter(asset => categoryFilter === 'all' || asset.type === categoryFilter)
       .filter(asset => timeframeFilter === 'all' || asset.signalHunter.timeframe === timeframeFilter)
+      .filter(asset => matchesOiFilter(asset, oiFilter))
       .filter(asset => {
         if (aiView === 'pinned' || aiView === 'risk' || aiView === 'rejected' || aiView === 'changed' || aiView === 'changed_up' || aiView === 'changed_down') {
           return ACTIONABLE_TIMEFRAMES.has(asset.signalHunter.timeframe)
         }
         return visibleSignal(asset, showRejected, scoreThreshold, livePriceOf(asset))
       })
+      .filter(asset => showRejected || aiView === 'rejected' || aiView === 'risk' || hasRemainingTargetRoom(asset, livePriceOf(asset)))
       .filter(asset => aiView !== 'all' || executionFilter === 'all' || executionMeta(asset).key === executionFilter)
       .filter(asset => !q || asset.symbol.toUpperCase().includes(q))
       .filter(asset => !showNewOnly || !seenKeys.has(signalSeenKey(asset)))
@@ -1043,7 +1148,7 @@ export default function SignalHunterPage() {
         return (rewardRiskFallback(b.signalHunter) ?? 0) - (rewardRiskFallback(a.signalHunter) ?? 0)
       })
     return (mergeBySymbol ? dedupeSignalRows(filtered) : filtered).slice(0, 120)
-  }, [assets, filter, sideFilter, categoryFilter, timeframeFilter, scoreThreshold, stockFocus, sortMode, aiView, executionFilter, showRejected, query, showNewOnly, hideDrifted, seenKeys, changedKeys, pinnedKeys, statusChangeByKey, aiExpired, mergeBySymbol])
+  }, [assets, filter, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, stockFocus, sortMode, aiView, executionFilter, showRejected, query, showNewOnly, hideDrifted, seenKeys, changedKeys, pinnedKeys, statusChangeByKey, aiExpired, mergeBySymbol])
 
   const emptyDiagnostics = useMemo(() => buildEmptyDiagnostics(assets, {
     filter,
@@ -1053,13 +1158,14 @@ export default function SignalHunterPage() {
     sideFilter,
     categoryFilter,
     timeframeFilter,
+    oiFilter,
     scoreThreshold,
     showRejected,
     query,
     showNewOnly,
     hideDrifted,
     seenKeys,
-  }), [assets, filter, aiView, changedKeys, pinnedKeys, sideFilter, categoryFilter, timeframeFilter, scoreThreshold, showRejected, query, showNewOnly, hideDrifted, seenKeys])
+  }), [assets, filter, aiView, changedKeys, pinnedKeys, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, showRejected, query, showNewOnly, hideDrifted, seenKeys])
 
   const newVisibleCount = useMemo(
     () => rows.filter(asset => !seenKeys.has(signalSeenKey(asset))).length,
@@ -1110,6 +1216,7 @@ export default function SignalHunterPage() {
     setSideFilter('all')
     setCategoryFilter('all')
     setTimeframeFilter('all')
+    setOiFilter('all')
     setScoreThreshold(7)
     setStockFocus(true)
     setSortMode('priority')
@@ -1119,6 +1226,8 @@ export default function SignalHunterPage() {
     setShowNewOnly(false)
     setHideDrifted(false)
     setMergeBySymbol(false)
+    setTableMode('detail')
+    setShowFilters(false)
     setQuery('')
   }
 
@@ -1154,6 +1263,22 @@ export default function SignalHunterPage() {
 
   const aiHealth = useMemo(() => signalHunterHealth(aiRunMeta, aiSummary, aiExpired), [aiRunMeta, aiSummary, aiExpired])
   const aiReview = useMemo(() => signalHunterReviewText(aiSummary, statusChanges), [aiSummary, statusChanges])
+  const activeFilterSummary = useMemo(() => {
+    const parts = [
+      labelOf(FILTERS, filter),
+      labelOf(SIDE_FILTERS, sideFilter),
+      labelOf(CATEGORY_FILTERS, categoryFilter),
+      labelOf(TIMEFRAME_FILTERS, timeframeFilter),
+      labelOf(OI_FILTERS, oiFilter),
+      `${scoreThreshold}+`,
+      labelOf(EXECUTION_FILTERS, executionFilter),
+      labelOf(SORT_MODES, sortMode),
+      showNewOnly ? '只看新结果' : null,
+      hideDrifted ? '隐藏漂移' : null,
+      mergeBySymbol ? '按标的合并' : null,
+    ].filter(Boolean)
+    return parts.join(' · ')
+  }, [filter, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, executionFilter, sortMode, showNewOnly, hideDrifted, mergeBySymbol])
 
   const selectAiView = view => {
     setAiView(view)
@@ -1225,7 +1350,19 @@ export default function SignalHunterPage() {
         </button>
       </div>
 
-      <div className="signal-hunter-controls">
+      <div className="signal-hunter-filter-strip">
+        <button className="feed-type-btn active" onClick={() => setShowFilters(v => !v)}>
+          {showFilters ? '收起筛选' : '展开筛选'}
+        </button>
+        <span className="signal-hunter-filter-summary">{activeFilterSummary}</span>
+        <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI健康 {aiHealth.label}</span>
+        <button className={`zone-btn signal-hunter-ai-btn ${aiExpired ? 'signal-hunter-ai-main-btn' : ''}`} onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
+          {aiBusy ? 'AI识别中' : 'AI识别SH'}
+        </button>
+        {aiStatus && <span className="signal-hunter-ai-status">{aiStatus}</span>}
+      </div>
+
+      {showFilters && <div className="signal-hunter-controls">
         <div className="feed-type-btns">
           {FILTERS.map(item => (
             <button
@@ -1265,6 +1402,17 @@ export default function SignalHunterPage() {
               key={item.key}
               className={`feed-type-btn ${timeframeFilter === item.key ? 'active' : ''}`}
               onClick={() => setTimeframeFilter(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="feed-type-btns">
+          {OI_FILTERS.map(item => (
+            <button
+              key={item.key}
+              className={`feed-type-btn ${oiFilter === item.key ? 'active' : ''}`}
+              onClick={() => setOiFilter(item.key)}
             >
               {item.label}
             </button>
@@ -1364,18 +1512,13 @@ export default function SignalHunterPage() {
         <button className="feed-type-btn" onClick={clearAiCache}>
           清缓存
         </button>
-        <button className={`zone-btn signal-hunter-ai-btn ${aiExpired ? 'signal-hunter-ai-main-btn' : ''}`} onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
-          {aiBusy ? 'AI识别中' : 'AI识别SH'}
-        </button>
-        {aiStatus && <span className="signal-hunter-ai-status">{aiStatus}</span>}
-      </div>
+      </div>}
 
-      <div className="signal-hunter-ai-insight">
-        <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI健康 {aiHealth.label}</span>
+      {showFilters && <div className="signal-hunter-ai-insight">
         <span>{aiReview}</span>
-      </div>
+      </div>}
 
-      {aiRunMeta && (
+      {showFilters && aiRunMeta && (
         <div className="signal-hunter-ai-meta">
           <span>AI识别 {formatAiTime(aiRunMeta.runAt)}</span>
           <span>行情快照 {formatAiTime(aiRunMeta.snapshotAt)}</span>
@@ -1400,32 +1543,36 @@ export default function SignalHunterPage() {
           />
           {query && <button className="feed-type-btn" onClick={() => setQuery('')}>清除</button>}
         </div>
-        <span className="signal-hunter-table-count">当前 {rows.length} / AI结果 {aiSummary.total}</span>
+        <div className="signal-hunter-table-actions">
+          <button
+            className={`feed-type-btn ${tableMode === 'compact' ? 'active' : ''}`}
+            onClick={() => setTableMode(mode => mode === 'compact' ? 'detail' : 'compact')}
+          >
+            {tableMode === 'compact' ? '详细模式' : '紧凑模式'}
+          </button>
+          <span className="signal-hunter-table-count">当前 {rows.length} / AI结果 {aiSummary.total}</span>
+        </div>
       </div>
 
       <div className="signal-hunter-table-wrap">
-        <table className="stats-table signal-hunter-table">
+        <table className={`stats-table signal-hunter-table ${tableMode === 'compact' ? 'signal-hunter-table-compact' : ''}`}>
           <thead>
             <tr>
               <th className="signal-hunter-index">#</th>
               <th>品种</th>
               <th>状态</th>
               <th>方向</th>
-              <th>周期</th>
-              <th>现价</th>
-              <th>入场价</th>
-              <th>距离</th>
+              <th>价格</th>
               <th>评分</th>
               <th>关键位</th>
-              <th>风险</th>
-              <th>原因</th>
+              <th>风险 / 原因</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
             {!rows.length ? (
               <tr>
-                <td colSpan={13} className="ai-empty">
+                <td colSpan={9} className="ai-empty">
                   <div>暂无 Signal Hunter 候选。刷新行情或等待下一次 AI 自动识别后会重新写入。</div>
                   <div className="signal-hunter-empty-diag">
                     <span>AI结果 {emptyDiagnostics.aiView}/{emptyDiagnostics.ai}</span>
@@ -1433,9 +1580,11 @@ export default function SignalHunterPage() {
                     <span>方向 {emptyDiagnostics.side}</span>
                     <span>类别 {emptyDiagnostics.category}</span>
                     <span>周期 {emptyDiagnostics.timeframe}</span>
+                    <span>资金 {emptyDiagnostics.oi}</span>
                     <span>1h/4h {emptyDiagnostics.actionableTf}</span>
                     <span>止损可执行 {emptyDiagnostics.executableStop}</span>
                     <span>入场侧 {emptyDiagnostics.entrySide}</span>
+                    <span>未到目标 {emptyDiagnostics.targetRoom}</span>
                     <span>评分 {emptyDiagnostics.score}</span>
                     <span>R值 {emptyDiagnostics.rewardRisk}</span>
                     <span>搜索 {emptyDiagnostics.query}</span>
@@ -1470,6 +1619,9 @@ export default function SignalHunterPage() {
               const statusChange = statusChangeByKey.get(signalHistoryKey(asset))
               const addedDiff = diffByKey(aiDiff, 'added').get(signalHistoryKey(asset))
               const scoreDiff = diffByKey(aiDiff, 'scoreChanged').get(signalHistoryKey(asset))
+              const shSignalId = signalIdFromAsset(asset)
+              const derivativeInfo = derivativesLine(asset)
+              const derivativeInfoTone = derivativesTone(asset)
               const rowClasses = [
                 'signal-hunter-row',
                 sig.status === 'risk' ? 'signal-hunter-row-risk' : '',
@@ -1509,6 +1661,7 @@ export default function SignalHunterPage() {
                       {isProcessed && <span className="signal-hunter-processed-badge">已处理</span>}
                       {isNew && <span className="signal-hunter-new-badge">新</span>}
                       {stale && <span className="signal-hunter-stale-badge">漂</span>}
+                      <small className="signal-id-badge">{shSignalId}</small>
                       <small>{formatTurnover(getQuoteVolume(asset))}</small>
                     </td>
                     <td>
@@ -1519,14 +1672,16 @@ export default function SignalHunterPage() {
                       {scoreDiff && <span className={`signal-hunter-score-change-badge ${scoreDiff.to > scoreDiff.from ? 'up' : 'down'}`}>{scoreDiff.from.toFixed(1)}→{scoreDiff.to.toFixed(1)}</span>}
                       {statusChange && <span className={`signal-hunter-change-badge ${changeDirection}`} title={changeText}>{changeText}</span>}
                     </td>
-                    <td><span className={`signal-hunter-side ${side.cls}`}>{side.label}</span></td>
-                    <td>{sig.timeframe}</td>
                     <td>
+                      <span className={`signal-hunter-side ${side.cls}`}>{side.label}</span>
+                      <small>{sig.timeframe}</small>
+                    </td>
+                    <td className="signal-hunter-price-cell">
                       {formatPrice(livePrice)}
                       {Number.isFinite(drift) && Math.abs(drift) >= 0.5 && <small>识别后 {fmtPct(drift)}</small>}
+                      <small>入场 {rejected ? '-' : formatPrice(entryPrice)}</small>
+                      <small className={distanceToEntry <= 0 ? 'pos' : ''}>距离 {fmtPct(distanceToEntry)}</small>
                     </td>
-                    <td>{rejected ? '-' : formatPrice(entryPrice)}</td>
-                    <td className={distanceToEntry <= 0 ? 'pos' : ''}>{fmtPct(distanceToEntry)}</td>
                     <td>
                       <div className={`signal-hunter-score ${scoreClass(sig.score.total)}`}>{sig.score.total}/10</div>
                       <div className="signal-hunter-priority-score">优 {priority}</div>
@@ -1549,15 +1704,14 @@ export default function SignalHunterPage() {
                       )}
                       {!rejected && <small>目标 {formatPrice(t1)} / {formatPrice(t2)} / {formatPrice(t3)}</small>}
                       <small>形态 {sig.setupLabel || setupLabel(sig.setup)} <span className="muted">{rewardRisk ? `${rewardRisk.toFixed(1)}R` : ''}</span></small>
+                      {derivativeInfo && <small className={`signal-hunter-oi-line ${derivativeInfoTone}`}>资金 {derivativeInfo}</small>}
                     </td>
                     <td>
                       {riskItems(asset, stale, drift).length ? (
                         <div className="signal-hunter-risks">
                           {riskItems(asset, stale, drift).map(item => <span className={item.grade} key={item.text}>{item.grade === 'hard' ? '硬' : '软'} · {item.text}</span>)}
                         </div>
-                      ) : <span className="muted">-</span>}
-                    </td>
-                    <td>
+                      ) : <span className="muted">风险 -</span>}
                       <div className="signal-hunter-reasons">
                         {sig.reasons?.map(reason => <span key={reason}>{reason}</span>)}
                       </div>
@@ -1607,11 +1761,12 @@ export default function SignalHunterPage() {
                   </tr>
                   {expanded === key && (
                     <tr className="signal-hunter-detail-row" key={`${key}:detail`}>
-                      <td colSpan={13}>
+                      <td colSpan={9}>
                         <div className="signal-hunter-card">
                           <div className="signal-hunter-card-head">
                             <div>
                               <b>{asset.symbol} · {sig.timeframe}</b>
+                              <small className="signal-id-badge">{shSignalId}</small>
                               <span>{sig.setupLabel || setupLabel(sig.setup)}</span>
                             </div>
                             <div className="signal-hunter-card-badges">
@@ -1647,6 +1802,7 @@ export default function SignalHunterPage() {
                                 </span>
                               )}
                               {!rejected && <span>TP1 {formatPrice(t1)} · TP2 {formatPrice(t2)} · TP3 {formatPrice(t3)}</span>}
+                              {derivativeInfo && <span className={`signal-hunter-oi-line ${derivativeInfoTone}`}>资金 {derivativeInfo}</span>}
                             </section>
                             <section>
                               <b>风险标记</b>
@@ -1671,6 +1827,7 @@ export default function SignalHunterPage() {
                               <span>状态 {statusChange ? changeText : meta.label} · 执行 {exec.label}</span>
                               <span>下一步 {nextStep.label}{nextStep.detail ? ` · ${nextStep.detail}` : ''}</span>
                               <span>方向 {side.label} · 结构 {sig.setupLabel || setupLabel(sig.setup)}</span>
+                              {derivativeInfo && <span>OI参考 {derivativeInfo}</span>}
                             </section>
                             <section>
                               <b>观察点</b>

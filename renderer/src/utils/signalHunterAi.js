@@ -93,10 +93,39 @@ export function buildSignalHunterAiCandidates(assets, limit = 60) {
 function localRiskFlags(asset) {
   const flags = []
   const turnover = getQuoteVolume(asset)
+  const derivatives = asset.derivatives
+  const oi4h = finite(derivatives?.oiChange4h)
+  const oi1h = finite(derivatives?.oiChange1h)
+  const fundingRate = finite(derivatives?.fundingRate)
+  const oiRef = oi4h ?? oi1h
   if (!turnover) flags.push('成交额缺失，流动性风险待确认')
   else if (turnover < 5_000_000) flags.push(`24h成交额 ${Math.round(turnover).toLocaleString()} < 5M，流动性不足`)
   if (asset.source === 'binance-futures' && !asset.derivatives) flags.push('OI / 资金费率数据缺失')
+  if (asset.source === 'binance-futures' && Number.isFinite(oiRef) && oiRef <= -3) {
+    flags.push(`OI${oi4h != null ? '4h' : '1h'}下降 ${Math.abs(oiRef).toFixed(1)}%，持续性存疑`)
+  }
+  if (Number.isFinite(fundingRate) && Math.abs(fundingRate) >= 0.06) {
+    flags.push(`资金费率 ${fundingRate.toFixed(3)}%，拥挤度偏高`)
+  }
   return flags
+}
+
+function localDerivativesReasons(asset) {
+  const d = asset.derivatives
+  if (!d) return []
+  const reasons = []
+  const oi4h = finite(d.oiChange4h)
+  const oi1h = finite(d.oiChange1h)
+  const fundingRate = finite(d.fundingRate)
+  const oiRef = oi4h ?? oi1h
+  if (Number.isFinite(oiRef)) {
+    const tf = oi4h != null ? '4h' : '1h'
+    const tone = oiRef >= 3 ? '增仓配合' : oiRef <= -3 ? '减仓压制' : '变化平缓'
+    reasons.push(`OI${tf} ${oiRef >= 0 ? '+' : ''}${oiRef.toFixed(1)}% · ${tone}`)
+  }
+  if (d.label) reasons.push(`资金结构：${d.label}`)
+  if (Number.isFinite(fundingRate)) reasons.push(`资金费率 ${fundingRate.toFixed(3)}%`)
+  return reasons
 }
 
 export function signalHunterCandidateSignature(candidates) {
@@ -119,6 +148,44 @@ function deriveRewardRisk(side, entry, stop, targets) {
   const reward = Math.abs(mainTarget - entry)
   if (!reward) return null
   return Number((reward / risk).toFixed(2))
+}
+
+function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, timeframe, riskFlags, distanceToEntryPct, asset }) {
+  if (!Number.isFinite(total)) return total
+  const flags = Array.isArray(riskFlags) ? riskFlags.filter(Boolean).length : 0
+  const rr = Number.isFinite(rewardRisk) ? rewardRisk : 0
+  const distance = Math.abs(Number(distanceToEntryPct) || 0)
+  const turnover = getQuoteVolume(asset)
+  const derivatives = asset?.derivatives
+  const oi4h = finite(derivatives?.oiChange4h)
+  const oi1h = finite(derivatives?.oiChange1h)
+  const fundingRate = finite(derivatives?.fundingRate)
+  const oiRef = oi4h ?? oi1h
+  const oiWeight = timeframe === '1h' ? 1.55 : timeframe === '4h' ? 1.25 : 1
+
+  let delta = 0
+  delta += (Number(chart) - 6) * 0.08
+  delta += (Number(data) - 5) * 0.06
+  delta += Math.max(-0.35, Math.min(0.45, (rr - 2.2) * 0.18))
+  delta += status === 'triggered' ? 0.18 : status === 'wait_entry' ? 0.05 : status === 'risk' ? -0.45 : status === 'rejected' ? -0.8 : 0
+  delta -= Math.min(0.35, flags * 0.12)
+  delta -= Math.min(0.28, distance * 0.025)
+  if (turnover >= 50_000_000) delta += 0.12
+  else if (turnover > 0 && turnover < 5_000_000) delta -= 0.18
+  if (Number.isFinite(derivatives?.score)) delta += Math.max(-0.36, Math.min(0.42, Number(derivatives.score) * 0.08 * oiWeight))
+  if (Number.isFinite(oiRef)) {
+    if (oiRef >= 8) delta += 0.26 * oiWeight
+    else if (oiRef >= 3) delta += 0.16 * oiWeight
+    else if (oiRef <= -6) delta -= 0.42 * oiWeight
+    else if (oiRef <= -3) delta -= 0.25 * oiWeight
+  }
+  if (Number.isFinite(fundingRate) && Math.abs(fundingRate) >= 0.06) delta -= 0.18 * oiWeight
+
+  const jitterSeed = String(asset?.symbol ?? '')
+    .split('')
+    .reduce((sum, ch) => sum + ch.charCodeAt(0), 0)
+  const jitter = ((jitterSeed % 7) - 3) * 0.03
+  return Number(clamp(total + delta + jitter, 0, 10).toFixed(1))
 }
 
 export function minExecutableStopDistance(asset, sig) {
@@ -193,24 +260,41 @@ export function normalizeSignalHunterAiResults(aiResult, assets) {
     const targets = normalizeTargets(item)
     const rewardRisk = finite(item.rewardRisk ?? item.rr) ?? deriveRewardRisk(side, entryPrice, stopLoss, targets)
     const rawStatus = VALID_STATUSES.has(String(item.status)) ? String(item.status) : 'watch'
-    const total = Number(clamp(item.score?.total ?? item.totalScore ?? item.score, 0, 10).toFixed(1))
+    const rawTotal = Number(clamp(item.score?.total ?? item.totalScore ?? item.score, 0, 10).toFixed(1))
     const chart = Number(clamp(item.score?.chart ?? item.chartScore, 0, 10).toFixed(1))
     const data = Number(clamp(item.score?.data ?? item.dataScore, 0, 10).toFixed(1))
     const risk = Number(clamp(item.score?.risk ?? item.riskScore, -3, 2).toFixed(1))
     const status = legalizeStatus(side, rawStatus, currentPrice, entryPrice)
+    const timeframe = TFS.includes(item.timeframe)
+      ? item.timeframe
+      : TFS.includes(asset.signalHunter?.timeframe)
+        ? asset.signalHunter.timeframe
+        : '1h'
     const baseReasons = Array.isArray(item.reasons) ? item.reasons : [item.reason].filter(Boolean)
     const riskFlags = Array.isArray(item.riskFlags) ? item.riskFlags : [item.risk].filter(Boolean)
     const narrativeTags = Array.isArray(item.narrativeTags) ? item.narrativeTags : []
+    const localRisks = localRiskFlags(asset)
+    const derivativeReasons = localDerivativesReasons(asset)
+    const allRiskFlags = [...new Set([...riskFlags, ...localRisks])].slice(0, 8)
+    const allReasons = [...new Set([...baseReasons, ...derivativeReasons])].slice(0, 6)
+    const total = recalibrateSignalScore({
+      total: rawTotal,
+      chart,
+      data,
+      risk,
+      rewardRisk,
+      status,
+      timeframe,
+      riskFlags: allRiskFlags,
+      distanceToEntryPct: pct(currentPrice, entryPrice),
+      asset,
+    })
 
     const sig = {
       source: 'ai',
       status,
       side,
-      timeframe: TFS.includes(item.timeframe)
-        ? item.timeframe
-        : TFS.includes(asset.signalHunter?.timeframe)
-          ? asset.signalHunter.timeframe
-          : '1h',
+      timeframe,
       setup: item.setup ?? 'ai_structure',
       setupLabel: item.setupLabel ?? item.pattern ?? 'AI 结构候选',
       currentPrice,
@@ -236,8 +320,8 @@ export function normalizeSignalHunterAiResults(aiResult, assets) {
         rewardRisk,
         weights: 'AI structure + hard guards',
       },
-      reasons: baseReasons.slice(0, 5),
-      riskFlags: [...new Set([...riskFlags, ...localRiskFlags(asset)])].slice(0, 8),
+      reasons: allReasons,
+      riskFlags: allRiskFlags,
       narrativeSummary: String(item.narrativeSummary ?? item.narrative ?? '').trim(),
       narrativeTags: narrativeTags.map(tag => String(tag).trim()).filter(Boolean).slice(0, 5),
       rejectReasons: Array.isArray(item.rejectReasons) ? item.rejectReasons : [],

@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import useSignalReviewStore from '../store/signalReviewStore'
 import { formatPrice } from '../utils/rsi'
+import { signalIdFromReviewItem } from '../utils/signalId'
 
 const SH_FOCUS_KEY = 'rsi:signalHunter:focus'
 const MIN_TAKE_PROFIT_R = 1.5
@@ -23,6 +24,11 @@ function fmtPct(value) {
 function fmtR(value) {
   if (!Number.isFinite(value)) return '-'
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}R`
+}
+
+function fmtRate(count, total) {
+  if (!total) return '-'
+  return `${((count / total) * 100).toFixed(1)}% (${count}/${total})`
 }
 
 function sideLabel(side) {
@@ -76,6 +82,87 @@ function displaySetup(setup) {
   return labelMap[setup] || setup || 'Signal Hunter'
 }
 
+function statusLabel(row) {
+  if (row.result === 'loss') return 'STOPPED'
+  if (row.result === 'win') return row.hitTarget ? `TP${row.hitTarget}` : 'TP'
+  if (row.enteredAt) return 'TRIGGERED'
+  if (row.result === 'not_entered') return '未触发'
+  return '观察中'
+}
+
+function signalIdOf(item) {
+  return item?.signalId ?? signalIdFromReviewItem(item)
+}
+
+function rowMaxMove(row) {
+  const values = [row.maxReturnPct, row.returnPct, row.currentReturnPct].filter(Number.isFinite)
+  return values.length ? Math.max(...values) : null
+}
+
+function buildReviewReport(items, tradeLogs) {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000
+  const byKey = new Map()
+  for (const item of items) {
+    if ((item.capturedAt ?? 0) >= cutoff || (item.closedAt ?? 0) >= cutoff || (item.lastUpdatedAt ?? 0) >= cutoff) {
+      byKey.set(item.key, item)
+    }
+  }
+  for (const log of tradeLogs) {
+    if ((log.closedAt ?? 0) >= cutoff && !byKey.has(log.key)) {
+      byKey.set(log.key, log)
+    }
+  }
+
+  const rows = [...byKey.values()].sort((a, b) => (rowMaxMove(b) ?? -Infinity) - (rowMaxMove(a) ?? -Infinity))
+  const total = rows.length
+  const wins = rows.filter(row => row.result === 'win')
+  const losses = rows.filter(row => row.result === 'loss')
+  const open = rows.filter(row => row.enteredAt && row.result !== 'win' && row.result !== 'loss')
+  const tpCount = level => wins.filter(row => (row.hitTarget ?? 1) >= level).length
+  const positiveMoves = rows.map(rowMaxMove).filter(Number.isFinite).filter(v => v > 0)
+  const avgMaxMove = positiveMoves.length
+    ? positiveMoves.reduce((sum, value) => sum + value, 0) / positiveMoves.length
+    : null
+  const stars = rows.filter(row => Number.isFinite(rowMaxMove(row))).slice(0, 5)
+  const highlights = []
+  if (stars[0]) highlights.push(`${stars[0].symbol} ${signalIdOf(stars[0])} ${fmtPct(rowMaxMove(stars[0]))} 为过去24H最强`)
+  if (losses.length) highlights.push(`止损 ${losses.length} 个，止损率 ${fmtRate(losses.length, total)}`)
+  else if (total) highlights.push('过去24H暂无止损信号')
+  if (open.length) highlights.push(`${open.length} 个信号仍在跟踪中`)
+  if (wins.length) highlights.push(`${wins.length} 个信号已经触达止盈目标`)
+
+  return {
+    rows,
+    total,
+    wins,
+    losses,
+    open,
+    stars,
+    avgMaxMove,
+    tp1: tpCount(1),
+    tp2: tpCount(2),
+    tp3: tpCount(3),
+    highlights,
+  }
+}
+
+function reportText(report) {
+  return [
+    '打榜猎人 SH 24H 复盘',
+    `总信号: ${report.total}`,
+    `有效突破率: ${fmtRate(report.wins.length, report.total)}`,
+    `止损率: ${fmtRate(report.losses.length, report.total)}`,
+    `仅触发: ${fmtRate(report.open.length, report.total)}`,
+    `盈利信号平均最大涨幅: ${fmtPct(report.avgMaxMove)}`,
+    '',
+    'TOP 明星:',
+    ...report.stars.slice(0, 5).map((row, index) => `${index + 1}. ${signalIdOf(row)} ${row.symbol} ${statusLabel(row)} ${fmtPct(rowMaxMove(row))}`),
+    '',
+    '亮点:',
+    ...report.highlights.map(item => `- ${item}`),
+  ].join('\n')
+}
+
 export default function SignalReviewPage({ onNavigate }) {
   const items = useSignalReviewStore(s => s.items)
   const tradeLogs = useSignalReviewStore(s => s.tradeLogs)
@@ -90,6 +177,7 @@ export default function SignalReviewPage({ onNavigate }) {
   const [logQuery, setLogQuery] = useState('')
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearLogs, setConfirmClearLogs] = useState(false)
+  const report = useMemo(() => buildReviewReport(items, tradeLogs), [items, tradeLogs])
 
   const handleClear = () => {
     clear()
@@ -101,10 +189,15 @@ export default function SignalReviewPage({ onNavigate }) {
     setConfirmClearLogs(false)
   }
 
+  const copyReport = async () => {
+    await navigator.clipboard?.writeText(reportText(report))
+  }
+
   const openInSignalHunter = (item) => {
     localStorage.setItem(SH_FOCUS_KEY, JSON.stringify({
       symbol: item.symbol,
       timeframe: item.timeframe,
+      signalId: signalIdOf(item),
       ts: Date.now(),
     }))
     onNavigate?.('signal-hunter')
@@ -121,6 +214,7 @@ export default function SignalReviewPage({ onNavigate }) {
     return tradeLogs
       .filter(log => logFilter === 'all' || log.result === logFilter)
       .filter(log => !q || [
+        signalIdOf(log),
         log.symbol,
         log.timeframe,
         log.side,
@@ -178,6 +272,9 @@ export default function SignalReviewPage({ onNavigate }) {
         <button className={`feed-type-btn ${view === 'logs' ? 'active' : ''}`} onClick={() => setView('logs')}>
           交易日志 {tradeLogs.length}
         </button>
+        <button className={`feed-type-btn ${view === 'report' ? 'active' : ''}`} onClick={() => setView('report')}>
+          24H战绩 {report.total}
+        </button>
         <label className="signal-review-score-control">
           <span>入库分数 ≥</span>
           <input
@@ -191,7 +288,80 @@ export default function SignalReviewPage({ onNavigate }) {
         </label>
       </div>
 
-      {view === 'samples' ? (
+      {view === 'report' ? (
+        <div className="signal-review-report">
+          <div className="signal-review-report-head">
+            <div>
+              <h3>过去24H SH复盘数据</h3>
+              <span>{new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
+            </div>
+            <button className="feed-type-btn" onClick={copyReport} disabled={!report.total}>复制摘要</button>
+          </div>
+
+          <div className="signal-review-report-metrics">
+            <div><span>总信号数</span><b>{report.total}</b></div>
+            <div><span>有效突破率</span><b>{fmtRate(report.wins.length, report.total)}</b></div>
+            <div><span>TP1命中率</span><b>{fmtRate(report.tp1, report.total)}</b></div>
+            <div><span>TP2命中率</span><b>{fmtRate(report.tp2, report.total)}</b></div>
+            <div><span>TP3命中率</span><b>{fmtRate(report.tp3, report.total)}</b></div>
+            <div><span>止损率</span><b>{fmtRate(report.losses.length, report.total)}</b></div>
+            <div><span>仅触发</span><b>{fmtRate(report.open.length, report.total)}</b></div>
+            <div><span>盈利平均最大涨幅</span><b>{fmtPct(report.avgMaxMove)}</b></div>
+          </div>
+
+          <div className="signal-review-report-grid">
+            <section>
+              <div className="signal-review-report-title">TOP 明星</div>
+              <div className="signal-review-rank-list">
+                {report.stars.length ? report.stars.slice(0, 5).map((row, index) => (
+                  <div key={`${row.key}-${index}`} className="signal-review-rank-row">
+                    <b>#{index + 1}</b>
+                    <strong>{row.symbol}<small>{signalIdOf(row)}</small></strong>
+                    <span>{statusLabel(row)}</span>
+                    <em>{fmtPct(rowMaxMove(row))}</em>
+                  </div>
+                )) : <div className="signal-review-empty compact">暂无24H明星信号</div>}
+              </div>
+            </section>
+
+            <section>
+              <div className="signal-review-report-title">止损信号</div>
+              <div className="signal-review-stop-list">
+                {report.losses.length ? report.losses.slice(0, 8).map(row => (
+                  <div key={row.key} className="signal-review-stop-row">
+                    <strong>{row.symbol}<small>{signalIdOf(row)}</small></strong>
+                    <span>{row.score ?? '-'}/10</span>
+                    <em>{(row.risks ?? [])[0] || '无额外风险标记'}</em>
+                  </div>
+                )) : <div className="signal-review-empty compact">过去24H暂无止损</div>}
+              </div>
+            </section>
+          </div>
+
+          <div className="signal-review-report-table">
+            <div className="signal-review-report-title">完整榜单</div>
+            <div className="signal-review-report-table-head">
+              <span>时间</span><span>标的</span><span>触发价</span><span>状态</span><span>最大涨幅</span>
+            </div>
+            <div className="signal-review-report-table-body">
+              {report.rows.length ? report.rows.map(row => (
+                <div key={row.key} className={`signal-review-report-row ${row.result}`}>
+                  <span>{fmtTime(row.enteredAt || row.capturedAt)}</span>
+                  <strong>{row.symbol}<small>{signalIdOf(row)}</small></strong>
+                  <span>{formatPrice(row.entryPrice)}</span>
+                  <span>{statusLabel(row)}</span>
+                  <em>{fmtPct(rowMaxMove(row))}</em>
+                </div>
+              )) : <div className="signal-review-empty compact">暂无过去24H复盘数据</div>}
+            </div>
+          </div>
+
+          <div className="signal-review-highlights">
+            <div className="signal-review-report-title">亮点</div>
+            {report.highlights.length ? report.highlights.map(item => <p key={item}>{item}</p>) : <p>暂无足够样本生成亮点。</p>}
+          </div>
+        </div>
+      ) : view === 'samples' ? (
         <>
       <div className="signal-review-toolbar">
         {[
@@ -230,6 +400,7 @@ export default function SignalReviewPage({ onNavigate }) {
             <div className="signal-review-card-main">
               <div className="signal-review-title">
                 <strong>{item.symbol}</strong>
+                <code className="signal-id-badge">{signalIdOf(item)}</code>
                 <span>{sideLabel(item.side)}</span>
                 <span>{item.timeframe}</span>
                 <span>{item.score}/10</span>
@@ -283,7 +454,7 @@ export default function SignalReviewPage({ onNavigate }) {
               <input
                 className="search-input signal-review-log-search"
                 type="search"
-                placeholder="搜索标的 / 周期 / 形态..."
+                placeholder="搜索编号 / 标的 / 周期 / 形态..."
                 value={logQuery}
                 onChange={e => setLogQuery(e.target.value)}
               />
@@ -310,7 +481,7 @@ export default function SignalReviewPage({ onNavigate }) {
             <div className="signal-review-log-list">
               {filteredTradeLogs.map(log => (
                 <div key={log.id} className={`signal-review-log-row ${log.result}`}>
-                  <strong>{log.symbol}</strong>
+                  <strong>{log.symbol}<small>{signalIdOf(log)}</small></strong>
                   <span>{sideLabel(log.side)} · {log.timeframe}</span>
                   <span>{displaySetup(log.setup)}</span>
                   <span>{log.result === 'win' ? `止盈${log.hitTarget ? ` T${log.hitTarget}` : ''}` : '止损'}</span>
