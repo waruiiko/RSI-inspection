@@ -80,6 +80,8 @@ export default function ManagePage({ onSaved, aiRequest }) {
   const [stockSearch,    setStockSearch]    = useState('')
   const [validating,     setValidating]     = useState(false)
   const [validateResult, setValidateResult] = useState(null)
+  const [stockCleanupBusy, setStockCleanupBusy] = useState(false)
+  const [stockCleanupStatus, setStockCleanupStatus] = useState('')
   const [aiInstruction,  setAiInstruction]  = useState('只保留成交额较高、近期有信号或资金结构较强的品种，低流动性和噪音品种先移除')
   const [aiBusy,         setAiBusy]         = useState(false)
   const [aiPlan,         setAiPlan]         = useState(null)
@@ -182,6 +184,33 @@ export default function ManagePage({ onSaved, aiRequest }) {
     setKnownStocks(prev => mergeKnownStocks(prev, incoming))
     setTrackedStocks(prev => new Set([...prev, ...symbols]))
   }, [])
+
+  const cleanInvalidTrackedStocks = useCallback(async () => {
+    const symbols = [...trackedStocks]
+    if (!symbols.length || stockCleanupBusy) return
+    setStockCleanupBusy(true)
+    setStockCleanupStatus(`Checking 0 / ${symbols.length}`)
+    const invalid = new Set()
+    try {
+      for (let i = 0; i < symbols.length; i++) {
+        const symbol = symbols[i]
+        setStockCleanupStatus(`Checking ${i + 1} / ${symbols.length}: ${symbol}`)
+        const result = await window.api.validateStock(symbol)
+        if (!result?.valid) invalid.add(symbol)
+      }
+      if (invalid.size) {
+        setTrackedStocks(prev => new Set([...prev].filter(symbol => !invalid.has(symbol))))
+        setKnownStocks(prev => prev.filter(item => !invalid.has(item.apiSymbol)))
+      }
+      setStockCleanupStatus(invalid.size
+        ? `Removed ${invalid.size} invalid Yahoo tickers. Save to apply.`
+        : `All ${symbols.length} tracked stock tickers passed Yahoo validation.`)
+    } catch (err) {
+      setStockCleanupStatus(`Yahoo validation stopped: ${err.message || String(err)}`)
+    } finally {
+      setStockCleanupBusy(false)
+    }
+  }, [trackedStocks, stockCleanupBusy])
 
   const keepCoreCryptoOnly = useCallback(() => {
     const bySymbol = new Map()
@@ -303,6 +332,13 @@ export default function ManagePage({ onSaved, aiRequest }) {
     createGroup(name)
     setMembers(name, members)
     setActiveGroup(name)
+  }
+
+  const createStockUniverseGroup = (key, label) => {
+    const members = stockUniverseEntries([key])
+      .map(item => item.apiSymbol)
+      .filter(apiSymbol => trackedStocks.has(apiSymbol))
+    createPresetGroup(label, members)
   }
 
   const marketSnapshotByKey = useMemo(() => {
@@ -589,6 +625,9 @@ export default function ManagePage({ onSaved, aiRequest }) {
               <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => importStockUniverse(Object.keys(STOCK_UNIVERSES))}>
                 Import All
               </button>
+              <button className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={cleanInvalidTrackedStocks} disabled={stockCleanupBusy || !trackedStocks.size}>
+                {stockCleanupBusy ? 'Checking' : 'Clean Yahoo'}
+              </button>
             </div>
           </div>
 
@@ -599,6 +638,7 @@ export default function ManagePage({ onSaved, aiRequest }) {
               </button>
             ))}
           </div>
+          {stockCleanupStatus && <div className="manage-inline-status">{stockCleanupStatus}</div>}
 
           {knownStocks.length > 0 && (
             <div className="panel-search-wrap">
@@ -716,6 +756,17 @@ export default function ManagePage({ onSaved, aiRequest }) {
               onClick={() => createPresetGroup('美股', allTracked.filter(a => knownStocks.some(s => s.apiSymbol === a.apiSymbol)).map(a => a.apiSymbol))}>
               生成美股组
             </button>
+          </div>
+
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+            {Object.entries(STOCK_UNIVERSES)
+              .filter(([key]) => key.startsWith('us100b'))
+              .map(([key, preset]) => (
+                <button key={key} className="zone-btn" style={{ fontSize: 11, padding: '2px 8px' }}
+                  onClick={() => createStockUniverseGroup(key, preset.label)}>
+                  Group: {preset.label}
+                </button>
+              ))}
           </div>
 
           {/* Member picker */}

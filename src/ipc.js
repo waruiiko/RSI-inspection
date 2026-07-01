@@ -342,7 +342,17 @@ exports.register = (ipcMain) => {
     })
 
     // Stocks: serial — Yahoo throttle is enforced inside yahoo.js; skip when market is closed
-    const stockJob = isUSMarketOpen()
+    const stockMarketOpen = isUSMarketOpen()
+    const skipStocks = !stockMarketOpen && shouldSkipStocksWhenClosed(scope)
+    if (skipStocks && stockAssets.length) {
+      pushStatus({
+        level: 'info',
+        scope: 'US stocks',
+        message: `Skipped ${stockAssets.length} stocks while US market is closed (${scope})`,
+      })
+    }
+
+    const stockJob = !skipStocks
       ? (async () => {
           for (const asset of stockAssets) {
             try {
@@ -401,6 +411,11 @@ function cleanupOldInstallers() {
     }
   }
   return { ok: true, kept: kept?.name ?? null, removed }
+}
+
+function shouldSkipStocksWhenClosed(scope) {
+  const key = String(scope || '')
+  return key.startsWith('auto-') || key.startsWith('scheduled-')
 }
 
 async function runWithConcurrency(items, concurrency, worker) {
@@ -502,7 +517,20 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
     derivatives,
   })
 
-  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives, signalHunter }
+  const reviewCandlesByTf = Object.fromEntries(
+    ['1h', '4h'].map(tf => [
+      tf,
+      (closedCandlesByTf[tf] ?? []).slice(-72).map(c => ({
+        time: c.time,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        closeTime: c.closeTime,
+      })),
+    ])
+  )
+
+  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives, signalHunter, reviewCandlesByTf }
 }
 
 async function fetchDerivativesSnapshot(asset, candlesByTf, rsi, volumeSignal, signalScore) {
