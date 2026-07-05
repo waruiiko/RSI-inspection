@@ -38,6 +38,7 @@ function mergeAssetData(prev, next) {
     derivatives: next.derivatives ?? prev.derivatives,
     signalHunter: next.signalHunter ?? prev.signalHunter,
     sparkline: next.sparkline?.length ? next.sparkline : prev.sparkline,
+    reviewCandlesByTf: next.reviewCandlesByTf ?? prev.reviewCandlesByTf,
   }
 }
 

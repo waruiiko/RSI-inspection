@@ -99,6 +99,50 @@ function rowMaxMove(row) {
   return values.length ? Math.max(...values) : null
 }
 
+
+function sumR(rows) {
+  return rows.reduce((sum, row) => sum + (Number.isFinite(row.rMultiple) ? row.rMultiple : 0), 0)
+}
+
+function groupTradeLogs(rows, keyFn, labelFn) {
+  const groups = new Map()
+  for (const row of rows) {
+    const rawKey = keyFn(row)
+    if (!rawKey) continue
+    const key = String(rawKey)
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: labelFn?.(row, key) ?? key,
+        total: 0,
+        wins: 0,
+        losses: 0,
+        netR: 0,
+      })
+    }
+    const group = groups.get(key)
+    group.total += 1
+    if (row.result === 'win') group.wins += 1
+    if (row.result === 'loss') group.losses += 1
+    group.netR += Number.isFinite(row.rMultiple) ? row.rMultiple : 0
+  }
+
+  return [...groups.values()]
+    .map(group => ({
+      ...group,
+      winRate: group.total ? (group.wins / group.total) * 100 : null,
+    }))
+    .sort((a, b) => {
+      const netDiff = (b.netR ?? 0) - (a.netR ?? 0)
+      if (netDiff) return netDiff
+      return b.total - a.total
+    })
+}
+
+function groupCountLabel(group) {
+  return `${group.total} 单 / ${group.winRate == null ? '-' : `${group.winRate.toFixed(1)}%`} / ${fmtR(group.netR)}`
+}
+
 function buildReviewReport(items, tradeLogs) {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000
   const byKey = new Map()
@@ -167,17 +211,31 @@ export default function SignalReviewPage({ onNavigate }) {
   const items = useSignalReviewStore(s => s.items)
   const tradeLogs = useSignalReviewStore(s => s.tradeLogs)
   const minScore = useSignalReviewStore(s => s.minScore)
+  const entryConfirmBufferPct = useSignalReviewStore(s => s.entryConfirmBufferPct)
+  const captureRejectStats = useSignalReviewStore(s => s.captureRejectStats)
+  const cleanNotice = useSignalReviewStore(s => s.cleanNotice)
   const remove = useSignalReviewStore(s => s.remove)
   const clear = useSignalReviewStore(s => s.clear)
   const clearTradeLogs = useSignalReviewStore(s => s.clearTradeLogs)
   const setMinScore = useSignalReviewStore(s => s.setMinScore)
+  const setEntryConfirmBufferPct = useSignalReviewStore(s => s.setEntryConfirmBufferPct)
+  const clearCleanNotice = useSignalReviewStore(s => s.clearCleanNotice)
   const [view, setView] = useState('samples')
   const [filter, setFilter] = useState('all')
+  const [sampleQuery, setSampleQuery] = useState('')
   const [logFilter, setLogFilter] = useState('all')
   const [logQuery, setLogQuery] = useState('')
+  const [logMinScore, setLogMinScore] = useState(minScore)
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearLogs, setConfirmClearLogs] = useState(false)
+  const [confirmClearAll, setConfirmClearAll] = useState(false)
   const report = useMemo(() => buildReviewReport(items, tradeLogs), [items, tradeLogs])
+  const captureRejectRows = useMemo(() => {
+    const reasons = captureRejectStats?.reasons ?? {}
+    return Object.entries(reasons)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+  }, [captureRejectStats])
 
   const handleClear = () => {
     clear()
@@ -187,6 +245,14 @@ export default function SignalReviewPage({ onNavigate }) {
   const handleClearLogs = () => {
     clearTradeLogs()
     setConfirmClearLogs(false)
+  }
+
+  const handleClearAll = () => {
+    clear()
+    clearTradeLogs()
+    setConfirmClear(false)
+    setConfirmClearLogs(false)
+    setConfirmClearAll(false)
   }
 
   const copyReport = async () => {
@@ -204,24 +270,73 @@ export default function SignalReviewPage({ onNavigate }) {
   }
 
   const filtered = useMemo(() => {
-    if (filter === 'all') return items
-    if (filter === 'entered') return items.filter(item => item.enteredAt)
-    return items.filter(item => item.result === filter)
-  }, [items, filter])
+    const q = sampleQuery.trim().toUpperCase()
+    return items
+      .filter(item => {
+        if (filter === 'all') return true
+        if (filter === 'entered') return item.enteredAt
+        return item.result === filter
+      })
+      .filter(item => !q || [
+        signalIdOf(item),
+        item.symbol,
+        item.name,
+        item.setup,
+        item.timeframe,
+        item.side,
+        item.resultLabel,
+      ].some(value => String(value ?? '').toUpperCase().includes(q)))
+  }, [items, filter, sampleQuery])
 
   const filteredTradeLogs = useMemo(() => {
     const q = logQuery.trim().toUpperCase()
+    const min = Number(logMinScore)
+    const scoreThreshold = Number.isFinite(min) ? min : 0
     return tradeLogs
       .filter(log => logFilter === 'all' || log.result === logFilter)
+      .filter(log => (Number.isFinite(log.score) ? log.score : 0) >= scoreThreshold)
       .filter(log => !q || [
         signalIdOf(log),
         log.symbol,
+        log.name,
         log.timeframe,
         log.side,
         log.setup,
         log.resultLabel,
       ].some(value => String(value ?? '').toUpperCase().includes(q)))
-  }, [tradeLogs, logFilter, logQuery])
+  }, [tradeLogs, logFilter, logQuery, logMinScore])
+
+  const logSummary = useMemo(() => {
+    const recent = filteredTradeLogs.slice(0, 20)
+    const wins = recent.filter(log => log.result === 'win')
+    const losses = recent.filter(log => log.result === 'loss')
+    const winR = sumR(wins)
+    const lossR = Math.abs(sumR(losses))
+    const netR = sumR(recent)
+    return {
+      recent,
+      wins,
+      losses,
+      winR,
+      lossR,
+      netR,
+      winRate: recent.length ? (wins.length / recent.length) * 100 : null,
+    }
+  }, [filteredTradeLogs])
+
+  const logBreakdown = useMemo(() => {
+    const recent = logSummary.recent
+    const setupGroups = groupTradeLogs(recent, row => row.setup, row => row.setup || 'Signal Hunter')
+    const timeframeGroups = groupTradeLogs(recent, row => row.timeframe, row => row.timeframe || '-')
+    const sideGroups = groupTradeLogs(recent, row => row.side, row => sideLabel(row.side))
+    return {
+      setupGroups,
+      timeframeGroups,
+      sideGroups,
+      worstSetups: setupGroups.slice().sort((a, b) => (a.netR ?? 0) - (b.netR ?? 0)).slice(0, 3),
+      bestSetups: setupGroups.slice(0, 3),
+    }
+  }, [logSummary.recent])
 
   const stats = useMemo(() => {
     const entered = items.filter(item => item.enteredAt)
@@ -286,7 +401,45 @@ export default function SignalReviewPage({ onNavigate }) {
             onChange={e => setMinScore(e.target.value)}
           />
         </label>
+        <label className="signal-review-score-control signal-review-buffer-control">
+          <span>确认缓冲 %</span>
+          <input
+            type="number"
+            min="0"
+            max="1"
+            step="0.05"
+            value={Number((entryConfirmBufferPct * 100).toFixed(2))}
+            onChange={e => setEntryConfirmBufferPct(Number(e.target.value) / 100)}
+          />
+        </label>
+        {confirmClearAll ? (
+          <div className="signal-review-clear-confirm">
+            <span>确认清空全部样本和日志？</span>
+            <button className="rule-del-btn" onClick={handleClearAll}>确认清空</button>
+            <button className="feed-type-btn" onClick={() => setConfirmClearAll(false)}>取消</button>
+          </div>
+        ) : (
+          <button className="feed-type-btn" disabled={!items.length && !tradeLogs.length} onClick={() => setConfirmClearAll(true)}>清空全部</button>
+        )}
       </div>
+
+      {cleanNotice && (
+        <div className="signal-review-clean-notice">
+          <span>{cleanNotice}</span>
+          <button type="button" onClick={clearCleanNotice}>知道了</button>
+        </div>
+      )}
+
+      {captureRejectStats && (
+        <div className="signal-review-filter-stats">
+          <strong>上轮过滤</strong>
+          <span>扫描 {captureRejectStats.total}</span>
+          <span>新增 {captureRejectStats.captured}</span>
+          {captureRejectRows.length ? captureRejectRows.map(([reason, count]) => (
+            <em key={reason}>{reason} {count}</em>
+          )) : <em>暂无过滤</em>}
+        </div>
+      )}
 
       {view === 'report' ? (
         <div className="signal-review-report">
@@ -376,6 +529,14 @@ export default function SignalReviewPage({ onNavigate }) {
             {label}
           </button>
         ))}
+        <input
+          className="search-input signal-review-sample-search"
+          type="search"
+          placeholder="搜索名称 / 标的 / 编号 / 形态..."
+          value={sampleQuery}
+          onChange={e => setSampleQuery(e.target.value)}
+        />
+        {sampleQuery && <button className="feed-type-btn" onClick={() => setSampleQuery('')}>清除</button>}
         {confirmClear ? (
           <div className="signal-review-clear-confirm">
             <span>确认清空全部样本？</span>
@@ -412,6 +573,8 @@ export default function SignalReviewPage({ onNavigate }) {
             <div className="signal-review-price-grid">
               <span><b>{formatPrice(item.capturedPrice)}</b><small>记录价</small></span>
               <span><b>{formatPrice(item.entryPrice)}</b><small>入场</small></span>
+              <span><b>{formatPrice(item.entryObservedPrice)}</b><small>观测价</small></span>
+              <span><b>{item.entryTriggerLabel ?? '-'}</b><small>触发方式</small></span>
               <span><b>{formatPrice(item.stopLoss)}</b><small>止损</small></span>
               <span><b>{formatPrice(targets[0])}</b><small>止盈 T1</small></span>
               <span><b>{formatPrice(targets[1])}</b><small>止盈 T2</small></span>
@@ -427,6 +590,7 @@ export default function SignalReviewPage({ onNavigate }) {
               <span><b>{horizonText(item, '24h')}</b><small>24h</small></span>
             </div>
             <div className="signal-review-tags">
+              {item.entryDiagnostic && <span className={item.enteredAt ? '' : 'risk'}>{item.entryDiagnostic}</span>}
               {(item.reasons ?? []).slice(0, 4).map(reason => <span key={reason}>{reason}</span>)}
               {(item.risks ?? []).slice(0, 2).map(risk => <span className="risk" key={risk}>{risk}</span>)}
               <button onClick={() => openInSignalHunter(item)}>去SH定位</button>
@@ -454,11 +618,22 @@ export default function SignalReviewPage({ onNavigate }) {
               <input
                 className="search-input signal-review-log-search"
                 type="search"
-                placeholder="搜索编号 / 标的 / 周期 / 形态..."
+                placeholder="搜索名称 / 标的 / 编号 / 周期 / 形态..."
                 value={logQuery}
                 onChange={e => setLogQuery(e.target.value)}
               />
               {logQuery && <button className="feed-type-btn" onClick={() => setLogQuery('')}>清除</button>}
+              <label className="signal-review-score-control signal-review-log-score-control">
+                <span>分数 ≥</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="10"
+                  step="0.1"
+                  value={logMinScore}
+                  onChange={e => setLogMinScore(e.target.value)}
+                />
+              </label>
             </div>
             <div className="signal-review-log-actions">
               <span>当前 {filteredTradeLogs.length} / 全部 {tradeLogs.length}</span>
@@ -473,23 +648,62 @@ export default function SignalReviewPage({ onNavigate }) {
               )}
             </div>
           </div>
+          <div className="signal-review-log-summary">
+            <div><span>最近 20 单</span><b>{logSummary.recent.length}</b></div>
+            <div><span>成功</span><b>{logSummary.wins.length} 单 / {fmtR(logSummary.winR)}</b></div>
+            <div><span>失败</span><b>{logSummary.losses.length} 单 / {fmtR(-logSummary.lossR)}</b></div>
+            <div><span>净收益</span><b>{fmtR(logSummary.netR)}</b></div>
+            <div><span>胜率</span><b>{logSummary.winRate == null ? '-' : `${logSummary.winRate.toFixed(1)}%`}</b></div>
+          </div>
+          <div className="signal-review-log-breakdown">
+            <section>
+              <div className="signal-review-report-title">按 setup 拆解</div>
+              {logBreakdown.setupGroups.length ? logBreakdown.setupGroups.slice(0, 6).map(group => (
+                <div key={group.key} className="signal-review-breakdown-row">
+                  <strong>{group.label}</strong>
+                  <span>{groupCountLabel(group)}</span>
+                </div>
+              )) : <div className="signal-review-empty compact">暂无可拆解的 setup</div>}
+            </section>
+            <section>
+              <div className="signal-review-report-title">按周期拆解</div>
+              {logBreakdown.timeframeGroups.length ? logBreakdown.timeframeGroups.slice(0, 6).map(group => (
+                <div key={group.key} className="signal-review-breakdown-row">
+                  <strong>{group.label}</strong>
+                  <span>{groupCountLabel(group)}</span>
+                </div>
+              )) : <div className="signal-review-empty compact">暂无可拆解的周期</div>}
+            </section>
+            <section>
+              <div className="signal-review-report-title">按方向拆解</div>
+              {logBreakdown.sideGroups.length ? logBreakdown.sideGroups.map(group => (
+                <div key={group.key} className="signal-review-breakdown-row">
+                  <strong>{group.label}</strong>
+                  <span>{groupCountLabel(group)}</span>
+                </div>
+              )) : <div className="signal-review-empty compact">暂无可拆解的方向</div>}
+            </section>
+          </div>
           {!filteredTradeLogs.length ? (
             <div className="signal-review-empty">
               暂无交易日志。SH复盘样本触及 ≥1.5R 止盈或止损后，会自动写入这里。
             </div>
           ) : (
             <div className="signal-review-log-list">
-              {filteredTradeLogs.map(log => (
+              {filteredTradeLogs.map((log, index) => (
                 <div key={log.id} className={`signal-review-log-row ${log.result}`}>
-                  <strong>{log.symbol}<small>{signalIdOf(log)}</small></strong>
+                  <span className="signal-review-log-index">{index + 1}</span>
+                  <strong>{log.symbol}<small>{log.name ? `${log.name} · ${signalIdOf(log)}` : signalIdOf(log)}</small></strong>
                   <span>{sideLabel(log.side)} · {log.timeframe}</span>
                   <span>{displaySetup(log.setup)}</span>
+                  <span>{log.entryTriggerLabel ?? '-'}</span>
                   <span>{log.result === 'win' ? `止盈${log.hitTarget ? ` T${log.hitTarget}` : ''}` : '止损'}</span>
-                  <span>入场 {formatPrice(log.entryPrice)}</span>
+                  <small>入场 {fmtTime(log.entryTime ?? log.enteredAt)}</small>
+                  <small>出场 {fmtTime(log.exitTime ?? log.closedAt)}</small>
+                  <span>入场 {formatPrice(log.entryPrice)} / {formatPrice(log.entryObservedPrice)}</span>
                   <span>离场 {formatPrice(log.exitPrice)}</span>
-                  <span>{fmtPct(log.returnPct)}</span>
-                  <span>{fmtR(log.rMultiple)}</span>
-                  <small>{fmtTime(log.closedAt)}</small>
+                  <span className="signal-review-log-return">{fmtPct(log.returnPct)}</span>
+                  <span className="signal-review-log-r">{fmtR(log.rMultiple)}</span>
                 </div>
               ))}
             </div>

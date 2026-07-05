@@ -40,48 +40,51 @@ function candidatePriority(asset) {
   return stockBias + score * 16 + derivativeScore * 10 + localScore * 8 + Math.min(20, move * 2) + Math.min(12, Math.log10(turnover / 1_000_000 + 1) * 4)
 }
 
+export function buildSignalHunterAiCandidate(asset) {
+  if (!Number.isFinite(Number(asset?.price))) return null
+  const tf = pickTf(asset)
+  const signal = TFS.includes(asset.signalHunter?.timeframe) ? asset.signalHunter : null
+  return {
+    key: assetKey(asset),
+    symbol: asset.symbol,
+    name: asset.name,
+    apiSymbol: asset.apiSymbol,
+    source: asset.source,
+    type: asset.type,
+    price: finite(asset.price),
+    change24h: finite(asset.change24h),
+    turnover: getQuoteVolume(asset),
+    preferredTimeframe: tf,
+    rsi: Object.fromEntries(['15m', '1h', '4h', '1d'].map(k => [k, finite(asset.rsi?.[k])])),
+    signalScore: asset.signalScore ?? {},
+    volumeSignal: asset.volumeSignal ?? {},
+    derivatives: asset.derivatives ?? null,
+    localSignalHunter: signal ? {
+      status: signal.status,
+      side: signal.side,
+      timeframe: signal.timeframe,
+      setup: signal.setup,
+      score: signal.score,
+      currentPrice: finite(signal.currentPrice),
+      entryPrice: finite(signal.entryPrice ?? signal.triggerPrice),
+      confirmPrice: finite(signal.confirmPrice),
+      stopLoss: finite(signal.stopLoss),
+      targets: [finite(signal.tp1), finite(signal.tp2), finite(signal.tp3)],
+      rewardRisk: finite(signal.rewardRisk ?? signal.score?.rewardRisk),
+      reasons: signal.reasons ?? [],
+      riskFlags: signal.riskFlags ?? [],
+      narrativeSummary: signal.narrativeSummary ?? '',
+      narrativeTags: signal.narrativeTags ?? [],
+      rejectReasons: signal.rejectReasons ?? [],
+    } : null,
+    priority: Math.round(candidatePriority(asset)),
+  }
+}
+
 export function buildSignalHunterAiCandidates(assets, limit = 60) {
   return assets
-    .filter(asset => Number.isFinite(Number(asset?.price)))
-    .map(asset => {
-      const tf = pickTf(asset)
-      const signal = TFS.includes(asset.signalHunter?.timeframe) ? asset.signalHunter : null
-      return {
-        key: assetKey(asset),
-        symbol: asset.symbol,
-        name: asset.name,
-        apiSymbol: asset.apiSymbol,
-        source: asset.source,
-        type: asset.type,
-        price: finite(asset.price),
-        change24h: finite(asset.change24h),
-        turnover: getQuoteVolume(asset),
-        preferredTimeframe: tf,
-        rsi: Object.fromEntries(['15m', '1h', '4h', '1d'].map(k => [k, finite(asset.rsi?.[k])])),
-        signalScore: asset.signalScore ?? {},
-        volumeSignal: asset.volumeSignal ?? {},
-        derivatives: asset.derivatives ?? null,
-        localSignalHunter: signal ? {
-          status: signal.status,
-          side: signal.side,
-          timeframe: signal.timeframe,
-          setup: signal.setup,
-          score: signal.score,
-          currentPrice: finite(signal.currentPrice),
-          entryPrice: finite(signal.entryPrice ?? signal.triggerPrice),
-          confirmPrice: finite(signal.confirmPrice),
-          stopLoss: finite(signal.stopLoss),
-          targets: [finite(signal.tp1), finite(signal.tp2), finite(signal.tp3)],
-          rewardRisk: finite(signal.rewardRisk ?? signal.score?.rewardRisk),
-          reasons: signal.reasons ?? [],
-          riskFlags: signal.riskFlags ?? [],
-          narrativeSummary: signal.narrativeSummary ?? '',
-          narrativeTags: signal.narrativeTags ?? [],
-          rejectReasons: signal.rejectReasons ?? [],
-        } : null,
-        priority: Math.round(candidatePriority(asset)),
-      }
-    })
+    .map(buildSignalHunterAiCandidate)
+    .filter(Boolean)
     .filter(c => {
       const minPriority = c.type === 'crypto' ? 14 : 8
       return c.priority >= minPriority || c.turnover >= 1_000_000
@@ -150,7 +153,46 @@ function deriveRewardRisk(side, entry, stop, targets) {
   return Number((reward / risk).toFixed(2))
 }
 
-function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, timeframe, riskFlags, distanceToEntryPct, asset }) {
+function targetAlreadyReached(side, currentPrice, targets) {
+  if (!Number.isFinite(currentPrice)) return false
+  return (targets ?? []).some(target => Number.isFinite(target) && (
+    side === 'short' ? currentPrice <= target * 1.001 : currentPrice >= target * 0.999
+  ))
+}
+
+function entryQualityDelta({ status, timeframe, distanceToEntryPct, entryPrice, stopLoss, asset }) {
+  const distance = Math.abs(Number(distanceToEntryPct) || 0)
+  const stopPct = Number.isFinite(entryPrice) && Number.isFinite(stopLoss) && entryPrice
+    ? (Math.abs(entryPrice - stopLoss) / Math.abs(entryPrice)) * 100
+    : null
+  const minStop = minExecutableStopDistance(asset, { entryPrice, stopLoss, timeframe })
+  const stopDistance = Number.isFinite(entryPrice) && Number.isFinite(stopLoss)
+    ? Math.abs(entryPrice - stopLoss)
+    : null
+  const stopRatio = Number.isFinite(minStop) && Number.isFinite(stopDistance) && minStop
+    ? stopDistance / minStop
+    : null
+
+  let delta = 0
+  if (timeframe === '4h') delta += 0.12
+  if (timeframe === '1h') delta -= 0.12
+  if (status === 'triggered' && distance >= 1.2) delta -= 0.35
+  else if (distance >= 2.4) delta -= 0.42
+  else if (distance >= 1.4) delta -= 0.24
+  else if (distance >= 0.25 && distance <= 0.9) delta += 0.12
+  if (Number.isFinite(stopRatio)) {
+    if (stopRatio < 1.12) delta -= 0.36
+    else if (stopRatio < 1.35) delta -= 0.18
+    else if (stopRatio >= 1.8 && stopRatio <= 3.6) delta += 0.12
+  }
+  if (Number.isFinite(stopPct)) {
+    if (timeframe === '1h' && stopPct > 8) delta -= 0.18
+    if (timeframe === '4h' && stopPct > 12) delta -= 0.14
+  }
+  return delta
+}
+
+function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, timeframe, riskFlags, distanceToEntryPct, asset, side, currentPrice, entryPrice, stopLoss, targets }) {
   if (!Number.isFinite(total)) return total
   const flags = Array.isArray(riskFlags) ? riskFlags.filter(Boolean).length : 0
   const rr = Number.isFinite(rewardRisk) ? rewardRisk : 0
@@ -170,6 +212,8 @@ function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, 
   delta += status === 'triggered' ? 0.18 : status === 'wait_entry' ? 0.05 : status === 'risk' ? -0.45 : status === 'rejected' ? -0.8 : 0
   delta -= Math.min(0.35, flags * 0.12)
   delta -= Math.min(0.28, distance * 0.025)
+  delta += entryQualityDelta({ status, timeframe, distanceToEntryPct, entryPrice, stopLoss, asset })
+  if (targetAlreadyReached(side, currentPrice, targets)) delta -= 0.55
   if (turnover >= 50_000_000) delta += 0.12
   else if (turnover > 0 && turnover < 5_000_000) delta -= 0.18
   if (Number.isFinite(derivatives?.score)) delta += Math.max(-0.36, Math.min(0.42, Number(derivatives.score) * 0.08 * oiWeight))
@@ -228,6 +272,7 @@ function validateSignal(sig, asset) {
   if (sig.side === 'short' && Number.isFinite(sig.stopLoss) && Number.isFinite(sig.entryPrice) && sig.stopLoss <= sig.entryPrice) reasons.push('做空失效价应高于入场')
   if (sig.side === 'long' && targets.some(target => !Number.isFinite(target) || target <= sig.entryPrice)) reasons.push('做多目标位应高于入场')
   if (sig.side === 'short' && targets.some(target => !Number.isFinite(target) || target >= sig.entryPrice)) reasons.push('做空目标位应低于入场')
+  if (targetAlreadyReached(sig.side, sig.currentPrice, targets)) reasons.push('当前价已到目标位，避免追单')
   const minStopDistance = minExecutableStopDistance(asset, sig)
   if (Number.isFinite(minStopDistance) && Number.isFinite(sig.entryPrice) && Number.isFinite(sig.stopLoss)) {
     const stopDistance = Math.abs(sig.entryPrice - sig.stopLoss)
@@ -288,6 +333,11 @@ export function normalizeSignalHunterAiResults(aiResult, assets) {
       riskFlags: allRiskFlags,
       distanceToEntryPct: pct(currentPrice, entryPrice),
       asset,
+      side,
+      currentPrice,
+      entryPrice,
+      stopLoss,
+      targets,
     })
 
     const sig = {

@@ -4,7 +4,7 @@ import useAlertStore from '../store/alertStore'
 import useSettingsStore from '../store/settingsStore'
 import { formatPrice } from '../utils/rsi'
 import { formatTurnover, getQuoteVolume } from '../utils/liquidity'
-import { buildSignalHunterAiCandidates, hasExecutableStopDistance, makeSignalHunterAiFeedItems, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
+import { buildSignalHunterAiCandidate, buildSignalHunterAiCandidates, hasExecutableStopDistance, makeSignalHunterAiFeedItems, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
 import { signalIdFromAsset } from '../utils/signalId'
 
 const ChartModal = lazy(() => import('./ChartModal'))
@@ -802,6 +802,32 @@ function signalHunterViewSummaryText({
   return [header, diffLine, ...body].filter(Boolean).join('\n\n')
 }
 
+function findInterestAsset(assets, input) {
+  const q = String(input ?? '').trim().toUpperCase()
+  if (!q) return null
+  return assets.find(asset => {
+    const values = [
+      asset.symbol,
+      asset.apiSymbol,
+      asset.name,
+      assetKeyForMatch(asset),
+    ].filter(Boolean).map(v => String(v).toUpperCase())
+    return values.some(v => v === q || v.includes(q))
+  }) ?? null
+}
+
+function assetKeyForMatch(asset) {
+  return `${asset.source ?? ''}:${asset.apiSymbol ?? asset.symbol ?? ''}`
+}
+
+function mergeSignalHunterCacheItems(previousItems, nextItems) {
+  const byKey = new Map((previousItems ?? []).map(item => [item.key ?? assetKeyForMatch(item), item]))
+  for (const item of nextItems ?? []) {
+    byKey.set(item.key ?? assetKeyForMatch(item), item)
+  }
+  return [...byKey.values()]
+}
+
 export default function SignalHunterPage() {
   const assets = useMarketStore(s => s.assets)
   const updatedAt = useMarketStore(s => s.updatedAt)
@@ -822,6 +848,7 @@ export default function SignalHunterPage() {
   const [showNewOnly, setShowNewOnly] = useState(false)
   const [hideDrifted, setHideDrifted] = useState(true)
   const [query, setQuery] = useState('')
+  const [interestSymbol, setInterestSymbol] = useState('')
   const [tableMode, setTableMode] = useState('detail')
   const [showFilters, setShowFilters] = useState(false)
   const [expanded, setExpanded] = useState(null)
@@ -1049,6 +1076,81 @@ export default function SignalHunterPage() {
     }
   }
 
+  const runInterestSignalHunter = async () => {
+    if (!window.api?.runCodexScreen || aiBusyRef.current) return
+    const asset = findInterestAsset(assets, interestSymbol || query)
+    if (!asset) {
+      setAiStatus('没有找到这个标的；请先确认它已经在当前行情/管理列表里。')
+      return
+    }
+    const candidate = buildSignalHunterAiCandidate(asset)
+    if (!candidate) {
+      setAiStatus(`${asset.symbol} 当前没有可用价格，暂时不能送入 AI 分析。`)
+      return
+    }
+    aiBusyRef.current = true
+    setAiBusy(true)
+    setAiStatus(`AI 正在单独分析 ${asset.symbol}...`)
+    try {
+      const payload = {
+        scope: `signal-hunter-interest-${asset.symbol}`,
+        createdAt: new Date().toISOString(),
+        updatedAt,
+        note: '临时单标的 Signal Hunter 分析：只识别结构、方向、关键位、风险和是否值得继续观察；不要输出交易指令。',
+        candidates: [candidate],
+      }
+      const res = await window.api.runCodexScreen(payload)
+      if (!res?.ok || !res.result) throw new Error(res?.parseError || res?.error || 'AI 未返回有效 JSON')
+      const normalized = normalizeSignalHunterAiResults(res.result, assets)
+      if (!normalized.length) throw new Error('AI 结果没有匹配到当前标的')
+      const runAt = Date.now()
+      const cached = loadJson(SH_AI_CACHE_KEY, null)
+      const previousItems = cached?.items ?? []
+      const mergedItems = mergeSignalHunterCacheItems(previousItems, normalized)
+      const changes = collectStatusChanges(previousItems, normalized, runAt)
+      const diff = collectAiDiff(previousItems, mergedItems, runAt)
+      applySignalHunterAiResults(normalized)
+      const feedItems = makeSignalHunterAiFeedItems(normalized, Date.now())
+      if (feedItems.length) addFeedItems(feedItems)
+      const live = mergedItems.filter(item => item.signalHunter?.status !== 'rejected').length
+      const meta = {
+        ...(cached?.meta ?? {}),
+        runAt,
+        snapshotAt: updatedAt ?? Date.now(),
+        total: mergedItems.length,
+        live,
+        interestSymbol: asset.symbol,
+      }
+      saveJson(SH_AI_CACHE_KEY, { meta, items: mergedItems })
+      saveJson(SH_AI_DIFF_KEY, diff)
+      setAiRunMeta(meta)
+      setAiDiff(diff)
+      if (changes.length) {
+        setStatusChanges(prev => {
+          const next = [...changes, ...prev].slice(0, 100)
+          saveJson(SH_AI_CHANGES_KEY, next)
+          return next
+        })
+      }
+      setInterestSymbol(asset.symbol)
+      setQuery(asset.symbol)
+      setAiView('all')
+      setFilter('all')
+      setExecutionFilter('all')
+      setShowRejected(true)
+      setShowNewOnly(false)
+      setHideDrifted(false)
+      setSortMode('ai')
+      setExpanded(signalKey(asset))
+      setAiStatus(`AI 已完成 ${asset.symbol} 临时分析，并写入 SH。`)
+    } catch (err) {
+      setAiStatus(`${asset?.symbol ?? interestSymbol} 临时分析失败：${err.message}`)
+    } finally {
+      aiBusyRef.current = false
+      setAiBusy(false)
+    }
+  }
+
   useEffect(() => {
     if (!updatedAt || !assets.length) return
     const intervalMs = Math.max(1, Number(shAiInterval) || 30) * 60 * 1000
@@ -1073,6 +1175,7 @@ export default function SignalHunterPage() {
   const statusChangeByKey = useMemo(() => new Map(statusChanges.map(change => [change.key, change])), [statusChanges])
   const changedKeys = statusChangeByKey
   const aiExpired = isSignalHunterAiExpired(aiRunMeta?.runAt, shAiInterval, now)
+  const interestAsset = useMemo(() => findInterestAsset(assets, interestSymbol), [assets, interestSymbol])
 
   const rows = useMemo(() => {
     const q = query.trim().toUpperCase()
@@ -1360,6 +1463,37 @@ export default function SignalHunterPage() {
           {aiBusy ? 'AI识别中' : 'AI识别SH'}
         </button>
         {aiStatus && <span className="signal-hunter-ai-status">{aiStatus}</span>}
+      </div>
+
+      <div className="signal-hunter-interest-panel">
+        <div className="signal-hunter-interest-copy">
+          <b>临时标的</b>
+          <span>输入一个当前管理列表里的代码，让 AI 单独补一份 SH 结构分析。</span>
+        </div>
+        <div className="signal-hunter-interest-controls">
+          <input
+            type="search"
+            className="search-input signal-hunter-interest-input"
+            placeholder="例如 AAPL / BTCUSDT / SPY"
+            value={interestSymbol}
+            onChange={e => setInterestSymbol(e.target.value.toUpperCase())}
+            onKeyDown={e => {
+              if (e.key === 'Enter') runInterestSignalHunter()
+            }}
+          />
+          {interestSymbol && (
+            <span className={`signal-hunter-interest-match ${interestAsset ? 'ok' : 'miss'}`}>
+              {interestAsset ? `${interestAsset.symbol} · ${formatPrice(livePriceOf(interestAsset))}` : '未匹配'}
+            </span>
+          )}
+          <button
+            className="zone-btn signal-hunter-ai-btn"
+            onClick={runInterestSignalHunter}
+            disabled={aiBusy || !interestSymbol.trim()}
+          >
+            {aiBusy ? '分析中' : '分析这只'}
+          </button>
+        </div>
       </div>
 
       {showFilters && <div className="signal-hunter-controls">
