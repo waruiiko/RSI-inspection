@@ -9,7 +9,6 @@ const MAX_ITEMS = 500
 const MAX_TRADE_LOGS = 1000
 const DEFAULT_MIN_REVIEW_SCORE = 7.5
 const MIN_TAKE_PROFIT_R = 1.5
-const MIN_REVIEW_REWARD_RISK = 1.8
 const DEFAULT_ENTRY_CONFIRM_BUFFER_PCT = 0.0015
 const SIMILAR_PRICE_PCT = 0.015
 const SIMILAR_REVIEW_WINDOW_MS = 12 * 60 * 60 * 1000
@@ -19,7 +18,7 @@ const HORIZONS = [
   { key: '4h', ms: 4 * 60 * 60 * 1000 },
   { key: '24h', ms: 24 * 60 * 60 * 1000 },
 ]
-const ACTIONABLE_STATUSES = new Set(['triggered', 'armed', 'wait_entry', 'wait_confirm', 'watch'])
+const REVIEWABLE_STATUSES = new Set(['triggered', 'armed', 'wait_entry', 'wait_confirm', 'watch', 'risk'])
 
 function loadItems() {
   try {
@@ -229,15 +228,11 @@ function dedupeSimilarItems(items) {
 function captureRejectReason(asset, minScore) {
   const sig = asset?.signalHunter
   if (!sig) return '无 SH 信号'
-  if (!ACTIONABLE_STATUSES.has(sig.status) || sig.rejected) return '状态不可执行'
-  if ((sig.score?.total ?? 0) < minScore) return '综合分不足'
-  if (Number.isFinite(sig.score?.chart) && sig.score.chart < 6.2) return '图表分不足'
-  if (Number.isFinite(sig.score?.data) && sig.score.data < 5.5) return '数据分不足'
-  if ((sig.riskFlags ?? []).filter(Boolean).length >= 3) return '风险标签过多'
-  const rewardRisk = finite(sig.rewardRisk ?? sig.score?.rewardRisk)
-  if (Number.isFinite(rewardRisk) && rewardRisk < MIN_REVIEW_REWARD_RISK) return 'R 值不足'
+  if (sig.rejected || sig.status === 'rejected') return '已剔除'
+  if (!REVIEWABLE_STATUSES.has(sig.status)) return '状态不可识别'
   if (sig.side !== 'long' && sig.side !== 'short') return '方向无效'
   if (!Number.isFinite(sig.entryPrice ?? sig.triggerPrice) || !Number.isFinite(sig.stopLoss)) return '价格缺失'
+  if ((sig.score?.total ?? 0) < minScore) return '综合分不足'
   return null
 }
 

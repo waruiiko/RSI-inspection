@@ -551,7 +551,7 @@ export default function SignalReviewPage({ onNavigate }) {
       <div className="signal-review-list">
         {!filtered.length ? (
           <div className="signal-review-empty">
-            暂无复盘样本。等待 SH 页面出现评分 ≥ {minScore}、且具备入场价/止损价的信号后，这里会自动开始记录。
+            暂无复盘样本。等待 SH 页面出现评分 ≥ {minScore}、未被剔除且具备入场价/止损价的信号后，这里会自动开始记录。
           </div>
         ) : filtered.map(item => (
           (() => {
