@@ -226,6 +226,7 @@ export default function SignalReviewPage({ onNavigate }) {
   const [logFilter, setLogFilter] = useState('all')
   const [logQuery, setLogQuery] = useState('')
   const [logMinScore, setLogMinScore] = useState(minScore)
+  const [showLogBreakdown, setShowLogBreakdown] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearLogs, setConfirmClearLogs] = useState(false)
   const [confirmClearAll, setConfirmClearAll] = useState(false)
@@ -364,7 +365,7 @@ export default function SignalReviewPage({ onNavigate }) {
   }, [items])
 
   return (
-    <div className="signal-review-page">
+    <div className={`signal-review-page ${view === 'logs' ? 'signal-review-page-logs' : ''}`}>
       <div className="signal-review-head">
         <div>
           <h2>SH复盘</h2>
@@ -430,7 +431,7 @@ export default function SignalReviewPage({ onNavigate }) {
         </div>
       )}
 
-      {captureRejectStats && (
+      {view === 'samples' && captureRejectStats && (
         <div className="signal-review-filter-stats">
           <strong>上轮过滤</strong>
           <span>扫描 {captureRejectStats.total}</span>
@@ -654,8 +655,16 @@ export default function SignalReviewPage({ onNavigate }) {
             <div><span>失败</span><b>{logSummary.losses.length} 单 / {fmtR(-logSummary.lossR)}</b></div>
             <div><span>净收益</span><b>{fmtR(logSummary.netR)}</b></div>
             <div><span>胜率</span><b>{logSummary.winRate == null ? '-' : `${logSummary.winRate.toFixed(1)}%`}</b></div>
+            <button
+              type="button"
+              className="feed-type-btn signal-review-breakdown-toggle"
+              aria-expanded={showLogBreakdown}
+              onClick={() => setShowLogBreakdown(value => !value)}
+            >
+              {showLogBreakdown ? '收起拆解' : '查看拆解'}
+            </button>
           </div>
-          <div className="signal-review-log-breakdown">
+          {showLogBreakdown && <div className="signal-review-log-breakdown">
             <section>
               <div className="signal-review-report-title">按 setup 拆解</div>
               {logBreakdown.setupGroups.length ? logBreakdown.setupGroups.slice(0, 6).map(group => (
@@ -683,7 +692,7 @@ export default function SignalReviewPage({ onNavigate }) {
                 </div>
               )) : <div className="signal-review-empty compact">暂无可拆解的方向</div>}
             </section>
-          </div>
+          </div>}
           {!filteredTradeLogs.length ? (
             <div className="signal-review-empty">
               暂无交易日志。SH复盘样本触及 ≥1.5R 止盈或止损后，会自动写入这里。

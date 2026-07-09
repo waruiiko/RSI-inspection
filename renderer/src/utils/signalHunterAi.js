@@ -196,6 +196,9 @@ function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, 
   if (!Number.isFinite(total)) return total
   const flags = Array.isArray(riskFlags) ? riskFlags.filter(Boolean).length : 0
   const rr = Number.isFinite(rewardRisk) ? rewardRisk : 0
+  const chartScore = clamp(Number(chart) || 0, 0, 10)
+  const dataScore = clamp(Number(data) || 0, 0, 10)
+  const riskScore = clamp(Number(risk) || 0, -3, 2)
   const distance = Math.abs(Number(distanceToEntryPct) || 0)
   const turnover = getQuoteVolume(asset)
   const derivatives = asset?.derivatives
@@ -205,10 +208,15 @@ function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, 
   const oiRef = oi4h ?? oi1h
   const oiWeight = timeframe === '1h' ? 1.55 : timeframe === '4h' ? 1.25 : 1
 
+  const rrComponent = clamp(1.2 + (rr - 1.5) * 0.55, 0, 2)
+  const riskControlComponent = ((riskScore + 3) / 5) * 2
+  const evidenceScore =
+    chartScore * 0.4 +
+    dataScore * 0.2 +
+    rrComponent +
+    riskControlComponent
+
   let delta = 0
-  delta += (Number(chart) - 6) * 0.08
-  delta += (Number(data) - 5) * 0.06
-  delta += Math.max(-0.35, Math.min(0.45, (rr - 2.2) * 0.18))
   delta += status === 'triggered' ? 0.18 : status === 'wait_entry' ? 0.05 : status === 'risk' ? -0.45 : status === 'rejected' ? -0.8 : 0
   delta -= Math.min(0.35, flags * 0.12)
   delta -= Math.min(0.28, distance * 0.025)
@@ -225,11 +233,8 @@ function recalibrateSignalScore({ total, chart, data, risk, rewardRisk, status, 
   }
   if (Number.isFinite(fundingRate) && Math.abs(fundingRate) >= 0.06) delta -= 0.18 * oiWeight
 
-  const jitterSeed = String(asset?.symbol ?? '')
-    .split('')
-    .reduce((sum, ch) => sum + ch.charCodeAt(0), 0)
-  const jitter = ((jitterSeed % 7) - 3) * 0.03
-  return Number(clamp(total + delta + jitter, 0, 10).toFixed(1))
+  const blendedScore = total * 0.6 + evidenceScore * 0.4
+  return Number(clamp(blendedScore + delta, 0, 10).toFixed(1))
 }
 
 export function minExecutableStopDistance(asset, sig) {

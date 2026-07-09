@@ -169,6 +169,18 @@ function probeFromAsset(item, asset, fallbackPrice, sinceTs) {
   return normalizeProbe(last)
 }
 
+function candleTime(candle) {
+  return finite(candle?.closeTime ?? candle?.time)
+}
+
+function firstMatchingCandle(item, asset, sinceTs, predicate) {
+  const candles = asset?.reviewCandlesByTf?.[item.timeframe] ?? []
+  return candles
+    .filter(candle => (candleTime(candle) ?? 0) >= sinceTs)
+    .sort((a, b) => (candleTime(a) ?? 0) - (candleTime(b) ?? 0))
+    .find(candle => predicate(normalizeProbe(candle))) ?? null
+}
+
 function entryObservedPrice(item, probe) {
   const p = normalizeProbe(probe)
   const trigger = item.entryTrigger ?? inferEntryTrigger(item.side, item.entryPrice, item.capturedPrice, item.setup)
@@ -434,13 +446,22 @@ function normalizeTradeLog(log) {
 
 function similarTradeLog(a, b) {
   if (!a || !b) return false
+  const aStart = finite(a.entryTime ?? a.enteredAt)
+  const bStart = finite(b.entryTime ?? b.enteredAt)
+  const aEnd = finite(a.exitTime ?? a.closedAt)
+  const bEnd = finite(b.exitTime ?? b.closedAt)
+  const overlaps = Number.isFinite(aStart) && Number.isFinite(bStart)
+    && Number.isFinite(aEnd) && Number.isFinite(bEnd)
+    && Math.max(aStart, bStart) <= Math.min(aEnd, bEnd)
   return String(a.symbol).toUpperCase() === String(b.symbol).toUpperCase()
     && a.side === b.side
-    && a.timeframe === b.timeframe
-    && a.result === b.result
-    && closeEnough(a.entryPrice, b.entryPrice)
-    && closeEnough(a.exitPrice, b.exitPrice)
-    && timeClose(a.closedAt, b.closedAt, SIMILAR_LOG_WINDOW_MS)
+    && (overlaps || (
+      a.timeframe === b.timeframe
+      && a.result === b.result
+      && closeEnough(a.entryPrice, b.entryPrice)
+      && closeEnough(a.exitPrice, b.exitPrice)
+      && timeClose(a.closedAt, b.closedAt, SIMILAR_LOG_WINDOW_MS)
+    ))
 }
 
 function dedupeSimilarTradeLogs(logs) {
@@ -526,8 +547,11 @@ function updateItem(item, asset, now, entryConfirmBufferPct = DEFAULT_ENTRY_CONF
     next.entryDiagnostic = entryRejectDiagnostic(next, entryProbe, entryConfirmBufferPct) ?? next.entryDiagnostic
   }
   if (justEntered) {
-    next.enteredAt = now
-    next.entryObservedPrice = entryObservedPrice(next, entryProbe)
+    const entryCandle = firstMatchingCandle(next, asset, next.capturedAt, probe =>
+      entryConfirmed(next, probe, entryConfirmBufferPct))
+    const observedEntryProbe = entryCandle ? normalizeProbe(entryCandle) : entryProbe
+    next.enteredAt = candleTime(entryCandle) ?? now
+    next.entryObservedPrice = entryObservedPrice(next, observedEntryProbe)
     next.entryDiagnostic = entryDiagnostic(next)
   }
 
@@ -554,17 +578,21 @@ function updateItem(item, asset, now, entryConfirmBufferPct = DEFAULT_ENTRY_CONF
     if (justEntered) {
       next.result = 'open'
       next.resultLabel = '已入场'
-    } else if (!closed && hitStop(next, exitProbe)) {
-      next.result = 'loss'
-      next.resultLabel = '触及止损'
-      next.closedAt = now
-      next.exitObservedPrice = next.stopLoss
-    } else if (!closed && hitTarget(next, exitProbe)) {
-      next.result = 'win'
-      const targetIndex = hitTargetIndex(next, exitProbe)
-      next.resultLabel = targetIndex >= 0 ? `到达T${targetIndex + 1}` : '到达目标'
-      next.closedAt = now
-      next.exitObservedPrice = validTargets(next.side, next.entryPrice, next.stopLoss, next.targets)[targetIndex] ?? price
+    } else if (!closed && (hitStop(next, exitProbe) || hitTarget(next, exitProbe))) {
+      const exitCandle = firstMatchingCandle(next, asset, next.enteredAt, probe =>
+        hitStop(next, probe) || hitTarget(next, probe))
+      const observedExitProbe = exitCandle ? normalizeProbe(exitCandle) : exitProbe
+      next.closedAt = candleTime(exitCandle) ?? now
+      if (hitStop(next, observedExitProbe)) {
+        next.result = 'loss'
+        next.resultLabel = '触及止损'
+        next.exitObservedPrice = next.stopLoss
+      } else {
+        const targetIndex = hitTargetIndex(next, observedExitProbe)
+        next.result = 'win'
+        next.resultLabel = targetIndex >= 0 ? `到达T${targetIndex + 1}` : '到达目标'
+        next.exitObservedPrice = validTargets(next.side, next.entryPrice, next.stopLoss, next.targets)[targetIndex] ?? price
+      }
     } else if (!closed) {
       next.result = 'open'
       next.resultLabel = '已入场'

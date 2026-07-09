@@ -5195,13 +5195,17 @@ select {
 
 .signal-review-log-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  grid-template-columns: repeat(5, minmax(120px, 1fr)) auto;
   gap: 8px;
-  padding: 0 12px;
+  align-items: stretch;
 }
 
 .signal-review-log-summary div {
-  padding: 10px 12px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg2);
@@ -5215,16 +5219,56 @@ select {
 
 .signal-review-log-summary b {
   display: block;
-  margin-top: 4px;
   color: var(--text);
-  font-size: 15px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.signal-review-breakdown-toggle {
+  min-width: 78px;
 }
 
 .signal-review-log-breakdown {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  padding: 0 12px;
+  padding: 0;
+}
+
+.signal-review-page-logs {
+  padding-top: 12px;
+  gap: 8px;
+}
+
+.signal-review-page-logs .signal-review-head {
+  align-items: center;
+}
+
+.signal-review-page-logs .signal-review-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.signal-review-page-logs .signal-review-head p {
+  display: none;
+}
+
+.signal-review-page-logs .signal-review-summary div {
+  padding: 5px 9px;
+}
+
+.signal-review-page-logs .signal-review-summary b {
+  display: inline;
+  font-size: 14px;
+}
+
+.signal-review-page-logs .signal-review-summary span {
+  display: inline;
+  margin-left: 5px;
+}
+
+.signal-review-page-logs .signal-review-log-toolbar {
+  padding: 7px 8px;
 }
 
 .signal-review-log-breakdown section {
