@@ -24,6 +24,12 @@ contextBridge.exposeInMainWorld('api', {
 
   fetchRawOHLCV: (symbol, source, timeframes) =>
     ipcRenderer.invoke('market:ohlcv', { symbol, source, timeframes }),
+  runSignalHunterReplay: (options) => ipcRenderer.invoke('market:signalReplay', options),
+  loadSignalLifecycle: () => ipcRenderer.invoke('signalLifecycle:load'),
+  saveSignalLifecycle: (items) => ipcRenderer.invoke('signalLifecycle:save', items),
+  loadSignalReplayHistory: () => ipcRenderer.invoke('signalReplay:history'),
+  loadOperationalData: (key) => ipcRenderer.invoke('operational:load', key),
+  saveOperationalData: (key, value) => ipcRenderer.invoke('operational:save', { key, value }),
 
   // Asset management
   getAssetsConfig:  ()       => ipcRenderer.invoke('assets:getConfig'),
@@ -68,5 +74,7 @@ contextBridge.exposeInMainWorld('api', {
   runCodexMarketChat:  (data)    => ipcRenderer.invoke('codex:runMarketChat', data),
   runCodexManagePlan:  (data)    => ipcRenderer.invoke('codex:runManagePlan', data),
   runCodexAlertPlan:   (data)    => ipcRenderer.invoke('codex:runAlertPlan', data),
+  getCodexJobs:        ()        => ipcRenderer.invoke('codex:jobs'),
+  cancelCodexJobs:     ()        => ipcRenderer.invoke('codex:cancelJobs'),
   openPath:            (target)  => ipcRenderer.invoke('shell:openPath', target),
 })

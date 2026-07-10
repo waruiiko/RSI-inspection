@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { hydrateOperationalData, persistOperationalData } from '../utils/operationalData'
 
 const KEY = 'rsi:signalTrail'
 const MAX_ITEMS = 200
@@ -9,7 +10,9 @@ function loadTrail() {
 }
 
 function saveTrail(items) {
-  localStorage.setItem(KEY, JSON.stringify(items.slice(0, MAX_ITEMS)))
+  const next = items.slice(0, MAX_ITEMS)
+  localStorage.setItem(KEY, JSON.stringify(next))
+  persistOperationalData('signalTrail', next)
 }
 
 function stageOf(asset) {
@@ -25,6 +28,10 @@ function stageOf(asset) {
 
 const useSignalTrailStore = create((set, get) => ({
   items: loadTrail(),
+  hydrate: async () => {
+    const items = await hydrateOperationalData('signalTrail', get().items)
+    if (Array.isArray(items)) set({ items })
+  },
   updateFromAssets: (assets) => {
     const now = Date.now()
     const existing = new Map(get().items.map(item => [item.key, item]))
@@ -34,16 +41,31 @@ const useSignalTrailStore = create((set, get) => ({
       const prev = existing.get(key)
       if (!stage) {
         if (prev && prev.status !== 'retired') {
-          existing.set(key, { ...prev, status: 'retired', retiredAt: now, updatedAt: now })
+          existing.set(key, {
+            ...prev, status: 'retired', retiredAt: now, updatedAt: now,
+            events: [{ ts: now, type: 'retired', stage: prev.stage, price: asset.price, label: '资金结构退回中性/观察' }, ...(prev.events ?? [])].slice(0, 30),
+          })
         }
         continue
       }
+      const status = prev ? 'active' : 'new'
+      const transitioned = !prev || prev.stage !== stage || prev.status !== status
+      const events = transitioned ? [{
+        ts: now,
+        type: !prev ? 'discovered' : prev.status === 'retired' ? 'reactivated' : 'stage_change',
+        from: prev?.stage ?? null,
+        stage,
+        price: asset.price,
+        oiChange4h: asset.derivatives?.oiChange4h ?? null,
+        fundingRate: asset.derivatives?.fundingRate ?? null,
+        label: !prev ? '首次发现资金结构' : `${prev.stage ?? '观察'} → ${stage}`,
+      }, ...(prev?.events ?? [])].slice(0, 30) : (prev.events ?? [])
       existing.set(key, {
         key,
         symbol: asset.symbol,
         source: asset.source,
         stage,
-        status: prev ? 'active' : 'new',
+        status,
         firstSeenAt: prev?.firstSeenAt ?? now,
         firstPrice: prev?.firstPrice ?? asset.price,
         updatedAt: now,
@@ -59,6 +81,7 @@ const useSignalTrailStore = create((set, get) => ({
           asset.volumeSignal?.['4h']?.label,
           asset.volumeSignal?.['1h']?.label,
         ].filter(Boolean),
+        events,
       })
     }
     const next = Array.from(existing.values())

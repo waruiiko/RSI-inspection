@@ -36,6 +36,9 @@ function mergeAssetData(prev, next) {
     volumeSignal: { ...(prev.volumeSignal ?? {}), ...(next.volumeSignal ?? {}) },
     signalScore: { ...(prev.signalScore ?? {}), ...(next.signalScore ?? {}) },
     derivatives: next.derivatives ?? prev.derivatives,
+    liquidity: next.liquidity ?? prev.liquidity,
+    marketSession: next.marketSession ?? prev.marketSession,
+    dataQuality: next.dataQuality ?? prev.dataQuality,
     signalHunter: next.signalHunter ?? prev.signalHunter,
     sparkline: next.sparkline?.length ? next.sparkline : prev.sparkline,
     reviewCandlesByTf: next.reviewCandlesByTf ?? prev.reviewCandlesByTf,
@@ -133,7 +136,14 @@ const useMarketStore = create((set, get) => ({
     set(state => ({
       assets: state.assets.map(asset => {
         const signalHunter = byKey.get(assetKey(asset)) ?? bySymbol.get(String(asset.symbol ?? '').toUpperCase())
-        return signalHunter ? { ...asset, signalHunter } : asset
+        if (!signalHunter) return asset
+        return {
+          ...asset,
+          signalHunter: {
+            ...signalHunter,
+            structureCandidates: signalHunter.structureCandidates ?? asset.signalHunter?.structureCandidates ?? [],
+          },
+        }
       }),
     }))
   },

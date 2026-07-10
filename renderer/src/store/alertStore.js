@@ -153,8 +153,27 @@ const useAlertStore = create((set, get) => ({
 
   addFeedItems: (items) => {
     const ts = Date.now()
-    const stamped = items.map((item, i) => ({ ...item, id: `${ts}_${i}`, ts }))
-    const next = [...stamped, ...get().feed].slice(0, 200)
+    const current = get().feed
+    const stamped = []
+    const replaced = new Set()
+    for (const [i, item] of items.entries()) {
+      const eventKey = [item.symbol ?? '', item.type ?? '', item.timeframe ?? '', item.signal ?? item.condition ?? ''].join('|')
+      const duplicate = current.find(row => row.eventKey === eventKey && ts - (row.ts ?? 0) <= 30 * 60 * 1000)
+      if (duplicate) {
+        replaced.add(duplicate.id)
+        const escalated = Number(item.level ?? 0) > Number(duplicate.level ?? 0)
+        stamped.push({
+          ...duplicate, ...item, id: duplicate.id, eventKey, ts,
+          firstSeenAt: duplicate.firstSeenAt ?? duplicate.ts,
+          occurrenceCount: (duplicate.occurrenceCount ?? 1) + 1,
+          eventStatus: escalated ? 'pending' : duplicate.eventStatus ?? 'pending',
+          escalation: escalated ? { from: duplicate.level ?? 0, to: item.level ?? 0, at: ts } : duplicate.escalation,
+        })
+      } else {
+        stamped.push({ ...item, id: `${ts}_${i}`, ts, firstSeenAt: ts, eventKey, occurrenceCount: 1, eventStatus: 'pending' })
+      }
+    }
+    const next = [...stamped, ...current.filter(item => !replaced.has(item.id))].slice(0, 200)
     set({ feed: next })
     _saveFeedDebounced(next)
   },

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import useSignalTrailStore from '../store/signalTrailStore'
 
 const STAGE_LABELS = {
@@ -26,6 +27,7 @@ function fmtPct(v) {
 export default function SignalTrailPage() {
   const items = useSignalTrailStore(s => s.items)
   const clear = useSignalTrailStore(s => s.clear)
+  const [expanded, setExpanded] = useState(null)
 
   return (
     <div className="ai-page">
@@ -50,13 +52,14 @@ export default function SignalTrailPage() {
               <th>24H</th>
               <th>资金结构</th>
               <th>原因</th>
+              <th>轨迹</th>
             </tr>
           </thead>
           <tbody>
             {!items.length ? (
-              <tr><td colSpan={9} className="ai-empty">暂无信号轨迹。资金结构信号出现后会自动记录。</td></tr>
+              <tr><td colSpan={10} className="ai-empty">暂无信号轨迹。资金结构信号出现后会自动记录。</td></tr>
             ) : items.map(item => (
-              <tr key={item.key}>
+              <tr key={item.key} className={expanded === item.key ? 'signal-trail-expanded' : ''}>
                 <td><b>{item.symbol}</b></td>
                 <td>{STAGE_LABELS[item.stage] ?? item.stage}</td>
                 <td>
@@ -70,6 +73,16 @@ export default function SignalTrailPage() {
                 <td className={(item.change24h ?? 0) >= 0 ? 'pos' : 'neg'}>{fmtPct(item.change24h)}</td>
                 <td>{item.derivatives?.label ?? '-'}</td>
                 <td>{item.localReasons?.join('，') || '-'}</td>
+                <td>
+                  <button className="zone-btn" onClick={() => setExpanded(expanded === item.key ? null : item.key)}>{item.events?.length ?? 0} 节点</button>
+                  {expanded === item.key && <div className="signal-trail-timeline">
+                    {(item.events ?? []).map((event, index) => <div key={`${event.ts}-${index}`}>
+                      <i />
+                      <b>{fmtTime(event.ts)} · {event.label}</b>
+                      <span>{event.price ?? '-'} · OI4H {fmtPct(event.oiChange4h)} · 费率 {fmtPct(event.fundingRate)}</span>
+                    </div>)}
+                  </div>}
+                </td>
               </tr>
             ))}
           </tbody>

@@ -8,7 +8,8 @@ const binance        = require('./data/binance')
 const yahoo          = require('./data/yahoo')
 const { getAll, getCrypto, getStocks, getRuntimeAll } = require('./assets')
 const config         = require('./config')
-const { isUSMarketOpen } = require('./marketHours')
+const { isUSMarketOpen, getUSMarketSession } = require('./marketHours')
+const rsiIndicator = require('./indicators/rsi')
 
 const DEFAULT_TIMEFRAMES = ['15m', '1h', '4h', '1d']
 const AUTO_TRADFI_TIMEFRAMES = ['15m', '1h', '4h', '1d']
@@ -16,6 +17,51 @@ const AUTO_TRADFI_STRATEGIES = ['breakout', 'breakdown', 'volume_divergence']
 let _indicatorWorker = null
 let _indicatorSeq = 0
 const _indicatorPending = new Map()
+let _codexQueue = Promise.resolve()
+const _cancelledCodexJobs = new Set()
+
+function codexJobLog() {
+  const items = config.loadOperationalData('aiJobs')
+  return Array.isArray(items) ? items : []
+}
+
+function saveCodexJob(job) {
+  const next = [job, ...codexJobLog().filter(item => item.id !== job.id)].slice(0, 100)
+  config.saveOperationalData('aiJobs', next)
+}
+
+function enqueueCodexJob(type, payload, runner) {
+  const job = {
+    id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type,
+    scope: payload?.scope ?? payload?.item?.symbol ?? '',
+    status: 'queued',
+    queuedAt: Date.now(),
+  }
+  saveCodexJob(job)
+  const execute = async () => {
+    if (_cancelledCodexJobs.has(job.id)) {
+      const cancelled = { ...job, status: 'cancelled', completedAt: Date.now(), error: '用户取消' }
+      saveCodexJob(cancelled)
+      return { ok: false, cancelled: true, jobId: job.id, error: '用户取消' }
+    }
+    const running = { ...job, status: 'running', startedAt: Date.now() }
+    saveCodexJob(running)
+    let result = await runner()
+    if (((!result?.ok && !result?.degraded) || (result?.degraded && result?.retryable)) && !result?.cancelled && !_cancelledCodexJobs.has(job.id)) result = await runner()
+    saveCodexJob({
+      ...running,
+      status: result?.cancelled || _cancelledCodexJobs.has(job.id) ? 'cancelled' : result?.ok ? (result?.degraded ? 'degraded' : 'completed') : 'failed',
+      completedAt: Date.now(),
+      durationMs: Date.now() - running.startedAt,
+      error: result?.ok ? '' : (result?.parseError || result?.stderr || result?.error || 'Codex failed'),
+    })
+    return { ...result, jobId: job.id }
+  }
+  const queued = _codexQueue.catch(() => {}).then(execute)
+  _codexQueue = queued.catch(() => {})
+  return queued
+}
 
 function makeId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2)
@@ -182,6 +228,14 @@ exports.register = (ipcMain) => {
   ipcMain.handle('settings:clearCache', () => {
     return config.clearMarketCache()
   })
+  ipcMain.handle('signalLifecycle:load', () => config.loadSignalLifecycle())
+  ipcMain.handle('signalLifecycle:save', (_, items) => {
+    config.saveSignalLifecycle(items)
+    return { ok: true, count: Array.isArray(items) ? items.length : 0 }
+  })
+  ipcMain.handle('signalReplay:history', () => config.loadSignalReplayHistory())
+  ipcMain.handle('operational:load', (_, key) => config.loadOperationalData(key))
+  ipcMain.handle('operational:save', (_, { key, value }) => config.saveOperationalData(key, value))
   ipcMain.handle('settings:cleanupInstallers', () => cleanupOldInstallers())
 
   ipcMain.handle('settings:exportConfig', async (event) => {
@@ -232,27 +286,37 @@ exports.register = (ipcMain) => {
   })
 
   ipcMain.handle('codex:runReview', async (_, payload) => {
-    return codexReview.runReview(payload, config.loadSettings())
+    return enqueueCodexJob('review', payload, () => codexReview.runReview(payload, config.loadSettings()))
   })
 
   ipcMain.handle('codex:runScreen', async (_, payload) => {
-    return codexReview.runScreen(payload, config.loadSettings())
+    return enqueueCodexJob('screen', payload, () => codexReview.runScreen(payload, config.loadSettings()))
   })
 
   ipcMain.handle('codex:runLaunchReview', async (_, payload) => {
-    return codexReview.runLaunchReview(payload, config.loadSettings())
+    return enqueueCodexJob('launch-review', payload, () => codexReview.runLaunchReview(payload, config.loadSettings()))
   })
 
   ipcMain.handle('codex:runMarketChat', async (_, payload) => {
-    return codexReview.runMarketChat(payload, config.loadSettings())
+    return enqueueCodexJob('market-chat', payload, () => codexReview.runMarketChat(payload, config.loadSettings()))
   })
 
   ipcMain.handle('codex:runManagePlan', async (_, payload) => {
-    return codexReview.runManagePlan(payload, config.loadSettings())
+    return enqueueCodexJob('manage-plan', payload, () => codexReview.runManagePlan(payload, config.loadSettings()))
   })
 
   ipcMain.handle('codex:runAlertPlan', async (_, payload) => {
-    return codexReview.runAlertPlan(payload, config.loadSettings())
+    return enqueueCodexJob('alert-plan', payload, () => codexReview.runAlertPlan(payload, config.loadSettings()))
+  })
+  ipcMain.handle('codex:jobs', () => codexJobLog())
+  ipcMain.handle('codex:cancelJobs', () => {
+    const jobs = codexJobLog()
+    for (const job of jobs) if (job.status === 'queued' || job.status === 'running') _cancelledCodexJobs.add(job.id)
+    const active = codexReview.cancelActive()
+    for (const job of jobs) {
+      if (job.status === 'queued' || job.status === 'running') saveCodexJob({ ...job, status: 'cancelled', completedAt: Date.now(), error: '用户取消' })
+    }
+    return { ok: true, active }
   })
 
   ipcMain.handle('shell:openPath', async (_, target) => {
@@ -289,9 +353,11 @@ exports.register = (ipcMain) => {
     // Fetch spot + futures tickers independently, so one failed endpoint
     // does not discard the other endpoint's turnover data.
     let spotTickers = {}, futuresTickers = {}
-    const [spotTickerResult, futuresTickerResult] = await Promise.allSettled([
+    const [spotTickerResult, futuresTickerResult, spotBookResult, futuresBookResult] = await Promise.allSettled([
       binance.fetchTickers(cryptoAssets.map(a => a.apiSymbol)),
       binance.fetchFuturesTickers(futuresAssets.map(a => a.apiSymbol)),
+      binance.fetchBookTickers(cryptoAssets.map(a => a.apiSymbol)),
+      binance.fetchFuturesBookTickers(futuresAssets.map(a => a.apiSymbol)),
     ])
     if (spotTickerResult.status === 'fulfilled') spotTickers = spotTickerResult.value
     else {
@@ -304,6 +370,22 @@ exports.register = (ipcMain) => {
       const message = futuresTickerResult.reason?.message ?? String(futuresTickerResult.reason)
       console.warn('[ipc] futures ticker fetch failed:', message)
       pushStatus({ level: 'warn', scope: 'Binance futures ticker', message })
+    }
+    if (spotBookResult.status === 'fulfilled') {
+      for (const [symbol, book] of Object.entries(spotBookResult.value)) {
+        spotTickers[symbol] = { ...(spotTickers[symbol] ?? {}), ...book }
+      }
+    } else {
+      const message = spotBookResult.reason?.message ?? String(spotBookResult.reason)
+      pushStatus({ level: 'warn', scope: 'Binance spot book', message })
+    }
+    if (futuresBookResult.status === 'fulfilled') {
+      for (const [symbol, book] of Object.entries(futuresBookResult.value)) {
+        futuresTickers[symbol] = { ...(futuresTickers[symbol] ?? {}), ...book }
+      }
+    } else {
+      const message = futuresBookResult.reason?.message ?? String(futuresBookResult.reason)
+      pushStatus({ level: 'warn', scope: 'Binance futures book', message })
     }
 
     if (limit && Number.isFinite(limit)) {
@@ -386,6 +468,72 @@ exports.register = (ipcMain) => {
     }
     return result
   })
+
+  ipcMain.handle('market:signalReplay', async (_, { assets = [], maxAssets = 12 } = {}) => {
+    const selected = assets.slice(0, Math.max(1, Math.min(30, maxAssets))).map(normalizeAsset)
+    const replaySettings = config.loadSettings()
+    const executionNotional = [1000, 5000, 10000].includes(Number(replaySettings.shExecutionNotional))
+      ? Number(replaySettings.shExecutionNotional)
+      : 5000
+    const reports = []
+    for (const asset of selected) {
+      for (const timeframe of ['1h', '4h']) {
+        try {
+          const candles = onlyClosedCandles(await fetchSignalReplayCandles(asset, timeframe))
+          reports.push(runSignalHunterReplay(asset, timeframe, candles, executionNotional))
+        } catch (err) {
+          reports.push({ symbol: asset.symbol, timeframe, error: err.message, signals: 0, outcomes: [] })
+        }
+      }
+    }
+    const outcomes = reports.flatMap(report => report.outcomes ?? [])
+    const resolved = outcomes.filter(item => item.result === 'win' || item.result === 'loss')
+    const wins = resolved.filter(item => item.result === 'win')
+    const losses = resolved.filter(item => item.result === 'loss')
+    const profileGroups = Object.values(outcomes.reduce((groups, item) => {
+      const key = item.parameterProfile ?? 'default'
+      const group = groups[key] ?? { key, signals: 0, wins: 0, losses: 0, netR: 0 }
+      group.signals += 1
+      if (item.result === 'win') group.wins += 1
+      if (item.result === 'loss') group.losses += 1
+      group.netR += item.rMultiple ?? 0
+      groups[key] = group
+      return groups
+    }, {})).map(group => ({
+      ...group,
+      winRate: group.wins + group.losses ? group.wins / (group.wins + group.losses) : null,
+    }))
+    const report = {
+      createdAt: Date.now(),
+      assets: selected.length,
+      reports,
+      totalSignals: outcomes.length,
+      resolved: resolved.length,
+      wins: wins.length,
+      losses: losses.length,
+      ambiguous: outcomes.filter(item => item.result === 'ambiguous').length,
+      expired: outcomes.filter(item => item.result === 'expired').length,
+      winRate: resolved.length ? wins.length / resolved.length : null,
+      netR: resolved.reduce((sum, item) => sum + (item.rMultiple ?? 0), 0),
+      profileGroups,
+      mode: 'structure_walk_forward',
+      executionNotional,
+      limitations: ['不回放历史OI/资金费率', '历史盘口使用流动性代理', '同K线顺序不明按歧义样本处理'],
+    }
+    const history = config.loadSignalReplayHistory()
+    const persistedReport = {
+      ...report,
+      reports: report.reports.map(({ outcomes: _outcomes, ...summary }) => summary),
+    }
+    config.saveSignalReplayHistory([persistedReport, ...history])
+    return report
+  })
+}
+
+async function fetchSignalReplayCandles(asset, timeframe) {
+  if (asset.source === 'binance-futures') return binance.fetchFuturesKlines(asset.apiSymbol, timeframe, 1000)
+  if (asset.source === 'binance') return binance.fetchKlines(asset.apiSymbol, timeframe, 1000)
+  return fetchOHLCVWithRetry(asset, timeframe)
 }
 
 function cleanupOldInstallers() {
@@ -500,12 +648,49 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
   }
 
   if (quoteVolume24h == null) quoteVolume24h = estimateTurnover(closedCandlesByTf)
+  const liquidity = ticker ? {
+    bidPrice: toNumber(ticker.bidPrice),
+    askPrice: toNumber(ticker.askPrice),
+    bidQty: toNumber(ticker.bidQty),
+    askQty: toNumber(ticker.askQty),
+    spreadPct: toNumber(ticker.spreadPct),
+    topBookNotional: toNumber(ticker.topBookNotional),
+    source: Number.isFinite(toNumber(ticker.spreadPct)) ? 'book_ticker' : 'turnover_proxy',
+    fetchedAt: Date.now(),
+  } : {
+    spreadPct: null,
+    topBookNotional: null,
+    source: 'turnover_proxy',
+    fetchedAt: Date.now(),
+  }
 
   const derivatives = asset.source === 'binance-futures'
     ? await fetchDerivativesSnapshot(asset, closedCandlesByTf, rsi, volumeSignal, signalScore)
     : null
+  const marketSession = asset.source === 'yahoo' ? getUSMarketSession() : 'continuous'
+  const dataQualityIssues = []
+  if (!Number.isFinite(price) || price <= 0) dataQualityIssues.push('现价缺失')
+  for (const tf of ['1h', '4h']) {
+    if ((closedCandlesByTf[tf]?.length ?? 0) < 36) dataQualityIssues.push(`${tf} K线不足`)
+  }
+  if ((asset.source === 'binance' || asset.source === 'binance-futures') && !Number.isFinite(liquidity.spreadPct)) {
+    dataQualityIssues.push('实时盘口缺失')
+  }
+  if (asset.source === 'binance-futures' && derivatives?.oiValue == null && derivatives?.fundingRate == null) {
+    dataQualityIssues.push('OI与资金费率缺失')
+  }
+  const dataQuality = {
+    ok: dataQualityIssues.length === 0,
+    issues: dataQualityIssues,
+    checkedAt: Date.now(),
+  }
+  const shSettings = config.loadSettings()
+  const executionNotional = [1000, 5000, 10000].includes(Number(shSettings.shExecutionNotional))
+    ? Number(shSettings.shExecutionNotional)
+    : 5000
+  const parameterMode = shSettings.shParameterMode === 'shadow' ? 'shadow' : 'stable'
 
-  const signalHunter = buildSignalHunterSignal({
+  let signalHunter = buildSignalHunterSignal({
     asset,
     price,
     change24h,
@@ -515,10 +700,43 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
     volumeSignal,
     signalScore,
     derivatives,
+    liquidity,
+    assetSource: asset.source,
+    marketSession,
+    dataQuality,
+    executionNotional,
+    parameterMode,
   })
+  if (signalHunter && !signalHunter.rejected && (asset.source === 'binance' || asset.source === 'binance-futures')) {
+    try {
+      liquidity.depth = await binance.fetchOrderBookDepth(asset.apiSymbol, asset.source === 'binance-futures', 20)
+      signalHunter = buildSignalHunterSignal({
+        asset,
+        price,
+        change24h,
+        quoteVolume24h,
+        candlesByTf: closedCandlesByTf,
+        rsi,
+        volumeSignal,
+        signalScore,
+        derivatives,
+        liquidity,
+        executionNotional,
+        parameterMode,
+      })
+    } catch (err) {
+      liquidity.depthError = err.message
+      dataQuality.ok = false
+      dataQuality.issues.push('多档盘口深度获取失败')
+      signalHunter = buildSignalHunterSignal({
+        asset, price, change24h, quoteVolume24h, candlesByTf: closedCandlesByTf,
+        rsi, volumeSignal, signalScore, derivatives, liquidity, executionNotional, parameterMode,
+      })
+    }
+  }
 
   const reviewCandlesByTf = Object.fromEntries(
-    ['1h', '4h'].map(tf => [
+    ['15m', '1h', '4h'].map(tf => [
       tf,
       (closedCandlesByTf[tf] ?? []).slice(-72).map(c => ({
         time: c.time,
@@ -530,7 +748,7 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
     ])
   )
 
-  return { ...asset, price, change24h, quoteVolume24h, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives, signalHunter, reviewCandlesByTf }
+  return { ...asset, price, change24h, quoteVolume24h, liquidity, marketSession, dataQuality, rsi, sparkline, divergence, volumeSignal, signalScore, derivatives, signalHunter, reviewCandlesByTf }
 }
 
 async function fetchDerivativesSnapshot(asset, candlesByTf, rsi, volumeSignal, signalScore) {
@@ -622,6 +840,7 @@ function buildDerivativesSignal({ candlesByTf, rsi, volumeSignal, signalScore, o
   score = Math.max(-5, Math.min(5, score))
 
   return {
+    capturedAt: Date.now(),
     oiValue,
     oiChange1h,
     oiChange4h,
@@ -637,9 +856,36 @@ function buildDerivativesSignal({ candlesByTf, rsi, volumeSignal, signalScore, o
   }
 }
 
-function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, candlesByTf, rsi, volumeSignal, signalScore, derivatives }) {
-  if (asset.source !== 'binance-futures' || price == null) return null
-  const candidates = ['1h', '4h']
+function signalHunterParameterProfile(asset, quoteVolume24h, version = 'v1') {
+  const turnover = quoteVolume24h ?? 0
+  let profile
+  if (asset.source === 'yahoo') {
+    profile = turnover >= 100_000_000
+      ? { key: 'stock_liquid', minTurnover: 20_000_000, maxSpreadPct: null, minTopBook: null, maxSlippagePct: null }
+      : { key: 'stock_standard', minTurnover: 5_000_000, maxSpreadPct: null, minTopBook: null, maxSlippagePct: null }
+  } else if (turnover >= 500_000_000) {
+    profile = { key: 'crypto_major', minTurnover: 20_000_000, maxSpreadPct: 0.12, minTopBook: 50_000, maxSlippagePct: 0.18 }
+  } else if (turnover >= 50_000_000) {
+    profile = { key: 'crypto_liquid', minTurnover: 10_000_000, maxSpreadPct: 0.18, minTopBook: 25_000, maxSlippagePct: 0.25 }
+  } else {
+    profile = { key: 'crypto_other', minTurnover: 5_000_000, maxSpreadPct: 0.25, minTopBook: 10_000, maxSlippagePct: 0.35 }
+  }
+  if (version !== 'v2') return { ...profile, version: 'v1' }
+  return {
+    ...profile,
+    key: `${profile.key}_shadow_v2`,
+    version: 'v2',
+    minTurnover: profile.minTurnover * 1.2,
+    maxSpreadPct: Number.isFinite(profile.maxSpreadPct) ? profile.maxSpreadPct * 0.8 : null,
+    minTopBook: Number.isFinite(profile.minTopBook) ? profile.minTopBook * 1.25 : null,
+    maxSlippagePct: Number.isFinite(profile.maxSlippagePct) ? profile.maxSlippagePct * 0.8 : null,
+  }
+}
+
+function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, candlesByTf, rsi, volumeSignal, signalScore, derivatives, liquidity, executionNotional = 5000, parameterMode = 'stable' }) {
+  if (price == null) return null
+  const parameterProfile = signalHunterParameterProfile(asset, quoteVolume24h, 'v1')
+  const evaluateProfile = profile => ['1h', '4h']
     .flatMap(tf => ['long', 'short'].map(side => evaluateSignalHunterTimeframe({
       side,
       tf,
@@ -651,18 +897,97 @@ function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, cand
       volumeSignal: volumeSignal?.[tf],
       signalScore: signalScore?.[tf],
       derivatives,
+      liquidity,
+      assetSource: asset.source,
+      marketSession: asset.source === 'yahoo' ? getUSMarketSession() : 'continuous',
+      parameterProfile: profile,
+      executionNotional,
     })))
     .filter(Boolean)
+  const candidates = evaluateProfile(parameterProfile)
 
   if (!candidates.length) return null
-  const accepted = candidates
+  const ranked = [...candidates].sort((a, b) => b.score.total - a.score.total)
+  const accepted = ranked
     .filter(c => !c.rejected)
-    .sort((a, b) => b.score.total - a.score.total)
-  if (accepted.length) return accepted[0]
-  return candidates.sort((a, b) => b.score.total - a.score.total)[0]
+  const primary = accepted[0] ?? ranked[0]
+  let shadowComparison = null
+  if (parameterMode === 'shadow') {
+    const shadowProfile = signalHunterParameterProfile(asset, quoteVolume24h, 'v2')
+    const shadowRanked = evaluateProfile(shadowProfile).sort((a, b) => b.score.total - a.score.total)
+    const shadowPrimary = shadowRanked.find(item => !item.rejected) ?? shadowRanked[0] ?? null
+    shadowComparison = {
+      version: 'v2',
+      wouldPass: Boolean(shadowPrimary && !shadowPrimary.rejected),
+      status: shadowPrimary?.status ?? 'no_candidate',
+      side: shadowPrimary?.side ?? null,
+      timeframe: shadowPrimary?.timeframe ?? null,
+      score: shadowPrimary?.score?.total ?? 0,
+      reason: shadowPrimary?.rejectReasons?.[0] ?? shadowPrimary?.reasons?.[0] ?? '',
+    }
+  }
+  return {
+    ...primary,
+    parameterMode,
+    parameterVersion: 'v1',
+    shadowComparison,
+    structureCandidates: ranked.map(signalHunterStructureSnapshot),
+    decisionTrace: [
+      { stage: '数据质量', passed: true, detail: '闭合K线与现价可用' },
+      { stage: '交易时段', passed: asset.source !== 'yahoo' || getUSMarketSession() === 'regular', detail: asset.source === 'yahoo' ? getUSMarketSession() : 'continuous' },
+      { stage: '市场状态', passed: primary.marketRegime !== 'high_volatility', detail: primary.marketRegime ?? '未进入状态判定' },
+      { stage: '流动性', passed: !primary.rejectReasons?.some(reason => /成交额|价差|盘口|滑点/.test(reason)), detail: liquidity?.source ?? 'turnover_proxy' },
+      { stage: '本地结构', passed: !primary.rejected, detail: primary.rejected ? primary.rejectReasons?.join(' / ') : `${primary.side} · ${primary.timeframe} · ${primary.setupLabel}` },
+    ],
+  }
 }
 
-function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, quoteVolume24h, candles, rsiValue, volumeSignal, signalScore, derivatives }) {
+function signalHunterStructureSnapshot(signal) {
+  return {
+    status: signal.status,
+    rejected: Boolean(signal.rejected),
+    side: signal.side,
+    timeframe: signal.timeframe,
+    entryMode: signal.entryMode,
+    setup: signal.setup,
+    setupLabel: signal.setupLabel,
+    currentPrice: signal.currentPrice,
+    entryPrice: signal.entryPrice,
+    executionEntryPrice: signal.executionEntryPrice,
+    executionSlippagePct: signal.executionSlippagePct,
+    executionNotional: signal.executionNotional,
+    confirmPrice: signal.confirmPrice,
+    stopLoss: signal.stopLoss,
+    targets: [signal.tp1, signal.tp2, signal.tp3].filter(Number.isFinite),
+    rewardRisk: signal.rewardRisk ?? signal.score?.rewardRisk,
+    score: signal.score,
+    reasons: signal.reasons ?? [],
+    riskFlags: signal.riskFlags ?? [],
+    rejectReasons: signal.rejectReasons ?? [],
+    support: signal.support,
+    supportTouches: signal.supportTouches,
+    resistance: signal.resistance,
+    resistanceTouches: signal.resistanceTouches,
+    compression: signal.compression,
+    recentRangePct: signal.recentRangePct,
+    volumeRatio: signal.volumeRatio,
+    runup10: signal.runup10,
+    runup20: signal.runup20,
+    ema21: signal.ema21,
+    ema55: signal.ema55,
+    ema21DistancePct: signal.ema21DistancePct,
+    ema21SlopePct: signal.ema21SlopePct,
+    atr: signal.atr,
+    atrPct: signal.atrPct,
+    atrExpansion: signal.atrExpansion,
+    efficiencyRatio: signal.efficiencyRatio,
+    marketRegime: signal.marketRegime,
+    parameterProfile: signal.parameterProfile,
+    entryTouched: signal.entryTouched,
+  }
+}
+
+function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, quoteVolume24h, candles, rsiValue, volumeSignal, signalScore, derivatives, liquidity, assetSource, marketSession, parameterProfile, executionNotional = 5000 }) {
   if (!Array.isArray(candles) || candles.length < 36) return null
   const isShort = side === 'short'
   const lookback = candles.slice(-41, -1)
@@ -718,6 +1043,23 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   const ma21 = avg(candles.slice(-21).map(c => c.close))
   const ema21 = ema(closes.slice(-80), 21)
   const ema55 = ema(closes.slice(-120), 55)
+  const ema21Prev = ema(closes.slice(0, -4).slice(-80), 21)
+  const ema21SlopePct = Number.isFinite(ema21Prev) && Number.isFinite(ema21) ? pctChange(ema21Prev, ema21) : null
+  const trueRanges = candles.slice(-62).map((candle, index, list) => {
+    const prevClose = index > 0 ? list[index - 1]?.close : null
+    if (!Number.isFinite(candle.high) || !Number.isFinite(candle.low)) return null
+    if (!Number.isFinite(prevClose)) return candle.high - candle.low
+    return Math.max(candle.high - candle.low, Math.abs(candle.high - prevClose), Math.abs(candle.low - prevClose))
+  }).filter(Number.isFinite)
+  const atr = avg(trueRanges.slice(-14))
+  const baselineAtr = avg(trueRanges.slice(-56, -14))
+  const atrExpansion = Number.isFinite(atr) && Number.isFinite(baselineAtr) && baselineAtr > 0 ? atr / baselineAtr : null
+  const atrPct = Number.isFinite(atr) && price ? (atr / price) * 100 : null
+  const efficiencyCloses = closes.slice(-21)
+  const efficiencyTravel = efficiencyCloses.slice(1).reduce((sum, close, index) => sum + Math.abs(close - efficiencyCloses[index]), 0)
+  const efficiencyRatio = efficiencyCloses.length >= 10 && efficiencyTravel > 0
+    ? Math.abs(efficiencyCloses.at(-1) - efficiencyCloses[0]) / efficiencyTravel
+    : null
   const runup10 = candles.length >= 11 ? pctChange(candles.at(-11).close, price) : 0
   const runup20 = candles.length >= 21 ? pctChange(candles.at(-21).close, price) : 0
   const extensionPct = ma21 ? pctChange(ma21, price) : 0
@@ -728,6 +1070,17 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     (tf === '15m' ? recentRangePct <= 2.2 : tf === '1h' ? recentRangePct <= 3.5 : recentRangePct <= 5.5)
   )
   const volumeDry = volumeRatio != null && volumeRatio <= 0.88
+  const highVolatility = (Number.isFinite(atrExpansion) && atrExpansion >= 1.45) ||
+    (Number.isFinite(atrPct) && atrPct >= (tf === '4h' ? 7 : 4))
+  const directionalTrend = Number.isFinite(efficiencyRatio) && efficiencyRatio >= 0.38 &&
+    Number.isFinite(ema21SlopePct) && Math.abs(ema21SlopePct) >= (tf === '4h' ? 0.35 : 0.18)
+  const lowVolatility = !highVolatility && compression && (volumeDry || (Number.isFinite(atrExpansion) && atrExpansion <= 0.82))
+  const rangeRegime = !highVolatility && !directionalTrend && Number.isFinite(efficiencyRatio) && efficiencyRatio <= 0.28
+  const marketRegime = highVolatility ? 'high_volatility'
+    : directionalTrend ? 'trend'
+      : lowVolatility ? 'low_volatility'
+        : rangeRegime ? 'range'
+          : 'transition'
   const confirmPrice = isShort ? supportArea.triggerPrice : resistance.triggerPrice
   const distanceToConfirmPct = isShort ? pctChange(confirmPrice, price) : pctChange(price, confirmPrice)
   const nearConfirm = distanceToConfirmPct >= -0.35 && distanceToConfirmPct <= (tf === '15m' ? 1.4 : tf === '1h' ? 2.2 : 3.2)
@@ -743,7 +1096,19 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     ? runup10 < -maxRunup10 || runup20 < -maxRunup20 || extensionPct < -maxExtension
     : runup10 > maxRunup10 || runup20 > maxRunup20 || extensionPct > maxExtension
 
-  if ((quoteVolume24h ?? 0) < 5_000_000) return reject('成交额不足')
+  if ((quoteVolume24h ?? 0) < (parameterProfile?.minTurnover ?? 5_000_000)) return reject(`成交额不足 (${parameterProfile?.key ?? 'default'})`)
+  if ((assetSource === 'binance' || assetSource === 'binance-futures') && !Number.isFinite(liquidity?.spreadPct)) return reject('实时盘口数据缺失')
+  if (assetSource === 'binance-futures' && derivatives?.oiValue == null && derivatives?.fundingRate == null) return reject('OI与资金费率数据缺失')
+  if (assetSource === 'yahoo' && marketSession !== 'regular') return reject(`美股当前为 ${marketSession ?? 'closed'} 时段`)
+  const latestCandle = candles.at(-1)
+  const previousCandle = candles.at(-2)
+  const openingGapPct = assetSource === 'yahoo' && Number.isFinite(latestCandle?.open) && Number.isFinite(previousCandle?.close)
+    ? Math.abs(pctChange(previousCandle.close, latestCandle.open))
+    : 0
+  if (openingGapPct >= (tf === '4h' ? 3 : 1.5)) return reject(`开盘跳空 ${openingGapPct.toFixed(2)}%，等待结构重建`)
+  if (Number.isFinite(parameterProfile?.maxSpreadPct) && Number.isFinite(liquidity?.spreadPct) && liquidity.spreadPct > parameterProfile.maxSpreadPct) return reject(`买卖价差过大 (${liquidity.spreadPct.toFixed(3)}%)`)
+  if (Number.isFinite(parameterProfile?.minTopBook) && Number.isFinite(liquidity?.topBookNotional) && liquidity.topBookNotional < parameterProfile.minTopBook) return reject(`顶层盘口深度不足 (${Math.round(liquidity.topBookNotional).toLocaleString()})`)
+  if (liquidity?.depthError) return reject('多档盘口深度不可用')
   if (overExtendedShape) return reject(isShort ? '已经下跌过远，等反抽' : '已经拉升过远，等回踩')
 
   const baseBandPct = tf === '15m' ? 0.008 : tf === '1h' ? 0.012 : 0.018
@@ -769,13 +1134,14 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   let setup = null
   let setupLabel = ''
   let entryBase = null
+  const allowTrendPullback = marketRegime !== 'range'
   if (!isShort) {
-    if (longEmaPullback) { setup = 'pullback_long'; setupLabel = 'EMA 回踩多'; entryBase = ema21 }
+    if (allowTrendPullback && longEmaPullback) { setup = 'pullback_long'; setupLabel = 'EMA 回踩多'; entryBase = ema21 }
     else if (longSupportRetest) { setup = 'retest_long'; setupLabel = '支撑回踩多'; entryBase = supportArea.level }
     else if (longBase) { setup = 'base_long'; setupLabel = '窄幅蓄势做多'; entryBase = supportArea.level }
     else if (nearConfirm) { setup = 'confirm_long'; setupLabel = '突破确认观察'; entryBase = null }
   } else {
-    if (shortEmaRebound) { setup = 'rebound_short'; setupLabel = 'EMA 反抽空'; entryBase = ema21 }
+    if (allowTrendPullback && shortEmaRebound) { setup = 'rebound_short'; setupLabel = 'EMA 反抽空'; entryBase = ema21 }
     else if (shortResistanceRetest) { setup = 'retest_short'; setupLabel = '阻力反抽空'; entryBase = resistance.level }
     else if (shortBase) { setup = 'base_short'; setupLabel = '窄幅蓄势做空'; entryBase = resistance.level }
     else if (nearConfirm) { setup = 'confirm_short'; setupLabel = '跌破确认观察'; entryBase = null }
@@ -783,10 +1149,41 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
 
   if (!setup) return reject('没有回踩/反抽/窄幅蓄势形态')
   const confirmOnly = setup === 'confirm_long' || setup === 'confirm_short'
+  const entryMode = setup === 'confirm_long' ? 'breakout'
+    : setup === 'confirm_short' ? 'breakdown'
+      : setup === 'retest_long' || setup === 'retest_short' ? 'retest'
+        : setup === 'base_long' || setup === 'base_short' ? 'base'
+          : 'pullback'
+  const maxOpposingSlope = tf === '4h' ? 1.1 : 0.6
+  const slopeStronglyOpposed = Number.isFinite(ema21SlopePct) && (isShort
+    ? ema21SlopePct > maxOpposingSlope
+    : ema21SlopePct < -maxOpposingSlope)
+  if (slopeStronglyOpposed) {
+    return reject(`EMA21 斜率与${isShort ? '空头' : '多头'}方向冲突 (${ema21SlopePct.toFixed(2)}%)`, {
+      setup,
+      setupLabel,
+      entryMode,
+      ema21,
+      ema55,
+      ema21SlopePct,
+    })
+  }
+  const trendSetup = setup === 'pullback_long' || setup === 'rebound_short'
+  const baseSetup = setup === 'base_long' || setup === 'base_short'
+  if (marketRegime === 'high_volatility') {
+    return reject('高波动扩张期，结构稳定性不足', { setup, setupLabel, entryMode, marketRegime, atrPct, atrExpansion, efficiencyRatio })
+  }
+  if (trendSetup && marketRegime === 'range') {
+    return reject('区间环境不启用趋势回踩模型', { setup, setupLabel, entryMode, marketRegime, atrPct, atrExpansion, efficiencyRatio })
+  }
+  if (baseSetup && marketRegime === 'trend') {
+    return reject('趋势环境不启用区间蓄势模型', { setup, setupLabel, entryMode, marketRegime, atrPct, atrExpansion, efficiencyRatio })
+  }
   if (confirmOnly) {
     return reject('只有突破确认，没有回踩预埋', {
       setup,
       setupLabel,
+      entryMode,
       confirmPrice,
       distanceToConfirmPct,
       reasons: [setupLabel],
@@ -797,13 +1194,15 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   const rawEntryPrice = isShort
     ? entryBase * (1 + entryBufferPct)
     : entryBase * (1 - entryBufferPct)
+  const maxEntryCrossPct = tf === '4h' ? 0.012 : 0.008
   const entryIsOnTradableSide = isShort
-    ? rawEntryPrice >= price * 0.999
-    : rawEntryPrice <= price * 1.001
+    ? rawEntryPrice >= price * (1 - maxEntryCrossPct)
+    : rawEntryPrice <= price * (1 + maxEntryCrossPct)
   if (!entryIsOnTradableSide) {
     return reject(isShort ? '做空入场低于现价，位置无效' : '做多入场高于现价，位置无效', {
       setup,
       setupLabel,
+      entryMode,
       entryPrice: rawEntryPrice,
       confirmPrice,
       distanceToConfirmPct,
@@ -813,8 +1212,27 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   const entryPrice = rawEntryPrice
   const distanceToEntryPct = pctChange(price, entryPrice)
   const nearEntry = Math.abs(distanceToEntryPct) <= (tf === '15m' ? 1.6 : tf === '1h' ? 2.6 : 4.0)
-  const triggerPrice = entryPrice
-  const triggered = isShort ? price <= entryPrice * 1.001 : price >= entryPrice * 0.999
+  const depthExecution = liquidity?.depth?.[isShort ? 'sell' : 'buy']?.[String(executionNotional)] ?? null
+  if (depthExecution && depthExecution.fillRatio < 0.98) return reject(`预计 $${executionNotional.toLocaleString()} 无法在前20档充分成交`, { setup, setupLabel, entryMode })
+  if (Number.isFinite(depthExecution?.slippagePct) && depthExecution.slippagePct > (parameterProfile?.maxSlippagePct ?? 0.35)) {
+    return reject(`预计滑点过高 (${depthExecution.slippagePct.toFixed(3)}%)`, { setup, setupLabel, entryMode })
+  }
+  const executionSlippagePct = Number.isFinite(depthExecution?.slippagePct) ? depthExecution.slippagePct : 0
+  const triggerPrice = isShort
+    ? entryPrice * (1 - executionSlippagePct / 100)
+    : entryPrice * (1 + executionSlippagePct / 100)
+  const touchWindow = recent.slice(-3)
+  const entryTouched = touchWindow.some(candle => {
+    if (!Number.isFinite(candle.high) || !Number.isFinite(candle.low) || !Number.isFinite(candle.close)) return false
+    const range = Math.max(candle.high - candle.low, entryPrice * 0.0001)
+    const closePosition = (candle.close - candle.low) / range
+    return isShort
+      ? candle.high >= entryPrice * 0.999 && candle.close <= entryPrice * 1.002 && closePosition <= 0.58
+      : candle.low <= entryPrice * 1.001 && candle.close >= entryPrice * 0.998 && closePosition >= 0.42
+  })
+  const triggered = entryTouched && (isShort
+    ? price <= entryPrice * 1.006
+    : price >= entryPrice * 0.994)
   const verticalNoChase = isShort
     ? runup10 < -maxRunup10 * 0.7 || runup20 < -maxRunup20 * 0.7 || ema21DistancePct < -maxExtension * 0.55
     : runup10 > maxRunup10 * 0.7 || runup20 > maxRunup20 * 0.7 || ema21DistancePct > maxExtension * 0.55
@@ -829,9 +1247,13 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   if (nearEntry) { chart += 1; reasons.push(`距离入场价 ${distanceToEntryPct.toFixed(2)}%`) }
   if (nearConfirm) { chart += 1; reasons.push(`距离确认价 ${distanceToConfirmPct.toFixed(2)}%`) }
   if (compression) { chart += 1; reasons.push('短线波动压缩') }
+  reasons.push(`市场状态 ${marketRegime}`)
   if (setup === 'base_long' || setup === 'base_short') { chart += 2; reasons.push('窄幅蓄势') }
   if (setup === 'pullback_long' || setup === 'rebound_short') { chart += 2; reasons.push(isShort ? 'EMA21 反抽位' : 'EMA21 回踩位') }
   if (setup === 'retest_long' || setup === 'retest_short') { chart += 2; reasons.push(isShort ? '阻力反抽' : '支撑回踩') }
+  const slopeAligned = Number.isFinite(ema21SlopePct) && (isShort ? ema21SlopePct < 0 : ema21SlopePct > 0)
+  if (slopeAligned) { chart += 1; reasons.push(`EMA21 斜率同向 ${ema21SlopePct.toFixed(2)}%`) }
+  if (entryTouched) reasons.push('近 3 根K线已触及入场位')
   if (volumeDry) { chart += 1; reasons.push(`缩量蓄势 ${volumeRatio.toFixed(2)}x`) }
   if (breakoutAttempt) {
     const confirmedType = isShort ? 'breakdown_confirmed' : 'breakout_confirmed'
@@ -846,8 +1268,11 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   if (!isShort && derivatives?.stage === 'early_build') { data += 3; reasons.push('OI 早期蓄势') }
   else if (!isShort && derivatives?.stage === 'long_build') { data += 2; reasons.push('多头增仓') }
   else if (isShort && derivatives?.stage === 'short_build') { data += 3; reasons.push('空头增仓') }
-  else if (derivatives?.stage === 'oi_build') { data += 2; reasons.push('OI 增长') }
-  if (oiRising) data += 1
+  else if (derivatives?.stage === 'oi_build') { data += 1; reasons.push('OI 增长，方向待确认') }
+  const oiDirectionAligned = isShort
+    ? derivatives?.stage === 'short_build'
+    : derivatives?.stage === 'early_build' || derivatives?.stage === 'long_build'
+  if (oiRising && oiDirectionAligned) data += 1
   if (cleanFunding) data += 1
   if ((quoteVolume24h ?? 0) >= 5_000_000) data += 1
 
@@ -857,7 +1282,6 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   if (isShort && rsiValue <= 25) { risk += 2; riskFlags.push(`${tf} RSI 过冷`) }
   if (Math.abs(derivatives?.fundingRate ?? 0) >= 0.06) { risk += 2; riskFlags.push(`费率拥挤 ${derivatives.fundingRate.toFixed(4)}%`) }
   if ((derivatives?.oiChange4h ?? 0) <= -5) { risk += 2; riskFlags.push(`OI 下降 ${derivatives.oiChange4h.toFixed(1)}%`) }
-  if (triggered && !breakoutAttempt) { risk += 1; riskFlags.push(isShort ? '跌破量能不足' : '突破量能不足') }
 
   chart = Math.min(8, chart)
   data = Math.min(6, data)
@@ -871,9 +1295,18 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   if (chart < 4) return reject('图表分不足', { setup, setupLabel, score: { total: earlyTotal, chart, data, risk: earlyRiskScore, rr: 0, rewardRisk: 0 }, reasons })
   if (earlyTotal < 5) return reject('基础评分不足', { setup, setupLabel, score: { total: earlyTotal, chart, data, risk: earlyRiskScore, rr: 0, rewardRisk: 0 }, reasons })
 
+  const atrStopDistance = Number.isFinite(atr) ? atr * (tf === '4h' ? 1 : 0.85) : 0
   const stopLoss = isShort
-    ? Math.max(resistance.level * (1 + entryBufferPct * 1.8), entryPrice * (tf === '15m' ? 1.012 : tf === '1h' ? 1.02 : 1.035))
-    : Math.min(supportArea.level * (1 - entryBufferPct * 1.8), entryPrice * (tf === '15m' ? 0.988 : tf === '1h' ? 0.98 : 0.965))
+    ? Math.max(
+      resistance.level * (1 + entryBufferPct * 1.8),
+      entryPrice * (tf === '15m' ? 1.012 : tf === '1h' ? 1.02 : 1.035),
+      entryPrice + atrStopDistance
+    )
+    : Math.min(
+      supportArea.level * (1 - entryBufferPct * 1.8),
+      entryPrice * (tf === '15m' ? 0.988 : tf === '1h' ? 0.98 : 0.965),
+      entryPrice - atrStopDistance
+    )
   const riskPerUnit = Math.abs(triggerPrice - stopLoss)
   if (!Number.isFinite(riskPerUnit) || riskPerUnit <= 0) return reject('止损无效', { setup, setupLabel, entryPrice, stopLoss })
   const mainTarget = isShort
@@ -920,6 +1353,9 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     currentPrice: price,
     triggerPrice,
     entryPrice,
+    executionEntryPrice: triggerPrice,
+    executionSlippagePct,
+    executionNotional,
     confirmPrice,
     distanceToTriggerPct: distanceToEntryPct,
     distanceToEntryPct,
@@ -932,6 +1368,7 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     targetBasis: 'structure_target',
     setup,
     setupLabel,
+    entryMode,
     score: {
       total,
       chart,
@@ -949,6 +1386,7 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     supportTouches: supportArea.touches,
     triggerBufferPct: isShort ? supportArea.bufferPct : resistance.bufferPct,
     recentRangePct,
+    compression,
     volumeRatio,
     runup10,
     runup20,
@@ -956,9 +1394,119 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     ema21,
     ema55,
     ema21DistancePct,
+    ema21SlopePct,
+    atr,
+    atrPct,
+    atrExpansion,
+    efficiencyRatio,
+    marketRegime,
+    parameterProfile: parameterProfile?.key ?? 'default',
+    entryTouched,
     rewardRisk: Number(rewardRisk.toFixed(2)),
     rejectReasons: [],
   }
+}
+
+function runSignalHunterReplay(asset, timeframe, candles, executionNotional = 5000) {
+  const outcomes = []
+  if (!Array.isArray(candles) || candles.length < 65) {
+    return { symbol: asset.symbol, timeframe, bars: candles?.length ?? 0, signals: 0, outcomes, error: '历史K线不足65根' }
+  }
+  const ttlBars = timeframe === '4h' ? 9 : 8
+  let index = 55
+  while (index < candles.length - 2) {
+    const history = candles.slice(0, index + 1)
+    const current = history.at(-1)
+    const turnover = estimateTurnover({ [timeframe]: history }) ?? 0
+    const rsiValue = rsiIndicator.compute(history, { period: 14 })
+    const profile = signalHunterParameterProfile(asset, turnover)
+    const candidates = ['long', 'short'].map(side => evaluateSignalHunterTimeframe({
+      side,
+      tf: timeframe,
+      price: current.close,
+      change24h: null,
+      quoteVolume24h: turnover,
+      candles: history,
+      rsiValue,
+      volumeSignal: null,
+      signalScore: 0,
+      derivatives: null,
+      liquidity: { spreadPct: 0.01, topBookNotional: 1_000_000, source: 'replay_proxy' },
+      assetSource: 'replay',
+      marketSession: 'regular',
+      parameterProfile: profile,
+      executionNotional,
+    })).filter(item => item && !item.rejected).sort((a, b) => b.score.total - a.score.total)
+    const plan = candidates[0]
+    if (!plan) {
+      index += 1
+      continue
+    }
+
+    const endIndex = Math.min(candles.length - 1, index + ttlBars)
+    let enteredAtIndex = null
+    let finishedAtIndex = endIndex
+    let result = 'expired'
+    let rMultiple = 0
+    for (let cursor = index + 1; cursor <= endIndex; cursor++) {
+      const candle = candles[cursor]
+      if (enteredAtIndex == null) {
+        if (!replayEntryConfirmed(plan, candle)) continue
+        enteredAtIndex = cursor
+      }
+      const stopped = plan.side === 'short' ? candle.high >= plan.stopLoss : candle.low <= plan.stopLoss
+      const target = plan.tp2
+      const targeted = Number.isFinite(target) && (plan.side === 'short' ? candle.low <= target : candle.high >= target)
+      if (stopped && targeted) {
+        result = 'ambiguous'
+        finishedAtIndex = cursor
+        break
+      }
+      if (stopped) {
+        result = 'loss'
+        rMultiple = -1
+        finishedAtIndex = cursor
+        break
+      }
+      if (targeted) {
+        result = 'win'
+        rMultiple = plan.rewardRisk ?? plan.score?.rewardRisk ?? 1.5
+        finishedAtIndex = cursor
+        break
+      }
+      if (cursor === endIndex && enteredAtIndex != null) result = 'open'
+    }
+    outcomes.push({
+      symbol: asset.symbol,
+      timeframe,
+      side: plan.side,
+      setup: plan.setup,
+      marketRegime: plan.marketRegime,
+      parameterProfile: plan.parameterProfile,
+      detectedAt: candleTimestamp(candles[index]),
+      enteredAt: enteredAtIndex == null ? null : candleTimestamp(candles[enteredAtIndex]),
+      finishedAt: candleTimestamp(candles[finishedAtIndex]),
+      result,
+      rMultiple: Number(rMultiple.toFixed(2)),
+    })
+    index = Math.max(index + 1, finishedAtIndex)
+  }
+  return { symbol: asset.symbol, timeframe, bars: candles.length, signals: outcomes.length, outcomes }
+}
+
+function replayEntryConfirmed(plan, candle) {
+  if (!candle || !Number.isFinite(plan?.entryPrice)) return false
+  if (plan.entryMode === 'breakout') return candle.close >= plan.entryPrice * 1.001
+  if (plan.entryMode === 'breakdown') return candle.close <= plan.entryPrice * 0.999
+  const range = Math.max(candle.high - candle.low, plan.entryPrice * 0.0001)
+  const closePosition = (candle.close - candle.low) / range
+  return plan.side === 'short'
+    ? candle.high >= plan.entryPrice * 0.999 && candle.close <= plan.entryPrice * 1.002 && closePosition <= 0.58
+    : candle.low <= plan.entryPrice * 1.001 && candle.close >= plan.entryPrice * 0.998 && closePosition >= 0.42
+}
+
+function candleTimestamp(candle) {
+  return toNumber(candle?.closeTime ?? candle?.time)
 }
 
 function findSignalHunterResistance(candles, price, tf) {
@@ -1439,4 +1987,9 @@ function detectDivergence(closes, rsiSeries) {
     if (valid(tr) && curPrice < c[tr] * 1.003 && curRsi > r[tr] + 3) return 'bullish'
   }
   return null
+}
+
+exports.__test = {
+  signalHunterParameterProfile,
+  replayEntryConfirmed,
 }

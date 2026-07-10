@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { hydrateOperationalData, persistOperationalData } from '../utils/operationalData'
 
 const KEY = 'rsi:aiRunLog'
 
@@ -8,11 +9,17 @@ function loadLog() {
 }
 
 function saveLog(items) {
-  localStorage.setItem(KEY, JSON.stringify(items.slice(0, 80)))
+  const next = items.slice(0, 80)
+  localStorage.setItem(KEY, JSON.stringify(next))
+  persistOperationalData('aiRunLog', next)
 }
 
 const useAiRunLogStore = create((set, get) => ({
   items: loadLog(),
+  hydrate: async () => {
+    const items = await hydrateOperationalData('aiRunLog', get().items)
+    if (Array.isArray(items)) set({ items })
+  },
 
   add: (entry) => {
     const next = [{
@@ -31,3 +38,5 @@ const useAiRunLogStore = create((set, get) => ({
 }))
 
 export default useAiRunLogStore
+
+setTimeout(() => useAiRunLogStore.getState().hydrate(), 0)

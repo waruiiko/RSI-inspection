@@ -13,6 +13,7 @@ import { getRsiZone }   from './utils/rsi'
 import { matchesAssetRef } from './utils/assetKey'
 import { applyLiquidityLimit, getQuoteVolume } from './utils/liquidity'
 import { buildCandidates, candidateSignature, makeAiFeedItems } from './utils/aiCandidates'
+import { advanceSignalLifecycleItems } from './utils/signalLifecycle'
 import Toolbar      from './components/Toolbar'
 const Heatmap = lazy(() => import('./components/Heatmap'))
 const StatsTable = lazy(() => import('./components/StatsTable'))
@@ -30,6 +31,7 @@ const MarketChatPage = lazy(() => import('./components/MarketChatPage'))
 const WatchPoolPage = lazy(() => import('./components/WatchPoolPage'))
 const OpportunityPage = lazy(() => import('./components/OpportunityPage'))
 const SignalHunterPage = lazy(() => import('./components/SignalHunterPage'))
+const AssetWorkspacePage = lazy(() => import('./components/AssetWorkspacePage'))
 
 function LazyFallback({ label = '正在加载...' }) {
   return <div className="lazy-fallback">{label}</div>
@@ -43,6 +45,16 @@ function isSilentHours(start, end) {
   const [eh, em] = end.split(':').map(Number)
   const s = sh * 60 + sm, e = eh * 60 + em
   return s <= e ? cur >= s && cur < e : cur >= s || cur < e
+}
+
+function lifecycleTransitionReason(state) {
+  return {
+    triggered: '闭合K线已确认冻结计划触发',
+    stopped: '冻结计划已触及失效位',
+    completed: '冻结计划全部目标已完成',
+    expired: '冻结计划未触发并已过期',
+    ambiguous: '同K线触及目标与失效位，顺序不明',
+  }[state] ?? 'Signal Hunter 生命周期已更新'
 }
 
 function matchesStrategy(cfg, sig, observation = false) {
@@ -360,7 +372,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.1.8'
+const APP_VERSION = 'v1.2.0'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
@@ -493,6 +505,7 @@ export default function App() {
   const completedAt = useMarketStore(s => s.completedAt)
   const completedMeta = useMarketStore(s => s.completedMeta)
   const setFlash   = useMarketStore(s => s.setFlash)
+  const applySignalHunterAiResults = useMarketStore(s => s.applySignalHunterAiResults)
   const filter     = useMarketStore(s => s.filter)
   const timeframe  = useMarketStore(s => s.timeframe)
   const hasData    = assets.length > 0
@@ -515,7 +528,7 @@ export default function App() {
     webhookAiOnly,
     observationEnabled, rsiSensitivity, startupStateAlerts,
     autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay,
-    watchPoolRetentionDays, themeMode,
+    watchPoolRetentionDays, themeMode, shNightlyReplayEnabled,
     loaded: settingsLoaded, load: loadSettings,
   } = useSettingsStore()
 
@@ -536,6 +549,8 @@ export default function App() {
   const watchPoolReviewRef = useRef({})
   const backgroundScanRef = useRef({ slowRsiAt: 0, watchPoolAt: 0 })
   const startupReportRef = useRef(false)
+  const signalLifecycleRef = useRef(null)
+  const nightlyReplayRef = useRef(false)
   useEffect(() => {
     const applyTheme = () => {
       const systemDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches
@@ -570,13 +585,19 @@ export default function App() {
 
   const loadGroups = useGroupsStore(s => s.load)
   const updateSignalTrail = useSignalTrailStore(s => s.updateFromAssets)
+  const hydrateSignalTrail = useSignalTrailStore(s => s.hydrate)
   const syncSignalReviews = useSignalReviewStore(s => s.syncFromAssets)
   const updateSignalReviews = useSignalReviewStore(s => s.updateFromAssets)
+  const hydrateSignalReviews = useSignalReviewStore(s => s.hydrate)
+  const hydrateWatchPool = useWatchPoolStore(s => s.hydrate)
 
   useEffect(() => {
     loadSettings()
     loadAlerts()
     loadGroups()
+    hydrateSignalTrail()
+    hydrateSignalReviews()
+    hydrateWatchPool()
   }, [])
 
   useEffect(() => {
@@ -972,6 +993,68 @@ export default function App() {
   }, [completedAt, settingsLoaded, updatedAt, addFeedItems])
 
   useEffect(() => {
+    if (!completedAt || !assets.length || !settingsLoaded || !shNightlyReplayEnabled || nightlyReplayRef.current) return
+    const now = new Date()
+    if (now.getHours() < 2) return
+    const dayKey = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`
+    if (localStorage.getItem('rsi:signalHunter:lastNightlyReplay') === dayKey) return
+    nightlyReplayRef.current = true
+    const selected = assets
+      .filter(asset => asset.signalHunter?.structureCandidates?.length)
+      .slice(0, 20)
+      .map(({ symbol, apiSymbol, source, type, name }) => ({ symbol, apiSymbol, source, type, name }))
+    if (!selected.length) {
+      nightlyReplayRef.current = false
+      return
+    }
+    window.api.runSignalHunterReplay({ assets: selected, maxAssets: 20 })
+      .then(() => localStorage.setItem('rsi:signalHunter:lastNightlyReplay', dayKey))
+      .catch(err => console.warn('[signal-nightly-replay]', err))
+      .finally(() => { nightlyReplayRef.current = false })
+  }, [completedAt, assets.length, settingsLoaded, shNightlyReplayEnabled])
+
+  useEffect(() => {
+    if (!completedAt || !assets.length || signalLifecycleRef.current === completedAt) return
+    signalLifecycleRef.current = completedAt
+    advanceSignalLifecycleItems(assets, completedAt).then(advanced => {
+      if (!advanced.items.length) return
+      applySignalHunterAiResults(advanced.items)
+      const transitions = advanced.transitions
+      if (!transitions.length) return
+      const lifecycleItems = transitions.map(item => ({
+        id: `signal-hunter-lifecycle-${item.symbol}-${item.to}-${completedAt}`,
+        ts: completedAt,
+        symbol: item.symbol,
+        type: 'signal_hunter_ai',
+        condition: item.to === 'triggered' ? 'focus' : item.to === 'completed' ? 'completed' : 'risk',
+        value: item.signalHunter.score?.total ?? 0,
+        price: item.signalHunter.currentPrice ?? null,
+        level: item.to === 'stopped' || item.to === 'ambiguous' ? 3 : 2,
+        special: true,
+        status: item.to,
+        side: item.signalHunter.side,
+        timeframe: item.signalHunter.timeframe,
+        signal: item.signalHunter.setupLabel || item.signalHunter.setup || 'Signal Hunter',
+        reason: lifecycleTransitionReason(item.to),
+        risk: item.signalHunter.riskFlags?.[0] ?? '',
+        nextCheck: item.to === 'triggered' ? '继续跟踪失效位与目标位' : '本轮计划已结束，等待新结构',
+        entryPrice: item.signalHunter.entryPrice ?? null,
+        stopLoss: item.signalHunter.stopLoss ?? null,
+        rewardRisk: item.signalHunter.rewardRisk ?? null,
+        score: item.signalHunter.score?.total ?? null,
+      }))
+      addFeedItems(lifecycleItems)
+      const silent = isSilentHours(silentRef.current.start, silentRef.current.end)
+      const popupItems = lifecycleItems.filter(item => item.level >= (minLevelRef.current.popup ?? 1))
+      const soundItems = lifecycleItems.filter(item => item.level >= (minLevelRef.current.sound ?? 1))
+      const webhookItems = lifecycleItems.filter(item => item.level >= (minLevelRef.current.webhook ?? 1))
+      if (!silent && popupRef.current && popupItems.length) window.api.showNotificationBatch(popupItems)
+      if (!silent && soundRef.current && soundItems.length) playAlertSound()
+      if (webhookItems.length) sendWebhooks(webhookItems, webhookRef.current)
+    }).catch(err => console.warn('[signal-lifecycle]', err))
+  }, [completedAt, assets.length, applySignalHunterAiResults, addFeedItems])
+
+  useEffect(() => {
     if (!completedAt || !assets.length) return
     updateSignalTrail(assets)
     syncSignalReviews(assets)
@@ -988,7 +1071,7 @@ export default function App() {
   const todayPicks = useMemo(() => getTodayPicks({ assets: deferredAssets, feed, watchPoolItems }), [deferredAssets, feed, watchPoolItems])
 
   return (
-    <div className="app">
+    <div className={`app app-tab-${activeTab}`}>
       <Toolbar activeTab={activeTab} setActiveTab={setActiveTab} />
       {updateInfo && (
         <div className="update-banner">
@@ -1012,9 +1095,11 @@ export default function App() {
             ) : activeTab === 'ai' ? (
               <AiPage />
             ) : activeTab === 'opportunities' ? (
-              <OpportunityPage />
+              <OpportunityPage onNavigate={setActiveTab} />
             ) : activeTab === 'signal-hunter' ? (
               <SignalHunterPage />
+            ) : activeTab === 'workspace' ? (
+              <AssetWorkspacePage />
             ) : activeTab === 'ai-review' ? (
               <AiReviewPage />
             ) : activeTab === 'trail' ? (

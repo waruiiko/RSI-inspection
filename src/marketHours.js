@@ -14,18 +14,24 @@ const HOLIDAYS = new Set([
   '2027-11-24', '2027-12-24',
 ])
 
-function isUSMarketOpen() {
-  const now = new Date()
+function getUSMarketSession(now = new Date()) {
   const et  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }))
 
   const dow = et.getDay()
-  if (dow === 0 || dow === 6) return false
-
-  const mins = et.getHours() * 60 + et.getMinutes()
-  if (mins < 570 || mins >= 960) return false  // before 9:30 or at/after 16:00
+  if (dow === 0 || dow === 6) return 'closed'
 
   const key = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`
-  return !HOLIDAYS.has(key)
+  if (HOLIDAYS.has(key)) return 'closed'
+
+  const mins = et.getHours() * 60 + et.getMinutes()
+  if (mins >= 570 && mins < 960) return 'regular'
+  if (mins >= 240 && mins < 570) return 'premarket'
+  if (mins >= 960 && mins < 1200) return 'afterhours'
+  return 'closed'
 }
 
-module.exports = { isUSMarketOpen }
+function isUSMarketOpen(now = new Date()) {
+  return getUSMarketSession(now) === 'regular'
+}
+
+module.exports = { isUSMarketOpen, getUSMarketSession }

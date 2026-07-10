@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { hydrateOperationalData, persistOperationalData } from '../utils/operationalData'
 
 const KEY = 'rsi:watchPool'
 
@@ -8,7 +9,9 @@ function loadItems() {
 }
 
 function saveItems(items) {
-  localStorage.setItem(KEY, JSON.stringify(items.slice(0, 500)))
+  const next = items.slice(0, 500)
+  localStorage.setItem(KEY, JSON.stringify(next))
+  persistOperationalData('watchPool', next)
 }
 
 function normalizeStatus(status) {
@@ -17,6 +20,10 @@ function normalizeStatus(status) {
 
 const useWatchPoolStore = create((set, get) => ({
   items: loadItems(),
+  hydrate: async () => {
+    const items = await hydrateOperationalData('watchPool', get().items)
+    if (Array.isArray(items)) set({ items })
+  },
 
   addOrUpdate: (entry) => {
     const now = Date.now()

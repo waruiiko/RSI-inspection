@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { signalIdFromAsset, signalIdFromReviewItem } from '../utils/signalId'
+import { hydrateOperationalData, persistOperationalData } from '../utils/operationalData'
 
 const KEY = 'rsi:signalReview'
 const TRADE_LOG_KEY = 'rsi:signalReviewTradeLog'
@@ -54,11 +55,15 @@ function loadEntryConfirmBufferPct() {
 }
 
 function saveItems(items) {
-  localStorage.setItem(KEY, JSON.stringify(items.slice(0, MAX_ITEMS)))
+  const next = items.slice(0, MAX_ITEMS)
+  localStorage.setItem(KEY, JSON.stringify(next))
+  persistOperationalData('signalReview', next)
 }
 
 function saveTradeLogs(items) {
-  localStorage.setItem(TRADE_LOG_KEY, JSON.stringify(items.slice(0, MAX_TRADE_LOGS)))
+  const next = items.slice(0, MAX_TRADE_LOGS)
+  localStorage.setItem(TRADE_LOG_KEY, JSON.stringify(next))
+  persistOperationalData('signalReviewTradeLog', next)
 }
 
 function saveMinScore(value) {
@@ -181,6 +186,18 @@ function firstMatchingCandle(item, asset, sinceTs, predicate) {
     .find(candle => predicate(normalizeProbe(candle))) ?? null
 }
 
+function firstMatchingExitCandle(item, asset, sinceTs, predicate) {
+  const lowerTimeframe = item.timeframe === '4h' ? '1h' : item.timeframe === '1h' ? '15m' : null
+  const preferred = lowerTimeframe ? asset?.reviewCandlesByTf?.[lowerTimeframe] : null
+  const timeframe = Array.isArray(preferred) && preferred.length ? lowerTimeframe : item.timeframe
+  const candles = asset?.reviewCandlesByTf?.[timeframe] ?? []
+  const candle = candles
+    .filter(value => (candleTime(value) ?? 0) >= sinceTs)
+    .sort((a, b) => (candleTime(a) ?? 0) - (candleTime(b) ?? 0))
+    .find(value => predicate(normalizeProbe(value))) ?? null
+  return { candle, timeframe }
+}
+
 function entryObservedPrice(item, probe) {
   const p = normalizeProbe(probe)
   const trigger = item.entryTrigger ?? inferEntryTrigger(item.side, item.entryPrice, item.capturedPrice, item.setup)
@@ -242,6 +259,7 @@ function captureRejectReason(asset, minScore) {
   if (!sig) return '无 SH 信号'
   if (sig.rejected || sig.status === 'rejected') return '已剔除'
   if (!REVIEWABLE_STATUSES.has(sig.status)) return '状态不可识别'
+  if (sig.stability && !sig.stability.confirmed && sig.status !== 'triggered') return '等待稳定确认'
   if (sig.side !== 'long' && sig.side !== 'short') return '方向无效'
   if (!Number.isFinite(sig.entryPrice ?? sig.triggerPrice) || !Number.isFinite(sig.stopLoss)) return '价格缺失'
   if ((sig.score?.total ?? 0) < minScore) return '综合分不足'
@@ -261,7 +279,7 @@ function sampleFromAsset(asset, now) {
     .map(finite)
     .filter(Number.isFinite)
   const targets = validTargets(sig.side, entryPrice, stopLoss, explicitTargets)
-  const entryTrigger = inferEntryTrigger(sig.side, entryPrice, currentPrice, sig.setupLabel || sig.setup)
+  const entryTrigger = inferEntryTrigger(sig.side, entryPrice, currentPrice, sig.entryMode || sig.setupLabel || sig.setup)
   return {
     id: `shr-${reviewKey(asset, sig)}`,
     key: reviewKey(asset, sig),
@@ -274,10 +292,14 @@ function sampleFromAsset(asset, now) {
     statusAtCapture: sig.status,
     setup: sig.setupLabel || sig.setup || 'Signal Hunter',
     score: sig.score?.total ?? 0,
+    marketRegime: sig.marketRegime ?? null,
+    executionNotional: finite(sig.executionNotional),
+    executionSlippagePct: finite(sig.executionSlippagePct) ?? 0,
     chartScore: sig.score?.chart ?? null,
     dataScore: sig.score?.data ?? null,
     riskScore: sig.score?.risk ?? null,
     entryPrice,
+    entryMode: sig.entryMode ?? null,
     entryTrigger,
     entryTriggerLabel: triggerLabel(entryTrigger),
     stopLoss,
@@ -385,6 +407,13 @@ function tradeLogFromItem(item, now) {
   const id = `sht-${item.key}-${item.result}`
   const exitPrice = closePriceForLog(item)
   const targetIndex = item.result === 'win' ? hitTargetIndex(item, exitPrice) : -1
+  const riskPct = Number.isFinite(item.entryPrice) && Number.isFinite(item.stopLoss) && item.entryPrice
+    ? Math.abs(item.entryPrice - item.stopLoss) / Math.abs(item.entryPrice) * 100
+    : null
+  const mfeR = Number.isFinite(riskPct) && riskPct > 0 && Number.isFinite(item.maxReturnPct) ? item.maxReturnPct / riskPct : null
+  const maeR = Number.isFinite(riskPct) && riskPct > 0 && Number.isFinite(item.minReturnPct) ? item.minReturnPct / riskPct : null
+  const grossR = riskMultiple(item, exitPrice)
+  const estimatedCostR = Number.isFinite(riskPct) && riskPct > 0 ? ((finite(item.executionSlippagePct) ?? 0) * 2) / riskPct : 0
   return {
     id,
     reviewId: item.id,
@@ -396,6 +425,7 @@ function tradeLogFromItem(item, now) {
     side: item.side,
     timeframe: item.timeframe,
     setup: item.setup,
+    marketRegime: item.marketRegime ?? null,
     score: item.score,
     result: item.result,
     resultLabel: item.resultLabel,
@@ -409,6 +439,7 @@ function tradeLogFromItem(item, now) {
     closedAt: now,
     exitTime: now,
     entryPrice: item.entryPrice,
+    entryMode: item.entryMode ?? null,
     entryObservedPrice: item.entryObservedPrice,
     stopLoss: item.stopLoss,
     targets: item.targets ?? [],
@@ -418,7 +449,15 @@ function tradeLogFromItem(item, now) {
     returnPct: pct(item.side, item.entryPrice, exitPrice),
     maxReturnPct: item.maxReturnPct,
     minReturnPct: item.minReturnPct,
-    rMultiple: riskMultiple(item, exitPrice),
+    rMultiple: grossR,
+    executionNotional: finite(item.executionNotional),
+    executionSlippagePct: finite(item.executionSlippagePct) ?? 0,
+    estimatedCostR: Number(estimatedCostR.toFixed(3)),
+    executionAdjustedR: Number.isFinite(grossR) ? Number((grossR - estimatedCostR).toFixed(2)) : null,
+    mfeR: Number.isFinite(mfeR) ? Number(mfeR.toFixed(2)) : null,
+    maeR: Number.isFinite(maeR) ? Number(maeR.toFixed(2)) : null,
+    waitTimeMs: Number.isFinite(item.enteredAt) ? Math.max(0, item.enteredAt - item.capturedAt) : null,
+    holdingTimeMs: Number.isFinite(item.enteredAt) ? Math.max(0, now - item.enteredAt) : null,
     reasons: item.reasons ?? [],
     risks: item.risks ?? [],
   }
@@ -574,16 +613,24 @@ function updateItem(item, asset, now, entryConfirmBufferPct = DEFAULT_ENTRY_CONF
     }
     next.horizons = horizons
 
-    const closed = next.result === 'win' || next.result === 'loss'
+    const closed = next.result === 'win' || next.result === 'loss' || next.result === 'ambiguous'
     if (justEntered) {
       next.result = 'open'
       next.resultLabel = '已入场'
     } else if (!closed && (hitStop(next, exitProbe) || hitTarget(next, exitProbe))) {
-      const exitCandle = firstMatchingCandle(next, asset, next.enteredAt, probe =>
+      const exitMatch = firstMatchingExitCandle(next, asset, next.enteredAt, probe =>
         hitStop(next, probe) || hitTarget(next, probe))
+      const exitCandle = exitMatch.candle
       const observedExitProbe = exitCandle ? normalizeProbe(exitCandle) : exitProbe
       next.closedAt = candleTime(exitCandle) ?? now
-      if (hitStop(next, observedExitProbe)) {
+      const stopped = hitStop(next, observedExitProbe)
+      const targeted = hitTarget(next, observedExitProbe)
+      next.sequenceResolution = exitMatch.timeframe
+      if (stopped && targeted) {
+        next.result = 'ambiguous'
+        next.resultLabel = '同K线顺序不明'
+        next.exitObservedPrice = null
+      } else if (stopped) {
         next.result = 'loss'
         next.resultLabel = '触及止损'
         next.exitObservedPrice = next.stopLoss
@@ -613,6 +660,16 @@ const useSignalReviewStore = create((set, get) => ({
   entryConfirmBufferPct: loadEntryConfirmBufferPct(),
   captureRejectStats: null,
   cleanNotice: null,
+  hydrate: async () => {
+    const [items, tradeLogs] = await Promise.all([
+      hydrateOperationalData('signalReview', get().items),
+      hydrateOperationalData('signalReviewTradeLog', get().tradeLogs),
+    ])
+    set({
+      items: Array.isArray(items) ? items.map(migrateLoadedItem) : get().items,
+      tradeLogs: Array.isArray(tradeLogs) ? tradeLogs.map(normalizeTradeLog) : get().tradeLogs,
+    })
+  },
 
   syncFromAssets: (assets, now = Date.now()) => {
     const existing = get().items

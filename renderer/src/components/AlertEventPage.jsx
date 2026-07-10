@@ -11,6 +11,7 @@ const SH_AI_PINNED_KEY = 'rsi:signalHunter:pinned'
 
 const STATUS_FILTERS = [
   { key: 'pending', label: '待处理' },
+  { key: 'snoozed', label: '稍后提醒' },
   { key: 'done', label: '已处理' },
   { key: 'ignored', label: '忽略' },
   { key: 'all', label: '全部' },
@@ -53,6 +54,7 @@ function fmtTime(ts) {
 }
 
 function eventStatus(item) {
+  if (item.eventStatus === 'snoozed' && Number(item.snoozedUntil) <= Date.now()) return 'pending'
   return item.eventStatus ?? 'pending'
 }
 
@@ -129,6 +131,7 @@ function eventReason(item) {
 function eventNextStep(item) {
   if (eventStatus(item) === 'done') return '已处理，等待下一轮变化'
   if (eventStatus(item) === 'ignored') return '已忽略'
+  if (eventStatus(item) === 'snoozed') return `稍后提醒至 ${fmtTime(item.snoozedUntil)}`
   if (item.condition === 'risk' || item.status === 'risk') return item.risk ? `先排除风险：${item.risk}` : '先排除风险'
   if (item.condition === 'focus' || item.status === 'triggered') return item.nextCheck || '打开 SH / K线复核确认'
   return item.nextCheck || '保持观察'
@@ -248,11 +251,12 @@ export default function AlertEventPage({ onNavigate }) {
   }
 
   const updateEventStatus = (item, status) => {
+    const snoozedUntil = status === 'snoozed' ? Date.now() + 4 * 60 * 60 * 1000 : null
     updateFeed(items => items.map(row => row.id === item.id
-      ? { ...row, eventStatus: status, eventStatusAt: Date.now() }
+      ? { ...row, eventStatus: status, eventStatusAt: Date.now(), snoozedUntil }
       : row))
     setSelectedItem(current => current?.id === item.id
-      ? { ...current, eventStatus: status, eventStatusAt: Date.now() }
+      ? { ...current, eventStatus: status, eventStatusAt: Date.now(), snoozedUntil }
       : current)
   }
 
@@ -468,6 +472,7 @@ export default function AlertEventPage({ onNavigate }) {
               <button className="zone-btn" onClick={() => copyEvent(selectedItem)}>复制摘要</button>
               <button className="zone-btn" disabled={!findAsset(assets, selectedItem.symbol)} onClick={() => openChart(selectedItem)}>打开K线</button>
               <button className="zone-btn" onClick={() => updateEventStatus(selectedItem, 'done')}>已处理</button>
+              <button className="zone-btn" onClick={() => updateEventStatus(selectedItem, 'snoozed')}>4小时后提醒</button>
               <button className="zone-btn" onClick={() => updateEventStatus(selectedItem, 'ignored')}>忽略</button>
               <button className="zone-btn" onClick={() => updateEventStatus(selectedItem, 'pending')}>重新待处理</button>
             </div>

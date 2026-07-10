@@ -1,10 +1,17 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import useSignalReviewStore from '../store/signalReviewStore'
+import useMarketStore from '../store/marketStore'
 import { formatPrice } from '../utils/rsi'
 import { signalIdFromReviewItem } from '../utils/signalId'
+import { buildSignalCalibration } from '../utils/signalCalibration'
 
 const SH_FOCUS_KEY = 'rsi:signalHunter:focus'
 const MIN_TAKE_PROFIT_R = 1.5
+const REPORT_PERIODS = [
+  { key: '24h', label: '24H', days: 1 },
+  { key: '7d', label: '7D', days: 7 },
+  { key: '30d', label: '30D', days: 30 },
+]
 
 function fmtTime(ts) {
   if (!ts) return '-'
@@ -39,6 +46,7 @@ function resultTone(result) {
   if (result === 'win') return 'win'
   if (result === 'loss') return 'loss'
   if (result === 'not_entered') return 'muted'
+  if (result === 'ambiguous') return 'muted'
   return 'open'
 }
 
@@ -85,6 +93,7 @@ function displaySetup(setup) {
 function statusLabel(row) {
   if (row.result === 'loss') return 'STOPPED'
   if (row.result === 'win') return row.hitTarget ? `TP${row.hitTarget}` : 'TP'
+  if (row.result === 'ambiguous') return '顺序不明'
   if (row.enteredAt) return 'TRIGGERED'
   if (row.result === 'not_entered') return '未触发'
   return '观察中'
@@ -143,8 +152,24 @@ function groupCountLabel(group) {
   return `${group.total} 单 / ${group.winRate == null ? '-' : `${group.winRate.toFixed(1)}%`} / ${fmtR(group.netR)}`
 }
 
-function buildReviewReport(items, tradeLogs) {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms)) return '-'
+  const hours = ms / 36e5
+  return hours < 1 ? `${Math.round(ms / 60000)}分` : `${hours.toFixed(1)}小时`
+}
+
+function calibrationModeLabel(mode) {
+  return {
+    pullback: '回踩/反抽',
+    retest: '支阻回测',
+    base: '区间蓄势',
+    breakout: '向上突破',
+    breakdown: '向下跌破',
+  }[mode] ?? mode
+}
+
+function buildReviewReport(items, tradeLogs, period) {
+  const cutoff = Date.now() - period.days * 24 * 60 * 60 * 1000
   const byKey = new Map()
   for (const item of items) {
     if ((item.capturedAt ?? 0) >= cutoff || (item.closedAt ?? 0) >= cutoff || (item.lastUpdatedAt ?? 0) >= cutoff) {
@@ -161,7 +186,8 @@ function buildReviewReport(items, tradeLogs) {
   const total = rows.length
   const wins = rows.filter(row => row.result === 'win')
   const losses = rows.filter(row => row.result === 'loss')
-  const open = rows.filter(row => row.enteredAt && row.result !== 'win' && row.result !== 'loss')
+  const ambiguous = rows.filter(row => row.result === 'ambiguous')
+  const open = rows.filter(row => row.enteredAt && !['win', 'loss', 'ambiguous'].includes(row.result))
   const tpCount = level => wins.filter(row => (row.hitTarget ?? 1) >= level).length
   const positiveMoves = rows.map(rowMaxMove).filter(Number.isFinite).filter(v => v > 0)
   const avgMaxMove = positiveMoves.length
@@ -169,17 +195,19 @@ function buildReviewReport(items, tradeLogs) {
     : null
   const stars = rows.filter(row => Number.isFinite(rowMaxMove(row))).slice(0, 5)
   const highlights = []
-  if (stars[0]) highlights.push(`${stars[0].symbol} ${signalIdOf(stars[0])} ${fmtPct(rowMaxMove(stars[0]))} 为过去24H最强`)
+  if (stars[0]) highlights.push(`${stars[0].symbol} ${signalIdOf(stars[0])} ${fmtPct(rowMaxMove(stars[0]))} 为过去${period.label}最强`)
   if (losses.length) highlights.push(`止损 ${losses.length} 个，止损率 ${fmtRate(losses.length, total)}`)
-  else if (total) highlights.push('过去24H暂无止损信号')
+  else if (total) highlights.push(`过去${period.label}暂无止损信号`)
   if (open.length) highlights.push(`${open.length} 个信号仍在跟踪中`)
   if (wins.length) highlights.push(`${wins.length} 个信号已经触达止盈目标`)
+  if (ambiguous.length) highlights.push(`${ambiguous.length} 个样本同K线触及止损与目标，未计入校准`)
 
   return {
     rows,
     total,
     wins,
     losses,
+    ambiguous,
     open,
     stars,
     avgMaxMove,
@@ -187,12 +215,13 @@ function buildReviewReport(items, tradeLogs) {
     tp2: tpCount(2),
     tp3: tpCount(3),
     highlights,
+    periodLabel: period.label,
   }
 }
 
 function reportText(report) {
   return [
-    '打榜猎人 SH 24H 复盘',
+    `打榜猎人 SH ${report.periodLabel} 复盘`,
     `总信号: ${report.total}`,
     `有效突破率: ${fmtRate(report.wins.length, report.total)}`,
     `止损率: ${fmtRate(report.losses.length, report.total)}`,
@@ -208,6 +237,7 @@ function reportText(report) {
 }
 
 export default function SignalReviewPage({ onNavigate }) {
+  const assets = useMarketStore(s => s.assets)
   const items = useSignalReviewStore(s => s.items)
   const tradeLogs = useSignalReviewStore(s => s.tradeLogs)
   const minScore = useSignalReviewStore(s => s.minScore)
@@ -220,17 +250,46 @@ export default function SignalReviewPage({ onNavigate }) {
   const setMinScore = useSignalReviewStore(s => s.setMinScore)
   const setEntryConfirmBufferPct = useSignalReviewStore(s => s.setEntryConfirmBufferPct)
   const clearCleanNotice = useSignalReviewStore(s => s.clearCleanNotice)
-  const [view, setView] = useState('samples')
+  const [view, setView] = useState('report')
+  const [reportPeriod, setReportPeriod] = useState('24h')
   const [filter, setFilter] = useState('all')
   const [sampleQuery, setSampleQuery] = useState('')
   const [logFilter, setLogFilter] = useState('all')
   const [logQuery, setLogQuery] = useState('')
   const [logMinScore, setLogMinScore] = useState(minScore)
+  const [replayBusy, setReplayBusy] = useState(false)
+  const [replayReport, setReplayReport] = useState(null)
+  const [replayError, setReplayError] = useState('')
+  const [replayHistory, setReplayHistory] = useState([])
+
+  useEffect(() => {
+    window.api?.loadSignalReplayHistory?.().then(items => setReplayHistory(Array.isArray(items) ? items : []))
+  }, [])
+
+  const runReplay = async () => {
+    if (!window.api?.runSignalHunterReplay || replayBusy) return
+    setReplayBusy(true)
+    setReplayError('')
+    try {
+      const selected = assets
+        .filter(asset => asset.signalHunter?.structureCandidates?.length)
+        .slice(0, 12)
+        .map(({ symbol, apiSymbol, source, type, name }) => ({ symbol, apiSymbol, source, type, name }))
+      const result = await window.api.runSignalHunterReplay({ assets: selected, maxAssets: 12 })
+      setReplayReport(result)
+      setReplayHistory(previous => [result, ...previous].slice(0, 90))
+    } catch (err) {
+      setReplayError(err.message)
+    } finally {
+      setReplayBusy(false)
+    }
+  }
   const [showLogBreakdown, setShowLogBreakdown] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmClearLogs, setConfirmClearLogs] = useState(false)
   const [confirmClearAll, setConfirmClearAll] = useState(false)
-  const report = useMemo(() => buildReviewReport(items, tradeLogs), [items, tradeLogs])
+  const reportPeriodMeta = REPORT_PERIODS.find(period => period.key === reportPeriod) ?? REPORT_PERIODS[0]
+  const report = useMemo(() => buildReviewReport(items, tradeLogs, reportPeriodMeta), [items, tradeLogs, reportPeriodMeta])
   const captureRejectRows = useMemo(() => {
     const reasons = captureRejectStats?.reasons ?? {}
     return Object.entries(reasons)
@@ -314,6 +373,11 @@ export default function SignalReviewPage({ onNavigate }) {
     const winR = sumR(wins)
     const lossR = Math.abs(sumR(losses))
     const netR = sumR(recent)
+    const adjusted = recent.map(log => log.executionAdjustedR).filter(Number.isFinite)
+    const mfe = recent.map(log => log.mfeR).filter(Number.isFinite)
+    const mae = recent.map(log => log.maeR).filter(Number.isFinite)
+    const waits = recent.map(log => log.waitTimeMs).filter(Number.isFinite)
+    const holds = recent.map(log => log.holdingTimeMs).filter(Number.isFinite)
     return {
       recent,
       wins,
@@ -321,6 +385,11 @@ export default function SignalReviewPage({ onNavigate }) {
       winR,
       lossR,
       netR,
+      adjustedR: adjusted.length ? adjusted.reduce((sum, value) => sum + value, 0) : null,
+      avgMfeR: mfe.length ? mfe.reduce((sum, value) => sum + value, 0) / mfe.length : null,
+      avgMaeR: mae.length ? mae.reduce((sum, value) => sum + value, 0) / mae.length : null,
+      avgWaitMs: waits.length ? waits.reduce((sum, value) => sum + value, 0) / waits.length : null,
+      avgHoldMs: holds.length ? holds.reduce((sum, value) => sum + value, 0) / holds.length : null,
       winRate: recent.length ? (wins.length / recent.length) * 100 : null,
     }
   }, [filteredTradeLogs])
@@ -330,14 +399,17 @@ export default function SignalReviewPage({ onNavigate }) {
     const setupGroups = groupTradeLogs(recent, row => row.setup, row => row.setup || 'Signal Hunter')
     const timeframeGroups = groupTradeLogs(recent, row => row.timeframe, row => row.timeframe || '-')
     const sideGroups = groupTradeLogs(recent, row => row.side, row => sideLabel(row.side))
+    const regimeGroups = groupTradeLogs(recent, row => row.marketRegime, row => row.marketRegime || '未知状态')
     return {
       setupGroups,
       timeframeGroups,
       sideGroups,
+      regimeGroups,
       worstSetups: setupGroups.slice().sort((a, b) => (a.netR ?? 0) - (b.netR ?? 0)).slice(0, 3),
       bestSetups: setupGroups.slice(0, 3),
     }
   }, [logSummary.recent])
+  const signalCalibration = useMemo(() => buildSignalCalibration(tradeLogs), [tradeLogs])
 
   const stats = useMemo(() => {
     const entered = items.filter(item => item.enteredAt)
@@ -357,6 +429,7 @@ export default function SignalReviewPage({ onNavigate }) {
       win: items.filter(item => item.result === 'win').length,
       loss: items.filter(item => item.result === 'loss').length,
       notEntered: items.filter(item => item.result === 'not_entered').length,
+      ambiguous: items.filter(item => item.result === 'ambiguous').length,
       winRate: closed.length ? (items.filter(item => item.result === 'win').length / closed.length) * 100 : null,
       avgReturn,
       avgMax,
@@ -368,8 +441,9 @@ export default function SignalReviewPage({ onNavigate }) {
     <div className={`signal-review-page ${view === 'logs' ? 'signal-review-page-logs' : ''}`}>
       <div className="signal-review-head">
         <div>
-          <h2>SH复盘</h2>
-          <p>自动记录 Signal Hunter 高分信号；样本负责跟踪，交易日志负责归档止盈/止损结果。</p>
+          <span className="signal-review-kicker">{report.periodLabel} PERFORMANCE REVIEW</span>
+          <h2>SH复盘 <em>让结果反过来校准信号</em></h2>
+          <p>先看过去 24 小时有没有兑现，再下钻到样本与交易日志。</p>
         </div>
         <div className="signal-review-summary">
           <div><b>{stats.total}</b><span>样本</span></div>
@@ -389,8 +463,22 @@ export default function SignalReviewPage({ onNavigate }) {
           交易日志 {tradeLogs.length}
         </button>
         <button className={`feed-type-btn ${view === 'report' ? 'active' : ''}`} onClick={() => setView('report')}>
-          24H战绩 {report.total}
+          战绩报告 {report.total}
         </button>
+        <button className="feed-type-btn" disabled={replayBusy || !assets.length} onClick={runReplay}>
+          {replayBusy ? '逐根回放中' : '运行近期回放'}
+        </button>
+        {view === 'report' && <div className="signal-review-periods" aria-label="复盘周期">
+          {REPORT_PERIODS.map(period => (
+            <button
+              key={period.key}
+              className={`feed-type-btn ${reportPeriod === period.key ? 'active' : ''}`}
+              onClick={() => setReportPeriod(period.key)}
+            >
+              {period.label}
+            </button>
+          ))}
+        </div>}
         <label className="signal-review-score-control">
           <span>入库分数 ≥</span>
           <input
@@ -431,6 +519,36 @@ export default function SignalReviewPage({ onNavigate }) {
         </div>
       )}
 
+      {(replayReport || replayError) && (
+        <div className="signal-review-filter-stats">
+          <strong>逐根回放</strong>
+          {replayError ? <em>{replayError}</em> : <>
+            <span>{replayReport.assets} 个标的</span>
+            <span>{replayReport.totalSignals} 个计划</span>
+            <span>胜 {replayReport.wins}</span>
+            <span>负 {replayReport.losses}</span>
+            <span>歧义 {replayReport.ambiguous}</span>
+            <span>过期 {replayReport.expired}</span>
+            <span>胜率 {replayReport.winRate == null ? '-' : `${(replayReport.winRate * 100).toFixed(1)}%`}</span>
+            <span>净值 {fmtR(replayReport.netR)}</span>
+            {replayReport.profileGroups?.map(group => (
+              <em key={group.key}>{group.key} · {group.signals}单 · {group.winRate == null ? '-' : `${(group.winRate * 100).toFixed(0)}%`} · {fmtR(group.netR)}</em>
+            ))}
+            {replayReport.limitations?.map(item => <em key={item}>限制 · {item}</em>)}
+          </>}
+        </div>
+      )}
+      {!replayReport && replayHistory[0] && (
+        <div className="signal-review-filter-stats">
+          <strong>最近保存回放</strong>
+          <span>{new Date(replayHistory[0].createdAt).toLocaleString('zh-CN')}</span>
+          <span>{replayHistory[0].totalSignals} 个计划</span>
+          <span>胜率 {replayHistory[0].winRate == null ? '-' : `${(replayHistory[0].winRate * 100).toFixed(1)}%`}</span>
+          <span>净值 {fmtR(replayHistory[0].netR)}</span>
+          <em>历史记录 {replayHistory.length}/90</em>
+        </div>
+      )}
+
       {view === 'samples' && captureRejectStats && (
         <div className="signal-review-filter-stats">
           <strong>上轮过滤</strong>
@@ -446,7 +564,7 @@ export default function SignalReviewPage({ onNavigate }) {
         <div className="signal-review-report">
           <div className="signal-review-report-head">
             <div>
-              <h3>过去24H SH复盘数据</h3>
+              <h3>过去{report.periodLabel} SH复盘数据</h3>
               <span>{new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
             </div>
             <button className="feed-type-btn" onClick={copyReport} disabled={!report.total}>复制摘要</button>
@@ -474,7 +592,7 @@ export default function SignalReviewPage({ onNavigate }) {
                     <span>{statusLabel(row)}</span>
                     <em>{fmtPct(rowMaxMove(row))}</em>
                   </div>
-                )) : <div className="signal-review-empty compact">暂无24H明星信号</div>}
+                )) : <div className="signal-review-empty compact">暂无{report.periodLabel}明星信号</div>}
               </div>
             </section>
 
@@ -487,7 +605,7 @@ export default function SignalReviewPage({ onNavigate }) {
                     <span>{row.score ?? '-'}/10</span>
                     <em>{(row.risks ?? [])[0] || '无额外风险标记'}</em>
                   </div>
-                )) : <div className="signal-review-empty compact">过去24H暂无止损</div>}
+                )) : <div className="signal-review-empty compact">过去{report.periodLabel}暂无止损</div>}
               </div>
             </section>
           </div>
@@ -506,7 +624,7 @@ export default function SignalReviewPage({ onNavigate }) {
                   <span>{statusLabel(row)}</span>
                   <em>{fmtPct(rowMaxMove(row))}</em>
                 </div>
-              )) : <div className="signal-review-empty compact">暂无过去24H复盘数据</div>}
+              )) : <div className="signal-review-empty compact">暂无过去{report.periodLabel}复盘数据</div>}
             </div>
           </div>
 
@@ -523,6 +641,7 @@ export default function SignalReviewPage({ onNavigate }) {
           ['entered', '已入场'],
           ['win', '成功'],
           ['loss', '止损'],
+          ['ambiguous', '顺序不明'],
           ['not_entered', '未触发'],
           ['tracking', '跟踪中'],
         ].map(([key, label]) => (
@@ -654,6 +773,9 @@ export default function SignalReviewPage({ onNavigate }) {
             <div><span>成功</span><b>{logSummary.wins.length} 单 / {fmtR(logSummary.winR)}</b></div>
             <div><span>失败</span><b>{logSummary.losses.length} 单 / {fmtR(-logSummary.lossR)}</b></div>
             <div><span>净收益</span><b>{fmtR(logSummary.netR)}</b></div>
+            <div><span>扣滑点</span><b>{fmtR(logSummary.adjustedR)}</b></div>
+            <div><span>平均 MFE / MAE</span><b>{fmtR(logSummary.avgMfeR)} / {fmtR(logSummary.avgMaeR)}</b></div>
+            <div><span>等待 / 持有</span><b>{fmtDuration(logSummary.avgWaitMs)} / {fmtDuration(logSummary.avgHoldMs)}</b></div>
             <div><span>胜率</span><b>{logSummary.winRate == null ? '-' : `${logSummary.winRate.toFixed(1)}%`}</b></div>
             <button
               type="button"
@@ -692,6 +814,23 @@ export default function SignalReviewPage({ onNavigate }) {
                 </div>
               )) : <div className="signal-review-empty compact">暂无可拆解的方向</div>}
             </section>
+            <section>
+              <div className="signal-review-report-title">自动校准 · 90天</div>
+              {signalCalibration.entries.length ? signalCalibration.entries.slice(0, 6).map(group => (
+                <div key={group.key} className="signal-review-breakdown-row">
+                  <strong>{group.timeframe} {sideLabel(group.side)} · {calibrationModeLabel(group.entryMode)}</strong>
+                  <span>{group.active
+                    ? `${group.delta >= 0 ? '+' : ''}${group.delta.toFixed(2)}分 · T${group.trainingSamples}/V${group.validationSamples}`
+                    : `${group.samples}/${signalCalibration.minSamples}单 · 验证未通过`}</span>
+                </div>
+              )) : <div className="signal-review-empty compact">暂无已完成交易样本</div>}
+            </section>
+            <section>
+              <div className="signal-review-report-title">按市场状态拆解</div>
+              {logBreakdown.regimeGroups.length ? logBreakdown.regimeGroups.slice(0, 6).map(group => (
+                <div key={group.key} className="signal-review-breakdown-row"><strong>{group.label}</strong><span>{groupCountLabel(group)}</span></div>
+              )) : <div className="signal-review-empty compact">暂无市场状态样本</div>}
+            </section>
           </div>}
           {!filteredTradeLogs.length ? (
             <div className="signal-review-empty">
@@ -713,6 +852,7 @@ export default function SignalReviewPage({ onNavigate }) {
                   <span>离场 {formatPrice(log.exitPrice)}</span>
                   <span className="signal-review-log-return">{fmtPct(log.returnPct)}</span>
                   <span className="signal-review-log-r">{fmtR(log.rMultiple)}</span>
+                  <small>净 {fmtR(log.executionAdjustedR)} · MFE {fmtR(log.mfeR)} / MAE {fmtR(log.maeR)}</small>
                 </div>
               ))}
             </div>

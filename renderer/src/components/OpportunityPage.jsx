@@ -13,7 +13,10 @@ const FILTERS = [
   { key: 'rebound', label: '回升确认' },
   { key: 'divergence', label: '底背离' },
   { key: 'cooldown', label: '观察池复看' },
+  { key: 'promoted', label: '已进入SH' },
 ]
+
+const STAGE_LABELS = { discovered: '发现', watching: '观察', confirmed: '确认', promoted: 'SH候选', invalidated: '失效', blocked: '数据阻断' }
 
 function fmtPct(v) {
   if (v == null || Number.isNaN(v)) return '-'
@@ -35,6 +38,9 @@ function opportunityMeta(asset, watchItem) {
   const vol4 = asset.volumeSignal?.['4h']?.direction === 'bullish'
   const vol1 = asset.volumeSignal?.['1d']?.direction === 'bullish'
   const calm = change <= 8
+  const turnover = getQuoteVolume(asset)
+  const liquid = turnover >= (asset.source === 'yahoo' ? 20_000_000 : 5_000_000)
+  const dataHealthy = asset.dataQuality?.ok !== false
   const deep = calm && ((r4 != null && r4 <= 32) || (r1 != null && r1 <= 35))
   const low = calm && ((r4 != null && r4 <= 38) || (r1 != null && r1 <= 40))
   const rebound = calm && (
@@ -43,12 +49,20 @@ function opportunityMeta(asset, watchItem) {
   )
   const divergence = div4 || div1
   const cooling = !!watchItem && ['watch', 'interesting', 'unmarked'].includes(watchItem.status) && calm
+  const promoted = asset.signalHunter && asset.signalHunter.status !== 'rejected' && !asset.signalHunter.rejected
+  const trendAligned = (asset.rsi?.['1d'] ?? 50) >= 38 && (asset.rsi?.['1d'] ?? 50) <= 65
+  const stage = !dataHealthy ? 'blocked'
+    : !calm && watchItem ? 'invalidated'
+      : promoted ? 'promoted'
+        : rebound && trendAligned && liquid ? 'confirmed'
+          : watchItem ? 'watching' : 'discovered'
   const priority =
     (deep ? 35 : low ? 18 : 0) +
     (rebound ? 28 : 0) +
     (divergence ? 24 : 0) +
     (cooling ? 12 : 0) +
-    Math.min(12, Math.log10((getQuoteVolume(asset) || 0) / 1_000_000 + 1) * 5)
+    Math.min(12, Math.log10((turnover || 0) / 1_000_000 + 1) * 5) +
+    (promoted ? 25 : 0) + (trendAligned ? 6 : -6) + (liquid ? 4 : -20) + (dataHealthy ? 0 : -40)
 
   const tags = []
   if (deep) tags.push('深度低位')
@@ -56,15 +70,18 @@ function opportunityMeta(asset, watchItem) {
   if (rebound) tags.push('回升确认')
   if (divergence) tags.push('底背离')
   if (cooling) tags.push('观察池复看')
+  if (promoted) tags.push('SH结构')
+  if (!liquid) tags.push('流动性不足')
+  if (!dataHealthy) tags.push('数据阻断')
 
   const reason = tags.length
     ? `${tags.join(' / ')}；4h RSI ${fmtRsi(r4)}，1d RSI ${fmtRsi(r1)}，24H ${fmtPct(asset.change24h)}`
     : ''
 
-  return { deep, low, rebound, divergence, cooling, priority, tags, reason }
+  return { deep, low, rebound, divergence, cooling, promoted, trendAligned, liquid, dataHealthy, stage, priority, tags, reason }
 }
 
-export default function OpportunityPage() {
+export default function OpportunityPage({ onNavigate }) {
   const assets = useMarketStore(s => s.assets)
   const feed = useAlertStore(s => s.feed)
   const addWatch = useWatchPoolStore(s => s.addOrUpdate)
@@ -83,12 +100,13 @@ export default function OpportunityPage() {
         watchItem: watchMap.get(String(asset.symbol).toUpperCase()),
         meta: opportunityMeta(asset, watchMap.get(String(asset.symbol).toUpperCase())),
       }))
-      .filter(row => row.meta.priority >= 18)
+      .filter(row => row.meta.priority >= 18 || row.watchItem)
       .filter(row => {
         if (filter === 'deep') return row.meta.deep || row.meta.low
         if (filter === 'rebound') return row.meta.rebound
         if (filter === 'divergence') return row.meta.divergence
         if (filter === 'cooldown') return row.meta.cooling
+        if (filter === 'promoted') return row.meta.promoted
         return true
       })
       .filter(row => !q || row.asset.symbol.toUpperCase().includes(q))
@@ -107,13 +125,19 @@ export default function OpportunityPage() {
       source: 'opportunity',
       reason: row.meta.reason,
       ts: Date.now(),
-      snapshot: {
+        snapshot: {
         price: row.asset.price,
         change24h: row.asset.change24h,
         rsi: row.asset.rsi,
-        signalScore: row.asset.signalScore,
-      },
+          signalScore: row.asset.signalScore,
+          opportunityStage: row.meta.stage,
+        },
     })
+  }
+
+  const openInSignalHunter = (row) => {
+    localStorage.setItem('rsi:signalHunter:focus', JSON.stringify({ symbol: row.asset.symbol, ts: Date.now() }))
+    onNavigate?.('signal-hunter')
   }
 
   return (
@@ -156,13 +180,14 @@ export default function OpportunityPage() {
               <th>RSI 1D</th>
               <th>量能</th>
               <th>机会</th>
+              <th>阶段</th>
               <th>最近提醒</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan="9" className="opp-empty">暂无符合条件的中线候选</td></tr>
+              <tr><td colSpan="10" className="opp-empty">暂无符合条件的中线候选</td></tr>
             ) : rows.map(row => (
               <tr key={row.asset.symbol} onDoubleClick={() => setChartAsset(row.asset)}>
                 <td>
@@ -170,6 +195,7 @@ export default function OpportunityPage() {
                     {row.asset.symbol}
                   </button>
                 </td>
+                <td><span className={`rule-chip ${row.meta.stage === 'promoted' ? 'green' : row.meta.stage === 'confirmed' ? 'blue' : row.meta.stage === 'blocked' ? 'orange' : 'muted'}`}>{STAGE_LABELS[row.meta.stage]}</span></td>
                 <td>{formatPrice(row.asset.price)}</td>
                 <td className={(row.asset.change24h ?? 0) >= 0 ? 'opp-up' : 'opp-down'}>{fmtPct(row.asset.change24h)}</td>
                 <td>{fmtRsi(row.asset.rsi?.['4h'])}</td>
@@ -186,6 +212,7 @@ export default function OpportunityPage() {
                   <div className="opp-actions">
                     <button className="zone-btn" onClick={() => setChartAsset(row.asset)}>K线</button>
                     <button className="zone-btn" onClick={() => addToWatch(row)}>加入观察</button>
+                    <button className="zone-btn" onClick={() => openInSignalHunter(row)}>SH</button>
                   </div>
                 </td>
               </tr>

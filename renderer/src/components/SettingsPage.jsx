@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import useSettingsStore from '../store/settingsStore'
 import useMarketStore from '../store/marketStore'
 import useAiRunLogStore from '../store/aiRunLogStore'
@@ -88,10 +88,14 @@ export default function SettingsPage() {
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook, codexCliPath,
     autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, shAiInterval, watchPoolRetentionDays,
+    shExecutionNotional, shParameterMode, shNightlyReplayEnabled,
     themeMode,
     update,
   } = useSettingsStore()
   const statusEvents = useMarketStore(s => s.statusEvents)
+  const assets = useMarketStore(s => s.assets)
+  const updatedAt = useMarketStore(s => s.updatedAt)
+  const fetchData = useMarketStore(s => s.fetchData)
   const aiRunLog = useAiRunLogStore(s => s.items)
   const clearAiRunLog = useAiRunLogStore(s => s.clear)
 
@@ -101,6 +105,19 @@ export default function SettingsPage() {
   const [diagnostics, setDiagnostics] = useState(null)
   const [cacheStats, setCacheStats] = useState(null)
   const [codexStatus, setCodexStatus] = useState(null)
+  const [codexJobs, setCodexJobs] = useState([])
+
+  const healthMetrics = useMemo(() => {
+    const blocked = assets.filter(asset => asset.dataQuality?.ok === false)
+    const stale = assets.filter(asset => {
+      const candles = Object.values(asset.reviewCandlesByTf ?? {}).flat().filter(Boolean)
+      const latest = candles.map(candle => Number(candle.closeTime ?? candle.time ?? 0)).filter(Number.isFinite).sort((a, b) => b - a)[0]
+      return latest && Date.now() - latest > 12 * 60 * 60 * 1000
+    })
+    const sources = new Map()
+    for (const event of statusEvents) sources.set(event.scope, (sources.get(event.scope) ?? 0) + 1)
+    return { blocked: blocked.length, stale: stale.length, sourceFailures: [...sources.entries()], total: assets.length }
+  }, [assets, statusEvents])
 
   useEffect(() => {
     window.api.getAutoLaunch().then(v => {
@@ -111,12 +128,14 @@ export default function SettingsPage() {
   }, [])
 
   const refreshDiagnostics = async () => {
-    const [diag, cache] = await Promise.all([
+    const [diag, cache, jobs] = await Promise.all([
       window.api.getDiagnostics(),
       window.api.getCacheStats(),
+      window.api.getCodexJobs?.() ?? [],
     ])
     setDiagnostics(diag)
     setCacheStats(cache)
+    setCodexJobs(Array.isArray(jobs) ? jobs : [])
   }
 
   const updateLevelCooldown = (level, hours) => {
@@ -172,7 +191,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.1.8
+          v1.2.0
         </span>
       </div>
 
@@ -251,6 +270,18 @@ export default function SettingsPage() {
                 ))
               }
             </div>
+          </div>
+
+          <div className="health-panel data-health-console">
+            <div className="health-panel-head"><b>数据健康控制台</b><div><button className="zone-btn" onClick={() => fetchData({ scope: 'health-retry' })}>重试全量数据</button> <button className="zone-btn" disabled={!codexJobs.some(job => job.status === 'running' || job.status === 'queued')} onClick={async () => { await window.api.cancelCodexJobs(); refreshDiagnostics() }}>取消AI任务</button></div></div>
+            <div className="diagnostics-grid">
+              <div className={`diagnostic-chip ${updatedAt ? 'ok' : 'warn'}`}><span>{updatedAt ? 'OK' : '!'}</span><b>最后刷新</b><em>{updatedAt ? `${Math.max(0, Math.round((Date.now() - updatedAt) / 60000))} 分钟前` : '尚未完成'}</em></div>
+              <div className={`diagnostic-chip ${healthMetrics.blocked ? 'warn' : 'ok'}`}><span>{healthMetrics.blocked ? '!' : 'OK'}</span><b>数据阻断</b><em>{healthMetrics.blocked}/{healthMetrics.total} 个标的</em></div>
+              <div className={`diagnostic-chip ${healthMetrics.stale ? 'warn' : 'ok'}`}><span>{healthMetrics.stale ? '!' : 'OK'}</span><b>K线陈旧</b><em>{healthMetrics.stale} 个标的超过12小时</em></div>
+              <div className={`diagnostic-chip ${codexJobs.some(job => job.status === 'failed') ? 'warn' : 'ok'}`}><span>AI</span><b>任务队列</b><em>{codexJobs.filter(job => job.status === 'running' || job.status === 'queued').length} 运行/排队 · {codexJobs.filter(job => job.status === 'failed').length} 失败</em></div>
+            </div>
+            {healthMetrics.sourceFailures.slice(0, 6).map(([scope, count]) => <div className="health-row warn" key={scope}><b>{scope}</b><span>当前会话失败 {count} 次</span><em>可重试</em></div>)}
+            {codexJobs.slice(0, 5).map(job => <div className={`health-row ${job.status === 'failed' ? 'warn' : ''}`} key={job.id}><b>{job.type}</b><span>{job.status} · {job.scope || '全局'}</span><em>{job.durationMs ? `${(job.durationMs / 1000).toFixed(1)}s` : '-'}</em></div>)}
           </div>
 
           <Row label="开机自动启动" hint="登录后自动在后台运行">
@@ -580,6 +611,28 @@ export default function SettingsPage() {
               onChange={v => update('shAiInterval', v)}
               format={v => `${v} 分钟`}
             />
+          </Row>
+
+          <Row label="SH 执行规模" hint="多档盘口滑点、成交比例和真实R值使用的计划名义金额">
+            <BtnGroup
+              options={[1000, 5000, 10000]}
+              value={shExecutionNotional}
+              onChange={v => update('shExecutionNotional', v)}
+              format={v => `$${Number(v).toLocaleString()}`}
+            />
+          </Row>
+
+          <Row label="SH 参数模式" hint="稳定版决定信号；影子模式同时计算实验参数，但不影响实际信号">
+            <BtnGroup
+              options={['stable', 'shadow']}
+              value={shParameterMode}
+              onChange={v => update('shParameterMode', v)}
+              format={v => v === 'shadow' ? '影子观察' : '稳定版'}
+            />
+          </Row>
+
+          <Row label="夜间结构回放" hint="当地时间凌晨2点后首次行情刷新时，自动运行并保存一次近期逐根回放">
+            <Toggle checked={shNightlyReplayEnabled} onChange={e => update('shNightlyReplayEnabled', e.target.checked)} />
           </Row>
 
           <Row label="AI 候选数量" hint="每次最多提交给 Codex 的候选数量">

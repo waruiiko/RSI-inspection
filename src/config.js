@@ -10,6 +10,23 @@ function alertFilePath()   { return path.join(_dir, 'alerts.json')   }
 function settingsFilePath(){ return path.join(_dir, 'settings.json') }
 function feedFilePath()    { return path.join(_dir, 'feed.json')     }
 function marketCachePath() { return path.join(_dir, 'market-cache.json') }
+function signalLifecyclePath() { return path.join(_dir, 'signal-hunter-lifecycle.json') }
+function signalReplayHistoryPath() { return path.join(_dir, 'signal-hunter-replay-history.json') }
+const OPERATIONAL_FILES = {
+  watchPool: 'watch-pool.json',
+  signalTrail: 'signal-trail.json',
+  signalReview: 'signal-review.json',
+  signalReviewTradeLog: 'signal-review-trade-log.json',
+  aiRunLog: 'ai-run-log.json',
+  marketChat: 'market-chat.json',
+  alertStates: 'alert-states.json',
+  aiJobs: 'ai-jobs.json',
+}
+function operationalFilePath(key) {
+  const name = OPERATIONAL_FILES[key]
+  if (!name) throw new Error(`Unsupported operational data key: ${key}`)
+  return path.join(_dir, name)
+}
 function marketCacheDir()  { return path.join(_dir, 'market-cache-v2') }
 function marketCacheEntryPath(key) {
   return path.join(marketCacheDir(), `${Buffer.from(key).toString('base64url')}.json`)
@@ -47,6 +64,9 @@ const SETTINGS_DEFAULTS = {
   autoAiLimit:      20,
   autoAiStartupDelay: 10,
   shAiInterval:     30,
+  shExecutionNotional: 5000,
+  shParameterMode: 'stable',
+  shNightlyReplayEnabled: true,
   watchPoolRetentionDays: 15,
   aiLastRunAt:      null,
   aiLastRunMode:    '',
@@ -56,6 +76,55 @@ const SETTINGS_DEFAULTS = {
   launchReviewLastReportPath: '',
   launchReviewLastDir: '',
 }
+
+function atomicWriteJson(file, value) {
+  if (!_dir) throw new Error('config not initialised')
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2), 'utf8')
+  try {
+    if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.bak`)
+    fs.renameSync(temp, file)
+  } catch (err) {
+    try { fs.rmSync(temp, { force: true }) } catch {}
+    throw err
+  }
+}
+
+exports.loadOperationalData = key => {
+  if (!_dir) return null
+  const file = operationalFilePath(key)
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')) }
+  catch {
+    try { return JSON.parse(fs.readFileSync(`${file}.bak`, 'utf8')) }
+    catch { return null }
+  }
+}
+
+exports.saveOperationalData = (key, value) => {
+  const file = operationalFilePath(key)
+  atomicWriteJson(file, value)
+  return { ok: true, key, file }
+}
+
+exports.loadSignalLifecycle = () => {
+  if (!_dir) return []
+  try {
+    const value = JSON.parse(fs.readFileSync(signalLifecyclePath(), 'utf8'))
+    return Array.isArray(value) ? value : []
+  } catch { return [] }
+}
+
+exports.saveSignalLifecycle = items => atomicWriteJson(signalLifecyclePath(), Array.isArray(items) ? items : [])
+
+exports.loadSignalReplayHistory = () => {
+  if (!_dir) return []
+  try {
+    const value = JSON.parse(fs.readFileSync(signalReplayHistoryPath(), 'utf8'))
+    return Array.isArray(value) ? value : []
+  } catch { return [] }
+}
+
+exports.saveSignalReplayHistory = reports => atomicWriteJson(signalReplayHistoryPath(), Array.isArray(reports) ? reports.slice(0, 90) : [])
 
 exports.load = () => {
   if (!_dir) return null
@@ -111,7 +180,7 @@ exports.loadFeed = () => {
 
 exports.saveFeed = (feed) => {
   if (!_dir) return
-  fs.writeFileSync(feedFilePath(), JSON.stringify(feed), 'utf8')
+  atomicWriteJson(feedFilePath(), feed)
 }
 
 exports.loadMarketCache = () => {
@@ -182,6 +251,9 @@ exports.getDiagnostics = () => {
     { key: 'feed', label: '提醒记录', ok: Array.isArray(feed), detail: `${feed.length} 条` },
     { key: 'settings', label: '设置文件', ok: true, detail: exists(settingsFilePath()) ? '已保存' : '使用默认设置' },
     { key: 'cache', label: 'K线缓存', ok: true, detail: `${cache.entries} 条，${formatBytes(cache.sizeBytes)}` },
+    { key: 'signalLifecycle', label: 'SH 生命周期', ok: true, detail: `${exports.loadSignalLifecycle().length} 条，原子文件` },
+    { key: 'signalReplay', label: 'SH 回放历史', ok: true, detail: `${exports.loadSignalReplayHistory().length}/90 次` },
+    { key: 'operational', label: '运营数据', ok: true, detail: `${Object.keys(OPERATIONAL_FILES).filter(key => exists(operationalFilePath(key))).length}/${Object.keys(OPERATIONAL_FILES).length} 个原子文件` },
     { key: 'telegram', label: 'Telegram', ok: !!(settings.telegramToken && settings.telegramChatId), detail: settings.telegramToken ? 'Token 已设置' : '未配置' },
     { key: 'discord', label: 'Discord', ok: !!settings.discordWebhook, detail: settings.discordWebhook ? 'Webhook 已设置' : '未配置' },
   ]

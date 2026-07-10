@@ -1,11 +1,14 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import useMarketStore from '../store/marketStore'
 import useAlertStore from '../store/alertStore'
 import useSettingsStore from '../store/settingsStore'
+import useSignalReviewStore from '../store/signalReviewStore'
 import { formatPrice } from '../utils/rsi'
 import { formatTurnover, getQuoteVolume } from '../utils/liquidity'
 import { buildSignalHunterAiCandidate, buildSignalHunterAiCandidates, hasExecutableStopDistance, makeSignalHunterAiFeedItems, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
 import { signalIdFromAsset } from '../utils/signalId'
+import { buildSignalCalibration } from '../utils/signalCalibration'
+import { loadSignalLifecycleItems, saveSignalLifecycleItems } from '../utils/signalLifecycle'
 
 const ChartModal = lazy(() => import('./ChartModal'))
 
@@ -77,6 +80,16 @@ const SH_AI_DIFF_KEY = 'rsi:signalHunter:diff'
 const SH_AI_PROCESSED_KEY = 'rsi:signalHunter:processed'
 const SH_FOCUS_KEY = 'rsi:signalHunter:focus'
 const SH_SCORE_THRESHOLD_KEY = 'rsi:signalHunter:scoreThreshold'
+const SH_COLUMNS_KEY = 'rsi:signalHunter:columns'
+const SH_VIEW_KEY = 'rsi:signalHunter:view'
+
+const OPTIONAL_COLUMNS = [
+  { key: 'status', label: '状态' },
+  { key: 'price', label: '价格' },
+  { key: 'score', label: '评分' },
+  { key: 'levels', label: '关键位' },
+  { key: 'risk', label: '风险 / 原因' },
+]
 
 const STATUS_META = {
   armed: { label: '预埋', cls: 'signal-hunter-armed' },
@@ -242,6 +255,13 @@ function hasTradableEntrySide(sig, currentPrice = sig?.currentPrice) {
   if (sig?.rejected || sig?.status === 'rejected') return false
   const entryPrice = entryPriceOf(sig)
   if (!Number.isFinite(entryPrice) || !Number.isFinite(currentPrice)) return false
+  if (sig.status === 'triggered') return true
+  const continuation = sig.entryMode === 'breakout' || sig.entryMode === 'breakdown'
+  if (continuation) {
+    return sig.side === 'short'
+      ? entryPrice <= currentPrice * 1.001
+      : entryPrice >= currentPrice * 0.999
+  }
   return sig.side === 'short'
     ? entryPrice >= currentPrice * 0.999
     : entryPrice <= currentPrice * 1.001
@@ -259,11 +279,28 @@ function targetProgressInfo(asset, currentPrice = livePriceOf(asset)) {
     : currentPrice >= target * 0.999)
   if (!reached.length) return null
   const [level, target] = reached[reached.length - 1]
-  return { level, target, text: `已到TP${level}，避免追单` }
+  const remaining = targets.filter(([, candidate]) => sig.side === 'short'
+    ? currentPrice > candidate * 1.001
+    : currentPrice < candidate * 0.999)
+  return {
+    level,
+    target,
+    remaining,
+    text: remaining.length ? `已到TP${level}，复核剩余空间` : `已到TP${level}，目标已完成`,
+  }
 }
 
 function hasRemainingTargetRoom(asset, currentPrice = livePriceOf(asset)) {
-  return !targetProgressInfo(asset, currentPrice)
+  const progress = targetProgressInfo(asset, currentPrice)
+  if (!progress) return true
+  if (!progress.remaining.length) return false
+  const sig = asset?.signalHunter
+  const stop = sig?.stopLoss
+  if (!Number.isFinite(stop) || !Number.isFinite(currentPrice)) return false
+  const risk = Math.abs(currentPrice - stop)
+  const target = progress.remaining[Math.min(1, progress.remaining.length - 1)]?.[1]
+  if (!risk || !Number.isFinite(target)) return false
+  return Math.abs(target - currentPrice) / risk >= 1.2
 }
 
 function visibleSignal(asset, showRejected, scoreThreshold = 7, currentPrice = asset?.signalHunter?.currentPrice) {
@@ -274,6 +311,7 @@ function visibleSignal(asset, showRejected, scoreThreshold = 7, currentPrice = a
   if (!hasExecutableStopDistance(asset, sig)) return false
   if (!hasTradableEntrySide(sig, currentPrice)) return false
   if (!hasRemainingTargetRoom(asset, currentPrice)) return false
+  if (sig.stability && !sig.stability.confirmed && sig.status !== 'triggered' && (sig.score?.total ?? 0) < 8.2) return false
   if ((sig.score?.total ?? 0) < scoreThreshold) return false
   const rewardRisk = rewardRiskFallback(sig)
   return Number.isFinite(rewardRisk) && rewardRisk >= 1.5
@@ -834,6 +872,8 @@ export default function SignalHunterPage() {
   const applySignalHunterAiResults = useMarketStore(s => s.applySignalHunterAiResults)
   const addFeedItems = useAlertStore(s => s.addFeedItems)
   const shAiInterval = useSettingsStore(s => s.shAiInterval ?? 30)
+  const tradeLogs = useSignalReviewStore(s => s.tradeLogs)
+  const signalCalibration = useMemo(() => buildSignalCalibration(tradeLogs), [tradeLogs])
   const [filter, setFilter] = useState('all')
   const [sideFilter, setSideFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
@@ -846,12 +886,23 @@ export default function SignalHunterPage() {
   const [executionFilter, setExecutionFilter] = useState('all')
   const [showRejected, setShowRejected] = useState(false)
   const [showNewOnly, setShowNewOnly] = useState(false)
+  const [showUnprocessedOnly, setShowUnprocessedOnly] = useState(() => Boolean(loadJson(SH_VIEW_KEY, {}).showUnprocessedOnly))
   const [hideDrifted, setHideDrifted] = useState(true)
   const [query, setQuery] = useState('')
   const [interestSymbol, setInterestSymbol] = useState('')
-  const [tableMode, setTableMode] = useState('detail')
-  const [showFilters, setShowFilters] = useState(false)
+  const [tableMode, setTableMode] = useState(() => loadJson(SH_VIEW_KEY, {}).tableMode === 'detail' ? 'detail' : 'compact')
+  const [showFilters, setShowFilters] = useState(() => Boolean(loadJson(SH_VIEW_KEY, {}).showFilters))
+  const [showOverview, setShowOverview] = useState(() => loadJson(SH_VIEW_KEY, {}).showOverview !== false)
   const [expanded, setExpanded] = useState(null)
+  const [focusedRow, setFocusedRow] = useState(null)
+  const [visibleColumns, setVisibleColumns] = useState(() => ({
+    status: true,
+    price: true,
+    score: true,
+    levels: true,
+    risk: false,
+    ...loadJson(SH_COLUMNS_KEY, {}),
+  }))
   const [chartAsset, setChartAsset] = useState(null)
   const [chartSignal, setChartSignal] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
@@ -868,11 +919,23 @@ export default function SignalHunterPage() {
   const lastAiSignatureRef = useRef('')
   const pendingAutoRef = useRef(false)
   const appliedCacheRef = useRef('')
+  const rowRefs = useRef(new Map())
+  const stickyHeadRef = useRef(null)
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 60 * 1000)
     return () => clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!focusedRow) return undefined
+    const timer = setTimeout(() => setFocusedRow(null), 2600)
+    return () => clearTimeout(timer)
+  }, [focusedRow])
+
+  useEffect(() => {
+    saveJson(SH_VIEW_KEY, { tableMode, showFilters, showOverview, showUnprocessedOnly })
+  }, [tableMode, showFilters, showOverview, showUnprocessedOnly])
 
   const setScoreThreshold = (value) => {
     const n = Number(value)
@@ -1035,12 +1098,13 @@ export default function SignalHunterPage() {
       }
       const res = await window.api.runCodexScreen(payload)
       if (!res?.ok || !res.result) throw new Error(res?.parseError || res?.error || 'AI 未返回有效 JSON')
-      const normalized = normalizeSignalHunterAiResults(res.result, assets)
+      const previousItems = await loadSignalLifecycleItems()
+      const normalized = normalizeSignalHunterAiResults(res.result, assets, signalCalibration, previousItems)
       const runAt = Date.now()
-      const previousItems = loadJson(SH_AI_CACHE_KEY, null)?.items ?? []
       const changes = collectStatusChanges(previousItems, normalized, runAt)
       const diff = collectAiDiff(previousItems, normalized, runAt)
       applySignalHunterAiResults(normalized)
+      await saveSignalLifecycleItems(normalized, runAt)
       const feedItems = makeSignalHunterAiFeedItems(normalized, Date.now())
       if (feedItems.length) addFeedItems(feedItems)
       const live = normalized.filter(item => item.signalHunter?.status !== 'rejected').length
@@ -1063,7 +1127,9 @@ export default function SignalHunterPage() {
       }
       setAiRunMeta(meta)
       lastAiSignatureRef.current = signature
-      setAiStatus(`AI 已写入 ${live}/${normalized.length} 个 SH 结果`)
+      setAiStatus(res.degraded
+        ? `AI 解释异常，已保留本地确定性结果 ${live}/${normalized.length}`
+        : `AI 已写入 ${live}/${normalized.length} 个 SH 结果`)
     } catch (err) {
       setAiStatus(`AI 识别失败：${err.message}`)
     } finally {
@@ -1101,15 +1167,17 @@ export default function SignalHunterPage() {
       }
       const res = await window.api.runCodexScreen(payload)
       if (!res?.ok || !res.result) throw new Error(res?.parseError || res?.error || 'AI 未返回有效 JSON')
-      const normalized = normalizeSignalHunterAiResults(res.result, assets)
+      const cached = loadJson(SH_AI_CACHE_KEY, null)
+      const cachedItems = cached?.items ?? []
+      const previousItems = await loadSignalLifecycleItems()
+      const normalized = normalizeSignalHunterAiResults(res.result, assets, signalCalibration, previousItems)
       if (!normalized.length) throw new Error('AI 结果没有匹配到当前标的')
       const runAt = Date.now()
-      const cached = loadJson(SH_AI_CACHE_KEY, null)
-      const previousItems = cached?.items ?? []
-      const mergedItems = mergeSignalHunterCacheItems(previousItems, normalized)
+      const mergedItems = mergeSignalHunterCacheItems(cachedItems, normalized)
       const changes = collectStatusChanges(previousItems, normalized, runAt)
-      const diff = collectAiDiff(previousItems, mergedItems, runAt)
+      const diff = collectAiDiff(cachedItems, mergedItems, runAt)
       applySignalHunterAiResults(normalized)
+      await saveSignalLifecycleItems(normalized, runAt)
       const feedItems = makeSignalHunterAiFeedItems(normalized, Date.now())
       if (feedItems.length) addFeedItems(feedItems)
       const live = mergedItems.filter(item => item.signalHunter?.status !== 'rejected').length
@@ -1142,7 +1210,9 @@ export default function SignalHunterPage() {
       setHideDrifted(false)
       setSortMode('ai')
       setExpanded(signalKey(asset))
-      setAiStatus(`AI 已完成 ${asset.symbol} 临时分析，并写入 SH。`)
+      setAiStatus(res.degraded
+        ? `AI 解释异常，已保留 ${asset.symbol} 的本地确定性结果`
+        : `AI 已完成 ${asset.symbol} 临时分析，并写入 SH。`)
     } catch (err) {
       setAiStatus(`${asset?.symbol ?? interestSymbol} 临时分析失败：${err.message}`)
     } finally {
@@ -1198,6 +1268,7 @@ export default function SignalHunterPage() {
       .filter(asset => aiView !== 'all' || executionFilter === 'all' || executionMeta(asset).key === executionFilter)
       .filter(asset => !q || asset.symbol.toUpperCase().includes(q))
       .filter(asset => !showNewOnly || !seenKeys.has(signalSeenKey(asset)))
+      .filter(asset => !showUnprocessedOnly || !processedKeys.has(signalPinnedKey(asset)))
       .filter(asset => !hideDrifted || showRejected || Math.abs(priceDriftPct(asset) ?? 0) < 3)
       .sort((a, b) => {
         if (aiView === 'changed') {
@@ -1251,7 +1322,7 @@ export default function SignalHunterPage() {
         return (rewardRiskFallback(b.signalHunter) ?? 0) - (rewardRiskFallback(a.signalHunter) ?? 0)
       })
     return (mergeBySymbol ? dedupeSignalRows(filtered) : filtered).slice(0, 120)
-  }, [assets, filter, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, stockFocus, sortMode, aiView, executionFilter, showRejected, query, showNewOnly, hideDrifted, seenKeys, changedKeys, pinnedKeys, statusChangeByKey, aiExpired, mergeBySymbol])
+  }, [assets, filter, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, stockFocus, sortMode, aiView, executionFilter, showRejected, query, showNewOnly, showUnprocessedOnly, hideDrifted, seenKeys, processedKeys, changedKeys, pinnedKeys, statusChangeByKey, aiExpired, mergeBySymbol])
 
   const emptyDiagnostics = useMemo(() => buildEmptyDiagnostics(assets, {
     filter,
@@ -1327,22 +1398,20 @@ export default function SignalHunterPage() {
     setExecutionFilter('all')
     setShowRejected(false)
     setShowNewOnly(false)
+    setShowUnprocessedOnly(false)
     setHideDrifted(false)
     setMergeBySymbol(false)
-    setTableMode('detail')
+    setTableMode('compact')
     setShowFilters(false)
     setQuery('')
   }
 
   const summary = useMemo(() => {
     const all = assets.filter(asset => visibleSignal(asset, false, scoreThreshold, livePriceOf(asset)))
-    const scoreSum = all.reduce((sum, asset) => sum + (asset.signalHunter?.score?.total ?? 0), 0)
     return {
       total: all.length,
       ready: all.filter(asset => executionMeta(asset).key === 'ready').length,
       wait: all.filter(asset => executionMeta(asset).key === 'wait').length,
-      stocks: all.filter(asset => asset.type === 'stock').length,
-      avgScore: all.length ? (scoreSum / all.length).toFixed(1) : '-',
     }
   }, [assets, scoreThreshold])
 
@@ -1377,11 +1446,12 @@ export default function SignalHunterPage() {
       labelOf(EXECUTION_FILTERS, executionFilter),
       labelOf(SORT_MODES, sortMode),
       showNewOnly ? '只看新结果' : null,
+      showUnprocessedOnly ? '只看未处理' : null,
       hideDrifted ? '隐藏漂移' : null,
       mergeBySymbol ? '按标的合并' : null,
     ].filter(Boolean)
     return parts.join(' · ')
-  }, [filter, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, executionFilter, sortMode, showNewOnly, hideDrifted, mergeBySymbol])
+  }, [filter, sideFilter, categoryFilter, timeframeFilter, oiFilter, scoreThreshold, executionFilter, sortMode, showNewOnly, showUnprocessedOnly, hideDrifted, mergeBySymbol])
 
   const selectAiView = view => {
     setAiView(view)
@@ -1390,26 +1460,123 @@ export default function SignalHunterPage() {
     setSortMode('ai')
   }
 
+  const toggleColumn = key => {
+    setVisibleColumns(previous => {
+      const next = { ...previous, [key]: !previous[key] }
+      saveJson(SH_COLUMNS_KEY, next)
+      return next
+    })
+  }
+
+  const focusSpotlightRow = asset => {
+    const key = signalKey(asset)
+    setExpanded(key)
+    setFocusedRow(key)
+    requestAnimationFrame(() => {
+      rowRefs.current.get(key)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }
+
+  const spotlightRows = rows.slice(0, 3)
+  const marketPulse = summary.ready
+    ? `${summary.ready} 个信号通过硬筛且当前可盯，优先核对确认价与失效位。`
+    : summary.wait
+      ? `${summary.wait} 个信号通过硬筛但仍需等待价格到位。`
+      : '当前没有需要追价的信号，保持观察。'
+  const columnClassNames = OPTIONAL_COLUMNS
+    .filter(column => !visibleColumns[column.key])
+    .map(column => `signal-hunter-hide-${column.key}`)
+    .join(' ')
+  const aiStatusTone = /失败|错误|没有|不能|过期/.test(aiStatus) ? 'error' : 'info'
+  const unprocessedCount = assets.filter(asset => asset.signalHunter && !processedKeys.has(signalPinnedKey(asset))).length
+  const dataHealth = useMemo(() => {
+    const checked = assets.filter(asset => asset.signalHunter || asset.dataQuality)
+    const blocked = checked.filter(asset => asset.dataQuality?.ok === false || asset.signalHunter?.runtimeBlocked)
+    return { checked: checked.length, blocked: blocked.length }
+  }, [assets])
+
   return (
     <div className="page signal-hunter-page">
-      <div className="signal-hunter-head">
-        <div>
-          <h2>Signal Hunter</h2>
-          <p>形态候选雷达：只保留 1h / 4h 可执行结构，15m 仅作为背景数据。</p>
+      {showOverview ? <>
+      <section className="signal-hunter-command">
+        <div className="signal-hunter-head">
+          <div>
+            <span className="signal-hunter-kicker">24H SIGNAL DESK</span>
+            <h2>Signal Hunter <em>打榜猎人</em></h2>
+            <p>{marketPulse}</p>
+          </div>
+          <div className="signal-hunter-head-actions">
+            <span className={`signal-hunter-ai-health ${dataHealth.blocked ? 'risk' : 'good'}`}>
+              数据健康 {dataHealth.blocked ? `${dataHealth.blocked}阻断` : `${dataHealth.checked}正常`}
+            </span>
+            <span className={`signal-hunter-ai-health ${signalCalibration.activeGroups ? 'good' : 'muted'}`}>
+              复盘校准 {signalCalibration.activeGroups ? `${signalCalibration.activeGroups}组` : `${signalCalibration.eligibleSamples}/${signalCalibration.minSamples}`}
+            </span>
+            <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI {aiHealth.label}</span>
+            <button className="zone-btn" onClick={() => setShowOverview(false)}>收起概览</button>
+            <button className="zone-btn signal-hunter-ai-btn signal-hunter-ai-main-btn" onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
+              {aiBusy ? '正在扫描市场' : aiExpired ? '重新识别' : '刷新识别'}
+            </button>
+          </div>
         </div>
         <div className="signal-hunter-summary">
-          <div><b>{summary.total}</b><span>候选</span></div>
-          <div><b>{summary.ready}</b><span>可盯</span></div>
-          <div><b>{summary.wait}</b><span>等待</span></div>
-          <div><b>{summary.stocks}</b><span>股票</span></div>
-          <div><b>{summary.avgScore}</b><span>均分</span></div>
+          <div><b>{aiSummary.total}</b><span>AI 原始结果</span></div>
+          <div><b>{summary.total}</b><span>通过硬筛</span></div>
+          <div className="positive"><b>{summary.ready}</b><span>现在可盯</span></div>
+          <div className={aiSummary.risk ? 'negative' : ''}><b>{aiSummary.risk}</b><span>风险回避</span></div>
+          <div><b>{aiSummary.rejected}</b><span>已剔除</span></div>
         </div>
-      </div>
+      </section>
 
-      <div className="signal-hunter-ai-summary signal-hunter-ai-summary-priority">
+      <section className="signal-hunter-spotlight">
+        <div className="signal-hunter-section-title">
+          <div><span>PRIORITY QUEUE</span><b>当前最值得看的信号</b></div>
+          <small>按执行状态、评分、距离与风险综合排序</small>
+        </div>
+        <div className="signal-hunter-spotlight-grid">
+          {spotlightRows.length ? spotlightRows.map((asset, index) => {
+            const sig = asset.signalHunter
+            const exec = executionMeta(asset)
+            const entry = entryPriceOf(sig)
+            const next = nextStepText(asset, aiExpired)
+            return (
+              <button key={signalKey(asset)} className={`signal-hunter-spotlight-card rank-${index + 1}`} onClick={() => focusSpotlightRow(asset)}>
+                <span className="signal-hunter-rank">#{index + 1}</span>
+                <span className="signal-hunter-spotlight-symbol"><b>{asset.symbol}</b><small>{sideMeta(sig.side).label} · {sig.timeframe}</small></span>
+                <span className="signal-hunter-spotlight-plan"><b>{next.label}</b><small>入场 {formatPrice(entry)} · 失效 {formatPrice(sig.stopLoss)}</small></span>
+                <span className={`signal-hunter-exec ${exec.cls}`}>{exec.label}</span>
+                <strong>{sig.score?.total ?? '-'}</strong>
+              </button>
+            )
+          }) : <div className="signal-hunter-spotlight-empty">暂无优先信号，刷新识别后会在这里给出行动队列。</div>}
+        </div>
+      </section>
+      </> : (
+        <section className="signal-hunter-command-compact">
+          <div>
+            <span className="signal-hunter-kicker">SIGNAL HUNTER</span>
+            <b>{marketPulse}</b>
+          </div>
+          <div className="signal-hunter-compact-stats">
+            <span><strong>{summary.total}</strong> 通过硬筛</span>
+            <span><strong>{summary.ready}</strong> 可盯</span>
+            <span className={aiSummary.risk ? 'negative' : ''}><strong>{aiSummary.risk}</strong> 风险</span>
+            <span><strong>{aiSummary.rejected}</strong> 剔除</span>
+          </div>
+          <div className="signal-hunter-head-actions">
+            <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI {aiHealth.label}</span>
+            <button className="zone-btn" onClick={() => setShowOverview(true)}>展开概览</button>
+            <button className="zone-btn signal-hunter-ai-btn" onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
+              {aiBusy ? '扫描中' : '刷新识别'}
+            </button>
+          </div>
+        </section>
+      )}
+
+      <div className={`signal-hunter-ai-summary signal-hunter-ai-summary-priority ${showOverview ? '' : 'compact'}`}>
         <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-all ${aiView === 'all' ? 'active' : ''}`} onClick={() => selectAiView('all')}>
           <b>{aiSummary.total}</b>
-          <span>AI全部</span>
+          <span>AI原始</span>
         </button>
         <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-pinned ${aiView === 'pinned' ? 'active' : ''}`} onClick={() => selectAiView('pinned')}>
           <b>{aiSummary.pinned}</b>
@@ -1417,39 +1584,19 @@ export default function SignalHunterPage() {
         </button>
         <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-actionable ${aiView === 'actionable' ? 'active' : ''}`} onClick={() => selectAiView('actionable')}>
           <b>{aiSummary.actionable}</b>
-          <span>可执行</span>
+          <span>状态可执行</span>
         </button>
         <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-focus ${aiView === 'focus' ? 'active' : ''}`} onClick={() => selectAiView('focus')}>
           <b>{aiSummary.focus}</b>
-          <span>重点</span>
+          <span>已触发</span>
         </button>
         <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-risk ${aiView === 'risk' ? 'active' : ''}`} onClick={() => selectAiView('risk')}>
           <b>{aiSummary.risk}</b>
           <span>风险</span>
         </button>
-        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-pending ${aiView === 'pending' ? 'active' : ''}`} onClick={() => selectAiView('pending')}>
-          <b>{aiSummary.pending}</b>
-          <span>待确认</span>
-        </button>
-        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-watch ${aiView === 'watch' ? 'active' : ''}`} onClick={() => selectAiView('watch')}>
-          <b>{aiSummary.watch}</b>
-          <span>观察</span>
-        </button>
-        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-rejected ${aiView === 'rejected' ? 'active' : ''}`} onClick={() => selectAiView('rejected')}>
-          <b>{aiSummary.rejected}</b>
-          <span>剔除</span>
-        </button>
         <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-changed ${aiView === 'changed' ? 'active' : ''}`} onClick={() => selectAiView('changed')}>
           <b>{aiSummary.changed}</b>
           <span>变化</span>
-        </button>
-        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-changed-up ${aiView === 'changed_up' ? 'active' : ''}`} onClick={() => selectAiView('changed_up')}>
-          <b>{aiSummary.changedUp}</b>
-          <span>变强</span>
-        </button>
-        <button className={`signal-hunter-ai-chip signal-hunter-ai-chip-changed-down ${aiView === 'changed_down' ? 'active' : ''}`} onClick={() => selectAiView('changed_down')}>
-          <b>{aiSummary.changedDown}</b>
-          <span>变弱</span>
         </button>
       </div>
 
@@ -1458,14 +1605,17 @@ export default function SignalHunterPage() {
           {showFilters ? '收起筛选' : '展开筛选'}
         </button>
         <span className="signal-hunter-filter-summary">{activeFilterSummary}</span>
-        <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI健康 {aiHealth.label}</span>
-        <button className={`zone-btn signal-hunter-ai-btn ${aiExpired ? 'signal-hunter-ai-main-btn' : ''}`} onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
-          {aiBusy ? 'AI识别中' : 'AI识别SH'}
-        </button>
-        {aiStatus && <span className="signal-hunter-ai-status">{aiStatus}</span>}
+        <span>待确认 {aiSummary.pending} · 观察 {aiSummary.watch} · 剔除 {aiSummary.rejected} · 变强 {aiSummary.changedUp} · 变弱 {aiSummary.changedDown}</span>
       </div>
 
-      <div className="signal-hunter-interest-panel">
+      {aiStatus && (
+        <div className={`signal-hunter-status-notice ${aiStatusTone}`}>
+          <span title={aiStatus}>{aiStatus}</span>
+          <button type="button" onClick={() => setAiStatus('')} aria-label="关闭状态提示">×</button>
+        </div>
+      )}
+
+      {showFilters && <div className="signal-hunter-interest-panel">
         <div className="signal-hunter-interest-copy">
           <b>临时标的</b>
           <span>输入一个当前管理列表里的代码，让 AI 单独补一份 SH 结构分析。</span>
@@ -1494,7 +1644,7 @@ export default function SignalHunterPage() {
             {aiBusy ? '分析中' : '分析这只'}
           </button>
         </div>
-      </div>
+      </div>}
 
       {showFilters && <div className="signal-hunter-controls">
         <div className="feed-type-btns">
@@ -1679,6 +1829,27 @@ export default function SignalHunterPage() {
         </div>
         <div className="signal-hunter-table-actions">
           <button
+            className={`feed-type-btn ${showUnprocessedOnly ? 'active' : ''}`}
+            onClick={() => setShowUnprocessedOnly(value => !value)}
+          >
+            未处理 {unprocessedCount}
+          </button>
+          <button className="feed-type-btn" onClick={markVisibleProcessed} disabled={!rows.length}>
+            当前全部完成
+          </button>
+          <details className="signal-hunter-column-picker">
+            <summary>显示列</summary>
+            <div>
+              {OPTIONAL_COLUMNS.map(column => (
+                <label key={column.key}>
+                  <input type="checkbox" checked={visibleColumns[column.key]} onChange={() => toggleColumn(column.key)} />
+                  {column.label}
+                </label>
+              ))}
+              <small>品种、方向和操作列固定显示</small>
+            </div>
+          </details>
+          <button
             className={`feed-type-btn ${tableMode === 'compact' ? 'active' : ''}`}
             onClick={() => setTableMode(mode => mode === 'compact' ? 'detail' : 'compact')}
           >
@@ -1688,9 +1859,29 @@ export default function SignalHunterPage() {
         </div>
       </div>
 
-      <div className="signal-hunter-table-wrap">
-        <table className={`stats-table signal-hunter-table ${tableMode === 'compact' ? 'signal-hunter-table-compact' : ''}`}>
+      <div className="signal-hunter-sticky-head" ref={stickyHeadRef}>
+        <table className={`stats-table signal-hunter-table signal-hunter-head-table ${tableMode === 'compact' ? 'signal-hunter-table-compact' : ''} ${columnClassNames}`}>
           <thead>
+            <tr>
+              <th className="signal-hunter-index">#</th>
+              <th>品种</th>
+              <th>状态</th>
+              <th>方向</th>
+              <th>价格</th>
+              <th>评分</th>
+              <th>关键位</th>
+              <th>风险 / 原因</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+        </table>
+      </div>
+
+      <div className="signal-hunter-table-wrap" onScroll={event => {
+        if (stickyHeadRef.current) stickyHeadRef.current.scrollLeft = event.currentTarget.scrollLeft
+      }}>
+        <table className={`stats-table signal-hunter-table ${tableMode === 'compact' ? 'signal-hunter-table-compact' : ''} ${columnClassNames}`}>
+          <thead className="signal-hunter-native-head">
             <tr>
               <th className="signal-hunter-index">#</th>
               <th>品种</th>
@@ -1760,6 +1951,7 @@ export default function SignalHunterPage() {
                 'signal-hunter-row',
                 sig.status === 'risk' ? 'signal-hunter-row-risk' : '',
                 sig.status === 'triggered' ? 'signal-hunter-row-focus' : '',
+                focusedRow === key ? 'signal-hunter-row-located' : '',
                 expired ? 'signal-hunter-row-expired' : '',
               ].filter(Boolean).join(' ')
               const indexClasses = [
@@ -1773,9 +1965,12 @@ export default function SignalHunterPage() {
               const changeText = statusChangeText(statusChange, sig.status)
               const changeDirection = statusChangeDirection(statusChange, sig.status)
               return (
-                <>
+                <Fragment key={key}>
                   <tr
-                    key={key}
+                    ref={node => {
+                      if (node) rowRefs.current.set(key, node)
+                      else rowRefs.current.delete(key)
+                    }}
                     className={rowClasses}
                     onClick={() => {
                       setExpanded(expanded === key ? null : key)
@@ -1812,33 +2007,33 @@ export default function SignalHunterPage() {
                     </td>
                     <td className="signal-hunter-price-cell">
                       {formatPrice(livePrice)}
-                      {Number.isFinite(drift) && Math.abs(drift) >= 0.5 && <small>识别后 {fmtPct(drift)}</small>}
+                      {tableMode === 'detail' && Number.isFinite(drift) && Math.abs(drift) >= 0.5 && <small>识别后 {fmtPct(drift)}</small>}
                       <small>入场 {rejected ? '-' : formatPrice(entryPrice)}</small>
-                      <small className={distanceToEntry <= 0 ? 'pos' : ''}>距离 {fmtPct(distanceToEntry)}</small>
+                      {tableMode === 'detail' && <small className={distanceToEntry <= 0 ? 'pos' : ''}>距离 {fmtPct(distanceToEntry)}</small>}
                     </td>
                     <td>
                       <div className={`signal-hunter-score ${scoreClass(sig.score.total)}`}>{sig.score.total}/10</div>
                       <div className="signal-hunter-priority-score">优 {priority}</div>
-                      <div className="signal-hunter-factors">
+                      {tableMode === 'detail' && <div className="signal-hunter-factors">
                         <span>图 {sig.score.chart}/10</span>
                         <span>数 {sig.score.data}/10</span>
                         <span>R {rewardRisk ? rewardRisk.toFixed(1) : '-'}</span>
                         <span>风 {sig.score.risk}</span>
-                      </div>
+                      </div>}
                     </td>
                     <td>
                       <div>入场 {rejected ? '-' : formatPrice(entryPrice)}</div>
-                      <small>确认 {formatPrice(confirmPrice)} <span className="muted">{fmtPct(sig.distanceToConfirmPct)}</span></small>
+                      {tableMode === 'detail' && <small>确认 {formatPrice(confirmPrice)} <span className="muted">{fmtPct(sig.distanceToConfirmPct)}</span></small>}
                       <small>失效 {formatPrice(sig.stopLoss)} <span className="muted">{fmtPct(sig.stopLossPct)}</span></small>
-                      {stopInfo && (
+                      {tableMode === 'detail' && stopInfo && (
                         <small>
                           风险宽 {formatPrice(stopInfo.distance)} / {stopInfo.pct.toFixed(1)}%
                           {Number.isFinite(stopInfo.minDistance) && <span className="muted"> · min {formatPrice(stopInfo.minDistance)}</span>}
                         </small>
                       )}
                       {!rejected && <small>目标 {formatPrice(t1)} / {formatPrice(t2)} / {formatPrice(t3)}</small>}
-                      <small>形态 {sig.setupLabel || setupLabel(sig.setup)} <span className="muted">{rewardRisk ? `${rewardRisk.toFixed(1)}R` : ''}</span></small>
-                      {derivativeInfo && <small className={`signal-hunter-oi-line ${derivativeInfoTone}`}>资金 {derivativeInfo}</small>}
+                      {tableMode === 'detail' && <small>形态 {sig.setupLabel || setupLabel(sig.setup)} <span className="muted">{rewardRisk ? `${rewardRisk.toFixed(1)}R` : ''}</span></small>}
+                      {tableMode === 'detail' && derivativeInfo && <small className={`signal-hunter-oi-line ${derivativeInfoTone}`}>资金 {derivativeInfo}</small>}
                     </td>
                     <td>
                       {riskItems(asset, stale, drift).length ? (
@@ -1866,24 +2061,24 @@ export default function SignalHunterPage() {
                         }}>
                           复制
                         </button>
-                        <button className="zone-btn" onClick={e => {
+                        {tableMode === 'detail' && <button className="zone-btn" onClick={e => {
                           e.stopPropagation()
                           togglePinned(asset)
                         }}>
                           {isPinned ? '取消关注' : '关注'}
-                        </button>
-                        <button className="zone-btn" onClick={e => {
+                        </button>}
+                        <button className={`zone-btn ${isProcessed ? 'active' : ''}`} onClick={e => {
                           e.stopPropagation()
                           toggleProcessed(asset)
                         }}>
-                          {isProcessed ? '取消处理' : '已处理'}
+                          {isProcessed ? '撤销完成' : '完成'}
                         </button>
-                        <button className="zone-btn" onClick={e => {
+                        {tableMode === 'detail' && <button className="zone-btn" onClick={e => {
                           e.stopPropagation()
                           markSeen(asset)
                         }}>
                           已看
-                        </button>
+                        </button>}
                         <button className="zone-btn" onClick={e => {
                           e.stopPropagation()
                           setExpanded(expanded === key ? null : key)
@@ -1894,7 +2089,7 @@ export default function SignalHunterPage() {
                     </td>
                   </tr>
                   {expanded === key && (
-                    <tr className="signal-hunter-detail-row" key={`${key}:detail`}>
+                    <tr className="signal-hunter-detail-row">
                       <td colSpan={9}>
                         <div className="signal-hunter-card">
                           <div className="signal-hunter-card-head">
@@ -1957,11 +2152,10 @@ export default function SignalHunterPage() {
                               <span>{rejected ? `剔除：${sig.rejectReasons?.join(' / ') || '-'}` : '通过：位置、评分、R 值均达标'}</span>
                             </section>
                             <section>
-                              <b>AI判断路径</b>
-                              <span>状态 {statusChange ? changeText : meta.label} · 执行 {exec.label}</span>
-                              <span>下一步 {nextStep.label}{nextStep.detail ? ` · ${nextStep.detail}` : ''}</span>
-                              <span>方向 {side.label} · 结构 {sig.setupLabel || setupLabel(sig.setup)}</span>
-                              {derivativeInfo && <span>OI参考 {derivativeInfo}</span>}
+                              <b>完整决策链</b>
+                              {sig.decisionTrace?.length ? sig.decisionTrace.map(item => (
+                                <span key={item.stage}>{item.passed ? '通过' : '阻断'} · {item.stage} · {item.detail}</span>
+                              )) : <span>暂无结构化诊断记录</span>}
                             </section>
                             <section>
                               <b>观察点</b>
@@ -1974,7 +2168,7 @@ export default function SignalHunterPage() {
                       </td>
                     </tr>
                   )}
-                </>
+                </Fragment>
               )
             })}
           </tbody>
