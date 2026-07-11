@@ -1,6 +1,8 @@
 import { create } from 'zustand'
 import { signalIdFromAsset, signalIdFromReviewItem } from '../utils/signalId'
 import { hydrateOperationalData, persistOperationalData } from '../utils/operationalData'
+import { assetKey, underlyingKey } from '../utils/assetKey'
+import { buildCrossMarketIndex, crossMarketContext, tradfiSubtype, universeTier } from '../utils/crossMarket'
 
 const KEY = 'rsi:signalReview'
 const TRADE_LOG_KEY = 'rsi:signalReviewTradeLog'
@@ -227,7 +229,8 @@ function formatNumber(value) {
 
 function reviewKey(asset, sig) {
   return [
-    asset.symbol,
+    underlyingKey(asset) || asset.symbol,
+    asset.source,
     sig.side,
     sig.timeframe,
     Number(sig.entryPrice ?? sig.triggerPrice).toPrecision(8),
@@ -237,7 +240,8 @@ function reviewKey(asset, sig) {
 
 function similarReviewItem(a, b) {
   if (!a || !b) return false
-  return String(a.symbol).toUpperCase() === String(b.symbol).toUpperCase()
+  return String(a.underlyingKey ?? a.symbol).toUpperCase() === String(b.underlyingKey ?? b.symbol).toUpperCase()
+    && String(a.source ?? '') === String(b.source ?? '')
     && a.side === b.side
     && a.timeframe === b.timeframe
     && closeEnough(a.entryPrice, b.entryPrice)
@@ -258,6 +262,7 @@ function captureRejectReason(asset, minScore) {
   const sig = asset?.signalHunter
   if (!sig) return '无 SH 信号'
   if (sig.rejected || sig.status === 'rejected') return '已剔除'
+  if (sig.executionEligible === false) return '观察级结构'
   if (!REVIEWABLE_STATUSES.has(sig.status)) return '状态不可识别'
   if (sig.stability && !sig.stability.confirmed && sig.status !== 'triggered') return '等待稳定确认'
   if (sig.side !== 'long' && sig.side !== 'short') return '方向无效'
@@ -285,6 +290,15 @@ function sampleFromAsset(asset, now) {
     key: reviewKey(asset, sig),
     signalId: signalIdFromAsset(asset),
     symbol: asset.symbol,
+    apiSymbol: asset.apiSymbol,
+    source: asset.source,
+    underlyingKey: underlyingKey(asset),
+    venueType: asset.type === 'tradfi' ? 'perp' : asset.type === 'stock' ? 'cash' : asset.type,
+    tradfiSubtype: tradfiSubtype(asset),
+    universeTier: asset.crossMarketSnapshot?.universeTier ?? null,
+    crossMarketConfirmation: asset.crossMarketSnapshot?.confirmation ?? 'none',
+    basisPctAtCapture: finite(asset.crossMarketSnapshot?.basisPct),
+    marketPhaseAtCapture: asset.crossMarketSnapshot?.phase ?? asset.marketSession ?? null,
     name: asset.name ?? null,
     type: asset.type,
     side: sig.side,
@@ -293,6 +307,7 @@ function sampleFromAsset(asset, now) {
     setup: sig.setupLabel || sig.setup || 'Signal Hunter',
     score: sig.score?.total ?? 0,
     marketRegime: sig.marketRegime ?? null,
+    executionEligible: sig.executionEligible !== false,
     executionNotional: finite(sig.executionNotional),
     executionSlippagePct: finite(sig.executionSlippagePct) ?? 0,
     chartScore: sig.score?.chart ?? null,
@@ -422,6 +437,15 @@ function tradeLogFromItem(item, now) {
     symbol: item.symbol,
     name: item.name ?? null,
     type: item.type,
+    apiSymbol: item.apiSymbol,
+    source: item.source,
+    underlyingKey: item.underlyingKey,
+    venueType: item.venueType,
+    tradfiSubtype: item.tradfiSubtype,
+    universeTier: item.universeTier,
+    crossMarketConfirmation: item.crossMarketConfirmation,
+    basisPctAtCapture: item.basisPctAtCapture,
+    marketPhaseAtCapture: item.marketPhaseAtCapture,
     side: item.side,
     timeframe: item.timeframe,
     setup: item.setup,
@@ -676,6 +700,7 @@ const useSignalReviewStore = create((set, get) => ({
     const minScore = get().minScore
     const byKey = new Map(existing.map(item => [item.key, item]))
     const signalAssets = (assets ?? []).filter(asset => asset?.signalHunter)
+    const crossMarketIndex = buildCrossMarketIndex(assets)
     const rejectStats = {}
     let changed = false
     const fresh = []
@@ -687,7 +712,8 @@ const useSignalReviewStore = create((set, get) => ({
       }
       const key = reviewKey(asset, asset.signalHunter)
       if (byKey.has(key)) continue
-      const sample = sampleFromAsset(asset, now)
+      const crossMarket = crossMarketContext(asset, assets, new Date(now), crossMarketIndex)
+      const sample = sampleFromAsset({ ...asset, crossMarketSnapshot: { ...crossMarket, universeTier: universeTier(asset, assets, crossMarketIndex) } }, now)
       if ([...existing, ...fresh].some(item => similarReviewItem(item, sample))) continue
       byKey.set(key, sample)
       fresh.push(sample)
@@ -705,6 +731,7 @@ const useSignalReviewStore = create((set, get) => ({
 
   updateFromAssets: (assets, now = Date.now()) => {
     const entryConfirmBufferPct = get().entryConfirmBufferPct
+    const byAssetKey = new Map((assets ?? []).map(asset => [assetKey(asset), asset]))
     const bySymbol = new Map((assets ?? []).map(asset => [String(asset.symbol).toUpperCase(), asset]))
     let changed = false
     let logsChanged = false
@@ -712,7 +739,7 @@ const useSignalReviewStore = create((set, get) => ({
     const existingLogs = dedupeSimilarTradeLogs(rawLogs.map(normalizeTradeLog).filter(entryObservedValid)).slice(0, MAX_TRADE_LOGS)
     const enrichedExistingLogs = existingLogs.map(log => {
       if (log.name) return log
-      const asset = bySymbol.get(String(log.symbol ?? '').toUpperCase())
+      const asset = byAssetKey.get(`${log.source ?? ''}:${log.apiSymbol ?? log.symbol ?? ''}`) ?? bySymbol.get(String(log.symbol ?? '').toUpperCase())
       if (!asset?.name) return log
       return { ...log, name: asset.name }
     })
@@ -721,7 +748,7 @@ const useSignalReviewStore = create((set, get) => ({
     const logIds = new Set(enrichedExistingLogs.map(log => log.id))
     const newLogs = []
     const next = get().items.map(item => {
-      const asset = bySymbol.get(String(item.symbol).toUpperCase())
+      const asset = byAssetKey.get(`${item.source ?? ''}:${item.apiSymbol ?? item.symbol ?? ''}`) ?? bySymbol.get(String(item.symbol).toUpperCase())
       if (!asset) return item
       const updated = updateItem(item, asset, now, entryConfirmBufferPct)
       if (updated !== item) changed = true

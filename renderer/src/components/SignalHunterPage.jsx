@@ -9,6 +9,9 @@ import { buildSignalHunterAiCandidate, buildSignalHunterAiCandidates, hasExecuta
 import { signalIdFromAsset } from '../utils/signalId'
 import { buildSignalCalibration } from '../utils/signalCalibration'
 import { loadSignalLifecycleItems, saveSignalLifecycleItems } from '../utils/signalLifecycle'
+import { sameUnderlying, underlyingKey, venueLabel } from '../utils/assetKey'
+import { appendBasisSample, basisStatistics, buildCrossMarketIndex, crossMarketContext, reconcileDivergenceStates, reconcileOpenValidationQueue, tradfiSubtype, universeTier } from '../utils/crossMarket'
+import { COMPANY_EVENTS_CACHE_KEY, eventsForAsset } from '../utils/companyEvents'
 
 const ChartModal = lazy(() => import('./ChartModal'))
 
@@ -73,6 +76,18 @@ const OI_FILTERS = [
 const ACTIONABLE_TIMEFRAMES = new Set(['1h', '4h'])
 
 const SH_AI_CACHE_KEY = 'rsi:signalHunter:aiCache'
+const SH_OPEN_VALIDATION_KEY = 'rsi:signalHunter:openValidationQueue'
+const SH_BASIS_HISTORY_KEY = 'rsi:signalHunter:basisHistory'
+const SH_DIVERGENCE_STATE_KEY = 'rsi:signalHunter:divergenceStates'
+const SH_AI_METRICS_KEY = 'rsi:signalHunter:aiMetrics'
+const SH_AI_HISTORY_KEY = 'rsi:signalHunter:aiHistory'
+const SH_AI_DEFERRED_KEY = 'rsi:signalHunter:deferred'
+const SH_AI_FEEDBACK_KEY = 'rsi:signalHunter:feedback'
+const SH_AI_VERSIONS = { pipeline: 'sh-ai-v3', schema: 'narrative-v2', prompt: 'narrative-v2', strategy: 'strict-entry-v2' }
+
+function compatibleAiVersions(versions) {
+  return Object.entries(SH_AI_VERSIONS).every(([key, value]) => versions?.[key] === value)
+}
 const SH_AI_SEEN_KEY = 'rsi:signalHunter:seen'
 const SH_AI_CHANGES_KEY = 'rsi:signalHunter:changes'
 const SH_AI_PINNED_KEY = 'rsi:signalHunter:pinned'
@@ -90,6 +105,40 @@ const OPTIONAL_COLUMNS = [
   { key: 'levels', label: '关键位' },
   { key: 'risk', label: '风险 / 原因' },
 ]
+
+function mergeHistoricalNarratives(currentItems, historicalItems) {
+  const historical = new Map((historicalItems ?? []).map(item => [item.key, item.signalHunter]))
+  return currentItems.map(item => {
+    const old = historical.get(item.key)
+    if (!old || !item.signalHunter) return item
+    return {
+      ...item,
+      signalHunter: {
+        ...item.signalHunter,
+        narrativeSummary: old.narrativeSummary ?? item.signalHunter.narrativeSummary,
+        riskNarrative: old.riskNarrative ?? item.signalHunter.riskNarrative,
+        narrativeTags: old.narrativeTags ?? item.signalHunter.narrativeTags,
+      },
+    }
+  })
+}
+
+function storeAiHistory(cache) {
+  if (!cache?.items?.length) return
+  const history = loadJson(SH_AI_HISTORY_KEY, [])
+  saveJson(SH_AI_HISTORY_KEY, [cache, ...history.filter(item => item?.meta?.runAt !== cache.meta?.runAt)].slice(0, 3))
+}
+
+function collectNarrativeAudit(previousItems, nextItems) {
+  const previous = new Map((previousItems ?? []).map(item => [item.key, item.signalHunter]))
+  return (nextItems ?? []).flatMap(item => {
+    const before = previous.get(item.key)
+    const after = item.signalHunter
+    if (!after) return []
+    const fields = ['narrativeSummary', 'riskNarrative', 'narrativeTags'].filter(field => JSON.stringify(before?.[field] ?? null) !== JSON.stringify(after[field] ?? null))
+    return fields.length ? [{ key: item.key, symbol: item.symbol, fields }] : []
+  })
+}
 
 const STATUS_META = {
   armed: { label: '预埋', cls: 'signal-hunter-armed' },
@@ -374,12 +423,12 @@ function signalHistoryKey(item) {
 
 function signalPinnedKey(item) {
   const sig = item?.signalHunter ?? {}
-  return [item?.symbol ?? item?.apiSymbol ?? item?.key ?? signalKey(item), sig.side ?? '', sig.timeframe ?? ''].join('|')
+  return [underlyingKey(item) || item?.key || signalKey(item), sig.side ?? '', sig.timeframe ?? ''].join('|')
 }
 
 function signalTrackKey(item) {
   const sig = item?.signalHunter ?? {}
-  return [item?.symbol ?? item?.apiSymbol ?? item?.key ?? signalKey(item), sig.side ?? ''].join('|')
+  return [underlyingKey(item) || item?.key || signalKey(item), sig.side ?? '', sig.timeframe ?? ''].join('|')
 }
 
 function collectStatusChanges(previousItems, nextItems, now) {
@@ -540,6 +589,9 @@ function executionMeta(asset) {
   if (!sig) return { key: 'wait', label: '等待', cls: 'signal-hunter-exec-wait', rank: 3 }
   if (sig.rejected || sig.status === 'rejected') {
     return { key: 'rejected', label: '剔除', cls: 'signal-hunter-exec-muted', rank: 9 }
+  }
+  if (sig.executionEligible === false) {
+    return { key: 'wait', label: '观察', cls: 'signal-hunter-exec-wait', rank: 4 }
   }
   const drift = Math.abs(priceDriftPct(asset) ?? 0)
   const stopInfo = stopDistanceInfo(asset, sig)
@@ -792,6 +844,23 @@ function signalHunterHealth(aiRunMeta, aiSummary, aiExpired) {
   return { key: 'healthy', label: '健康', cls: 'good', note: '结果可用' }
 }
 
+function aiFailureLabel(type) {
+  return ({
+    timeout: '超时', process_error: '进程异常', truncated_output: '输出截断',
+    invalid_json: 'JSON异常', schema_mismatch: 'Schema不匹配', partial_output: '候选缺失',
+    narrative_quality: '叙述质检未通过', circuit_open: 'AI熔断保护',
+    budget_deferred: '运行预算延后',
+    empty_output: '空输出', cancelled: '已取消',
+  })[type] ?? type
+}
+
+function aiRefreshReasonLabel(type) {
+  return ({
+    new_candidate: '新增', version_changed: '版本升级', cache_expired: '缓存过期',
+    market_or_structure_changed: '行情/结构变化',
+  })[type] ?? type
+}
+
 function signalHunterReviewText(aiSummary, statusChanges) {
   if (!aiSummary?.total) return '暂无 AI 结果，先运行一次 AI 识别。'
   const changedUp = aiSummary.changedUp || 0
@@ -872,6 +941,7 @@ export default function SignalHunterPage() {
   const applySignalHunterAiResults = useMarketStore(s => s.applySignalHunterAiResults)
   const addFeedItems = useAlertStore(s => s.addFeedItems)
   const shAiInterval = useSettingsStore(s => s.shAiInterval ?? 30)
+  const shAiEnabled = useSettingsStore(s => s.shAiEnabled !== false)
   const tradeLogs = useSignalReviewStore(s => s.tradeLogs)
   const signalCalibration = useMemo(() => buildSignalCalibration(tradeLogs), [tradeLogs])
   const [filter, setFilter] = useState('all')
@@ -907,13 +977,23 @@ export default function SignalHunterPage() {
   const [chartSignal, setChartSignal] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
   const [aiStatus, setAiStatus] = useState('')
+  const [aiProgress, setAiProgress] = useState(null)
+  const [aiCandidateStates, setAiCandidateStates] = useState({})
+  const [aiDiagnostics, setAiDiagnostics] = useState(() => loadJson(SH_AI_CACHE_KEY, null)?.meta?.diagnostics ?? null)
+  const [aiMetrics, setAiMetrics] = useState(() => loadJson(SH_AI_METRICS_KEY, []))
   const [aiRunMeta, setAiRunMeta] = useState(() => loadJson(SH_AI_CACHE_KEY, null)?.meta ?? null)
   const [statusChanges, setStatusChanges] = useState(() => loadJson(SH_AI_CHANGES_KEY, []))
   const [aiDiff, setAiDiff] = useState(() => loadJson(SH_AI_DIFF_KEY, { added: [], removed: [], scoreChanged: [], ts: 0 }))
   const [seenKeys, setSeenKeys] = useState(() => loadSeenKeys())
   const [pinnedKeys, setPinnedKeys] = useState(() => loadPinnedKeys())
   const [processedKeys, setProcessedKeys] = useState(() => loadProcessedKeys())
-  const [mergeBySymbol, setMergeBySymbol] = useState(false)
+  const [mergeBySymbol, setMergeBySymbol] = useState(true)
+  const [openValidationQueue, setOpenValidationQueue] = useState(() => loadJson(SH_OPEN_VALIDATION_KEY, []))
+  const [showOpenValidation, setShowOpenValidation] = useState(false)
+  const [basisHistory, setBasisHistory] = useState(() => loadJson(SH_BASIS_HISTORY_KEY, {}))
+  const [divergenceStates, setDivergenceStates] = useState(() => loadJson(SH_DIVERGENCE_STATE_KEY, {}))
+  const crossMarketIndex = useMemo(() => buildCrossMarketIndex(assets), [assets])
+  const [companyEvents] = useState(() => loadJson(COMPANY_EVENTS_CACHE_KEY, []))
   const [now, setNow] = useState(() => Date.now())
   const aiBusyRef = useRef(false)
   const lastAiSignatureRef = useRef('')
@@ -926,6 +1006,45 @@ export default function SignalHunterPage() {
     const timer = setInterval(() => setNow(Date.now()), 60 * 1000)
     return () => clearInterval(timer)
   }, [])
+
+  useEffect(() => {
+    if (!window.api?.onCodexScreenProgress) return undefined
+    return window.api.onCodexScreenProgress(progress => {
+      setAiProgress(progress)
+      if (progress?.items?.length) {
+        setAiCandidateStates(previous => {
+          const next = { ...previous }
+          for (const item of progress.items) next[item.key] = item.status
+          return next
+        })
+      }
+      if (progress?.phase === 'batch') {
+        setAiStatus(`AI 分批识别 ${progress.batch}/${progress.batches} · 已完成 ${progress.completed}/${progress.total}${progress.cached ? ` · 缓存 ${progress.cached}` : ''}`)
+      }
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!updatedAt || !assets.length) return
+    setOpenValidationQueue(previous => {
+      const next = reconcileOpenValidationQueue(assets, previous, updatedAt)
+      if (JSON.stringify(next) !== JSON.stringify(previous)) saveJson(SH_OPEN_VALIDATION_KEY, next)
+      return next
+    })
+    setBasisHistory(previous => {
+      let next = previous
+      for (const asset of assets.filter(item => item.type === 'tradfi')) {
+        next = appendBasisSample(next, crossMarketContext(asset, assets, new Date(updatedAt), crossMarketIndex), updatedAt)
+      }
+      if (JSON.stringify(next) !== JSON.stringify(previous)) saveJson(SH_BASIS_HISTORY_KEY, next)
+      return next
+    })
+    setDivergenceStates(previous => {
+      const next = reconcileDivergenceStates(assets, previous, updatedAt, crossMarketIndex)
+      if (JSON.stringify(next) !== JSON.stringify(previous)) saveJson(SH_DIVERGENCE_STATE_KEY, next)
+      return next
+    })
+  }, [updatedAt, assets, crossMarketIndex])
 
   useEffect(() => {
     if (!focusedRow) return undefined
@@ -1043,6 +1162,16 @@ export default function SignalHunterPage() {
     })
   }
 
+  function recordAiFeedback(asset, rating) {
+    const items = loadJson(SH_AI_FEEDBACK_KEY, [])
+    const next = [{
+      at: Date.now(), key: signalKey(asset), symbol: asset.symbol, rating,
+      versions: aiRunMeta?.versions ?? SH_AI_VERSIONS,
+    }, ...items].slice(0, 200)
+    saveJson(SH_AI_FEEDBACK_KEY, next)
+    setAiStatus(`已记录 ${asset.symbol} 的AI叙述反馈：${rating}`)
+  }
+
   const copyVisibleSummary = async () => {
     if (!rows.length) return
     try {
@@ -1072,13 +1201,23 @@ export default function SignalHunterPage() {
     }
   }
 
-  const runAiSignalHunter = async ({ auto = false } = {}) => {
+  const runAiSignalHunter = async ({ auto = false, keys = null, healthProbe = false } = {}) => {
     if (!window.api?.runCodexScreen) return
+    if (!shAiEnabled) {
+      setAiStatus('AI叙述已关闭；Signal Hunter继续使用本地确定性规则。')
+      return
+    }
     if (aiBusyRef.current) {
       if (auto) pendingAutoRef.current = true
       return
     }
-    const candidates = buildSignalHunterAiCandidates(assets, 60)
+    const deferredKeys = new Set(loadJson(SH_AI_DEFERRED_KEY, []))
+    let candidates = buildSignalHunterAiCandidates(assets, 60)
+      .sort((a, b) => Number(deferredKeys.has(b.key)) - Number(deferredKeys.has(a.key)))
+    if (keys?.length) {
+      const selected = new Set(keys)
+      candidates = candidates.filter(candidate => selected.has(candidate.key))
+    }
     const signature = signalHunterCandidateSignature(candidates)
     if (auto && (!signature || signature === lastAiSignatureRef.current)) return
     if (!candidates.length) {
@@ -1093,20 +1232,30 @@ export default function SignalHunterPage() {
         scope: 'signal-hunter',
         createdAt: new Date().toISOString(),
         updatedAt,
+        previousAiRunAt: aiRunMeta?.runAt ?? 0,
+        previousAiVersions: aiRunMeta?.versions ?? null,
+        snapshotId: `${updatedAt ?? Date.now()}-${signature}`,
+        requestMode: auto ? 'auto' : 'manual',
+        healthProbe,
         note: 'Signal Hunter AI 只识别形态结构、方向、关键位和风险，不输出交易建议。',
         candidates,
       }
       const res = await window.api.runCodexScreen(payload)
       if (!res?.ok || !res.result) throw new Error(res?.parseError || res?.error || 'AI 未返回有效 JSON')
       const previousItems = await loadSignalLifecycleItems()
-      const normalized = normalizeSignalHunterAiResults(res.result, assets, signalCalibration, previousItems)
+      const deferred = (res.diagnostics?.failures ?? [])
+        .filter(item => ['budget_deferred', 'circuit_open'].includes(item.type))
+        .flatMap(item => item.keys ?? [])
+      saveJson(SH_AI_DEFERRED_KEY, deferred)
+      const previousCache = loadJson(SH_AI_CACHE_KEY, null)
+      let normalized = normalizeSignalHunterAiResults(res.result, assets, signalCalibration, previousItems)
+      const failedCount = (res.diagnostics?.failures ?? []).reduce((sum, item) => sum + (item.count ?? 0), 0)
+      const autoRolledBack = Boolean(previousCache?.items?.length && failedCount / Math.max(1, normalized.length) > 0.25)
+      if (autoRolledBack) normalized = mergeHistoricalNarratives(normalized, previousCache.items)
       const runAt = Date.now()
       const changes = collectStatusChanges(previousItems, normalized, runAt)
       const diff = collectAiDiff(previousItems, normalized, runAt)
-      applySignalHunterAiResults(normalized)
-      await saveSignalLifecycleItems(normalized, runAt)
-      const feedItems = makeSignalHunterAiFeedItems(normalized, Date.now())
-      if (feedItems.length) addFeedItems(feedItems)
+      const nextCache = { meta: null, items: normalized }
       const live = normalized.filter(item => item.signalHunter?.status !== 'rejected').length
       const meta = {
         runAt,
@@ -1114,8 +1263,25 @@ export default function SignalHunterPage() {
         total: normalized.length,
         live,
         candidateSignature: signature,
+        diagnostics: res.diagnostics ?? res.result?._meta ?? null,
+        versions: res.versions ?? SH_AI_VERSIONS,
+        snapshotId: payload.snapshotId,
+        autoRolledBack,
+        narrativeAudit: collectNarrativeAudit(previousCache?.items, normalized),
       }
-      saveJson(SH_AI_CACHE_KEY, { meta, items: normalized })
+      nextCache.meta = meta
+      storeAiHistory(previousCache)
+      try {
+        saveJson(SH_AI_CACHE_KEY, nextCache)
+        applySignalHunterAiResults(normalized)
+        await saveSignalLifecycleItems(normalized, runAt)
+      } catch (publishError) {
+        saveJson(SH_AI_CACHE_KEY, previousCache)
+        if (previousCache?.items) applySignalHunterAiResults(previousCache.items)
+        throw publishError
+      }
+      const feedItems = makeSignalHunterAiFeedItems(normalized, Date.now())
+      if (feedItems.length) addFeedItems(feedItems)
       saveJson(SH_AI_DIFF_KEY, diff)
       setAiDiff(diff)
       if (changes.length) {
@@ -1126,10 +1292,22 @@ export default function SignalHunterPage() {
         })
       }
       setAiRunMeta(meta)
+      setAiDiagnostics(meta.diagnostics)
+      if (meta.diagnostics) {
+        setAiMetrics(previous => {
+          const next = [{ at: runAt, ...meta.diagnostics }, ...previous].slice(0, 30)
+          saveJson(SH_AI_METRICS_KEY, next)
+          return next
+        })
+      }
+      setAiProgress(null)
       lastAiSignatureRef.current = signature
-      setAiStatus(res.degraded
-        ? `AI 解释异常，已保留本地确定性结果 ${live}/${normalized.length}`
-        : `AI 已写入 ${live}/${normalized.length} 个 SH 结果`)
+      const failureSummary = (res.diagnostics?.failures ?? []).map(item => `${aiFailureLabel(item.type)} ${item.count}`).join(' · ')
+      setAiStatus(res.cancelled
+        ? `AI识别已取消；已完成批次和本地结构已保留 ${live}/${normalized.length}`
+        : res.degraded
+          ? `AI部分降级：${failureSummary || '说明不可用'}；本地结构已保留 ${live}/${normalized.length}`
+          : `AI已写入 ${live}/${normalized.length} 个SH结果`)
     } catch (err) {
       setAiStatus(`AI 识别失败：${err.message}`)
     } finally {
@@ -1162,6 +1340,10 @@ export default function SignalHunterPage() {
         scope: `signal-hunter-interest-${asset.symbol}`,
         createdAt: new Date().toISOString(),
         updatedAt,
+        previousAiRunAt: aiRunMeta?.runAt ?? 0,
+        previousAiVersions: aiRunMeta?.versions ?? null,
+        snapshotId: `${updatedAt ?? Date.now()}-${candidate.key}`,
+        requestMode: 'manual',
         note: '临时单标的 Signal Hunter 分析：只识别结构、方向、关键位、风险和是否值得继续观察；不要输出交易指令。',
         candidates: [candidate],
       }
@@ -1188,10 +1370,23 @@ export default function SignalHunterPage() {
         total: mergedItems.length,
         live,
         interestSymbol: asset.symbol,
+        diagnostics: res.diagnostics ?? res.result?._meta ?? null,
+        versions: res.versions ?? SH_AI_VERSIONS,
+        snapshotId: payload.snapshotId,
       }
+      storeAiHistory(cached)
       saveJson(SH_AI_CACHE_KEY, { meta, items: mergedItems })
       saveJson(SH_AI_DIFF_KEY, diff)
       setAiRunMeta(meta)
+      setAiDiagnostics(meta.diagnostics)
+      if (meta.diagnostics) {
+        setAiMetrics(previous => {
+          const next = [{ at: runAt, ...meta.diagnostics }, ...previous].slice(0, 30)
+          saveJson(SH_AI_METRICS_KEY, next)
+          return next
+        })
+      }
+      setAiProgress(null)
       setAiDiff(diff)
       if (changes.length) {
         setStatusChanges(prev => {
@@ -1221,19 +1416,68 @@ export default function SignalHunterPage() {
     }
   }
 
+  const cancelAiSignalHunter = async () => {
+    if (!window.api?.cancelCodexJobs) return
+    await window.api.cancelCodexJobs()
+    setAiStatus('正在取消 AI 分批识别；已完成批次将保留，本地信号不受影响。')
+  }
+
+  const rollbackAiNarratives = async () => {
+    const history = loadJson(SH_AI_HISTORY_KEY, [])
+    const previous = history[0]
+    const current = loadJson(SH_AI_CACHE_KEY, null)
+    if (!previous?.items?.length || !current?.items?.length) {
+      setAiStatus('没有可回滚的AI叙述版本。')
+      return
+    }
+    const items = mergeHistoricalNarratives(current.items, previous.items)
+    const runAt = Date.now()
+    const meta = { ...current.meta, runAt, narrativeRollbackFrom: previous.meta?.runAt ?? null }
+    storeAiHistory(current)
+    saveJson(SH_AI_CACHE_KEY, { meta, items })
+    applySignalHunterAiResults(items)
+    await saveSignalLifecycleItems(items, runAt)
+    setAiRunMeta(meta)
+    setAiStatus(`已回滚到 ${formatAiTime(previous.meta?.runAt)} 的AI叙述；本地执行结构保持当前版本。`)
+  }
+
+  const rerunFailedCandidates = () => {
+    const keys = [...new Set((aiDiagnostics?.failures ?? []).flatMap(item => item.keys ?? []))]
+    if (!keys.length) {
+      setAiStatus('当前没有可单独重跑的失败候选。')
+      return
+    }
+    runAiSignalHunter({ keys })
+  }
+
+  const probeAiHealth = () => {
+    const keys = buildSignalHunterAiCandidates(assets, 4).map(item => item.key)
+    runAiSignalHunter({ keys, healthProbe: true })
+  }
+
   useEffect(() => {
-    if (!updatedAt || !assets.length) return
+    if (!shAiEnabled || !updatedAt || !assets.length) return
     const intervalMs = Math.max(1, Number(shAiInterval) || 30) * 60 * 1000
     const lastRunAt = aiRunMeta?.runAt ?? loadJson(SH_AI_CACHE_KEY, null)?.meta?.runAt ?? 0
     if (lastRunAt && Date.now() - lastRunAt < intervalMs) return
     const timer = setTimeout(() => runAiSignalHunter({ auto: true }), 600)
     return () => clearTimeout(timer)
-  }, [updatedAt, assets.length, shAiInterval])
+  }, [updatedAt, assets.length, shAiInterval, shAiEnabled])
 
   useEffect(() => {
     if (!assets.length) return
-    const cached = loadJson(SH_AI_CACHE_KEY, null)
+    let cached = loadJson(SH_AI_CACHE_KEY, null)
     if (!cached?.items?.length) return
+    if (!compatibleAiVersions(cached.meta?.versions)) {
+      cached = {
+        meta: { ...cached.meta, versions: SH_AI_VERSIONS, narrativeCacheMigrated: true },
+        items: cached.items.map(item => item.signalHunter ? {
+          ...item,
+          signalHunter: { ...item.signalHunter, narrativeSummary: '', riskNarrative: '', narrativeTags: [] },
+        } : item),
+      }
+      saveJson(SH_AI_CACHE_KEY, cached)
+    }
     const cacheKey = `${cached.meta?.runAt ?? ''}:${assets.length}`
     if (appliedCacheRef.current === cacheKey) return
     appliedCacheRef.current = cacheKey
@@ -1400,7 +1644,7 @@ export default function SignalHunterPage() {
     setShowNewOnly(false)
     setShowUnprocessedOnly(false)
     setHideDrifted(false)
-    setMergeBySymbol(false)
+    setMergeBySymbol(true)
     setTableMode('compact')
     setShowFilters(false)
     setQuery('')
@@ -1477,7 +1721,13 @@ export default function SignalHunterPage() {
     })
   }
 
-  const spotlightRows = rows.slice(0, 3)
+  const spotlightRows = rows.filter(asset => {
+    const context = crossMarketContext(asset, assets, new Date(), crossMarketIndex)
+    const recovery = divergenceStates[context.key]?.status
+    return context.confirmation !== 'diverged' && recovery !== 'recovering'
+  }).slice(0, 3)
+  const pendingOpenValidation = openValidationQueue.filter(item => item.status === 'pending_open').length
+  const completedOpenValidation = openValidationQueue.filter(item => item.status !== 'pending_open').length
   const marketPulse = summary.ready
     ? `${summary.ready} 个信号通过硬筛且当前可盯，优先核对确认价与失效位。`
     : summary.wait
@@ -1494,6 +1744,13 @@ export default function SignalHunterPage() {
     const blocked = checked.filter(asset => asset.dataQuality?.ok === false || asset.signalHunter?.runtimeBlocked)
     return { checked: checked.length, blocked: blocked.length }
   }, [assets])
+  const aiQualitySuccessRate = aiMetrics.length
+    ? Math.round(aiMetrics.filter(item => !(item.failures?.length) && !item.missing && !item.duplicates).length / aiMetrics.length * 100)
+    : null
+  const aiRefreshSummary = Object.entries((aiDiagnostics?.refreshReasons ?? []).reduce((summary, item) => {
+    summary[item.reason] = (summary[item.reason] ?? 0) + 1
+    return summary
+  }, {})).map(([reason, count]) => `${aiRefreshReasonLabel(reason)} ${count}`).join(' · ')
 
   return (
     <div className="page signal-hunter-page">
@@ -1513,10 +1770,14 @@ export default function SignalHunterPage() {
               复盘校准 {signalCalibration.activeGroups ? `${signalCalibration.activeGroups}组` : `${signalCalibration.eligibleSamples}/${signalCalibration.minSamples}`}
             </span>
             <span className={`signal-hunter-ai-health ${aiHealth.cls}`}>AI {aiHealth.label}</span>
+            <button className={`signal-hunter-ai-health ${pendingOpenValidation ? 'risk' : 'muted'}`} title={`已完成复核 ${completedOpenValidation}`} onClick={() => setShowOpenValidation(value => !value)}>
+              开盘复核 {pendingOpenValidation}
+            </button>
             <button className="zone-btn" onClick={() => setShowOverview(false)}>收起概览</button>
             <button className="zone-btn signal-hunter-ai-btn signal-hunter-ai-main-btn" onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
               {aiBusy ? '正在扫描市场' : aiExpired ? '重新识别' : '刷新识别'}
             </button>
+            {aiBusy && <button className="zone-btn signal-hunter-ai-cancel-btn" onClick={cancelAiSignalHunter}>取消</button>}
           </div>
         </div>
         <div className="signal-hunter-summary">
@@ -1551,6 +1812,14 @@ export default function SignalHunterPage() {
           }) : <div className="signal-hunter-spotlight-empty">暂无优先信号，刷新识别后会在这里给出行动队列。</div>}
         </div>
       </section>
+      {showOpenValidation && <section className="signal-hunter-open-validation">
+        <div><b>美股开盘复核队列</b><span>休市期间的 TradFi 信号不会直接等同于现货确认。</span></div>
+        {openValidationQueue.length ? openValidationQueue.slice(0, 30).map(item => <div key={item.id} className={`signal-hunter-open-item ${item.status}`}>
+          <b>{item.symbol}</b><span>{item.side === 'short' ? '做空' : '做多'} · {item.timeframe}</span>
+          <em>{({ pending_open: '等待开盘', confirmed: '现货确认', diverged: '方向背离', unconfirmed: '现货未确认' })[item.status]}</em>
+          <small>{item.checkedAt ? new Date(item.checkedAt).toLocaleString('zh-CN') : new Date(item.queuedAt).toLocaleString('zh-CN')}</small>
+        </div>) : <em>当前没有待复核记录。</em>}
+      </section>}
       </> : (
         <section className="signal-hunter-command-compact">
           <div>
@@ -1569,6 +1838,7 @@ export default function SignalHunterPage() {
             <button className="zone-btn signal-hunter-ai-btn" onClick={() => runAiSignalHunter()} disabled={aiBusy || !assets.length}>
               {aiBusy ? '扫描中' : '刷新识别'}
             </button>
+            {aiBusy && <button className="zone-btn signal-hunter-ai-cancel-btn" onClick={cancelAiSignalHunter}>取消</button>}
           </div>
         </section>
       )}
@@ -1611,6 +1881,7 @@ export default function SignalHunterPage() {
       {aiStatus && (
         <div className={`signal-hunter-status-notice ${aiStatusTone}`}>
           <span title={aiStatus}>{aiStatus}</span>
+          {aiProgress && <progress max={Math.max(1, aiProgress.total ?? 1)} value={aiProgress.completed ?? 0} />}
           <button type="button" onClick={() => setAiStatus('')} aria-label="关闭状态提示">×</button>
         </div>
       )}
@@ -1807,11 +2078,16 @@ export default function SignalHunterPage() {
           <span>AI识别 {formatAiTime(aiRunMeta.runAt)}</span>
           <span>行情快照 {formatAiTime(aiRunMeta.snapshotAt)}</span>
           <span>写入 {aiRunMeta.live}/{aiRunMeta.total}</span>
+          {aiDiagnostics && <span>AI质量 {aiQualitySuccessRate == null ? '-' : `${aiQualitySuccessRate}%`} · 缓存 {aiDiagnostics.cached ?? 0} · 请求 {aiDiagnostics.requested ?? 0} · 重试 {aiDiagnostics.retries ?? 0} · 缺失 {aiDiagnostics.missing ?? 0} · 重复 {aiDiagnostics.duplicates ?? 0} · 异常键 {aiDiagnostics.unexpected ?? 0} · {Math.round((aiDiagnostics.durationMs ?? 0) / 1000)}秒{aiDiagnostics.failures?.length ? ` · ${aiDiagnostics.failures.map(item => aiFailureLabel(item.type)).join('/')}` : ''}</span>}
+          {aiRefreshSummary && <span>重新识别：{aiRefreshSummary}</span>}
           <span>已处理 {processedKeys.size}</span>
           <span>新增 {aiDiff.added?.length ?? 0} / 消失 {aiDiff.removed?.length ?? 0} / 分数变 {aiDiff.scoreChanged?.length ?? 0}</span>
           {aiExpired && <span className="signal-hunter-ai-expired-meta">AI结果已过期，建议重新识别</span>}
           {statusChanges.length > 0 && <span>状态变化 {statusChanges.length}</span>}
           {statusChanges.length > 0 && <button type="button" onClick={clearStatusChanges}>清变化</button>}
+          {aiDiagnostics?.failures?.some(item => item.keys?.length) && <button type="button" onClick={rerunFailedCandidates}>重跑失败项</button>}
+          {aiDiagnostics?.circuitOpen && <button type="button" onClick={probeAiHealth}>健康探测</button>}
+          {loadJson(SH_AI_HISTORY_KEY, []).length > 0 && <button type="button" onClick={rollbackAiNarratives}>回滚AI叙述</button>}
         </div>
       )}
 
@@ -1920,7 +2196,13 @@ export default function SignalHunterPage() {
               </tr>
             ) : rows.map((asset, index) => {
               const sig = asset.signalHunter
+              const crossMarket = crossMarketContext(asset, assets, new Date(), crossMarketIndex)
+              const basisStats = basisStatistics(basisHistory, crossMarket.key, crossMarket.basisPct)
+              const tier = universeTier(asset, assets, crossMarketIndex)
+              const divergenceState = divergenceStates[crossMarket.key]
+              const assetEvents = eventsForAsset(companyEvents, asset).filter(item => item.guard.active)
               const key = signalKey(asset)
+              const aiCandidateState = aiCandidateStates[key]
               const meta = statusMeta(sig.status)
               const side = sideMeta(sig.side)
               const t1 = targetFallback(sig, 1)
@@ -1987,9 +2269,24 @@ export default function SignalHunterPage() {
                       </button>
                       <span className={`badge badge-${asset.type}`}>{categoryBadge(asset)}</span>
                       {isPinned && <span className="signal-hunter-pin-badge">关注</span>}
+                      {(asset.type === 'stock' || asset.type === 'tradfi') && <span className="signal-hunter-venue-badge">{venueLabel(asset)}</span>}
+                      {assets.some(other => signalKey(other) !== signalKey(asset) && sameUnderlying(other, asset)) && <span className="signal-hunter-dual-badge">双市场</span>}
+                      {asset.type === 'tradfi' && <span className="signal-hunter-session-badge">24/7 · 现货复核</span>}
+                      {asset.type === 'tradfi' && <span className="signal-hunter-subtype-badge">{({ equity_perp: '股票合约', etf_perp: 'ETF合约', commodity_perp: '商品合约', index_perp: '指数合约' })[tradfiSubtype(asset)]}</span>}
                       {isProcessed && <span className="signal-hunter-processed-badge">已处理</span>}
                       {isNew && <span className="signal-hunter-new-badge">新</span>}
                       {stale && <span className="signal-hunter-stale-badge">漂</span>}
+                      {tier === 'dual_core' && <small className={`signal-hunter-cross-state ${crossMarket.confirmation}`}>
+                        {crossMarket.confirmation === 'confirmed' ? '跨市场同向确认' : crossMarket.confirmation === 'diverged' ? '跨市场背离' : '双市场 · 单边信号'}
+                        {Number.isFinite(crossMarket.basisPct) ? ` · 基差 ${crossMarket.basisPct >= 0 ? '+' : ''}${crossMarket.basisPct.toFixed(2)}%` : ''}
+                      </small>}
+                      {crossMarket.contractQuality && <small className={`signal-hunter-cross-state quality-${crossMarket.contractQuality.grade.toLowerCase()}`}>合约质量 {crossMarket.contractQuality.grade} · {crossMarket.contractQuality.score}/100{crossMarket.contractQuality.executable ? '' : ' · 仅观察'}</small>}
+                      {basisStats.abnormal && <small className="signal-hunter-cross-state diverged">基差异常 · Z {basisStats.zScore.toFixed(1)}（{basisStats.samples} 样本）</small>}
+                      {crossMarket.stale && <small className="signal-hunter-cross-state stale">跨市场数据可能陈旧</small>}
+                      {crossMarket.confirmation === 'cash_unavailable' && <small className="signal-hunter-cross-state stale">现货源不可用 · 暂停跨市场确认</small>}
+                      {divergenceState?.status === 'recovering' && <small className="signal-hunter-cross-state diverged">背离已缓解 · 等待一个闭合周期</small>}
+                      {divergenceState?.status === 'recovered' && <small className="signal-hunter-cross-state confirmed">背离恢复已确认</small>}
+                      {!!assetEvents.length && <small className={`signal-hunter-event-risk ${assetEvents.some(item => item.guard.blocking) ? 'blocking' : ''}`}>公司事件 {assetEvents[0].form ?? assetEvents[0].eventType} · {assetEvents.some(item => item.guard.blocking) ? '阻断级提示' : '风险窗口'}</small>}
                       <small className="signal-id-badge">{shSignalId}</small>
                       <small>{formatTurnover(getQuoteVolume(asset))}</small>
                     </td>
@@ -2049,6 +2346,7 @@ export default function SignalHunterPage() {
                       <div className={`signal-hunter-next-step ${expired ? 'expired' : exec.key}`}>
                         <b>{nextStep.label}</b>
                         {nextStep.detail && <small>{nextStep.detail}</small>}
+                        {aiCandidateState && <small className={`signal-hunter-candidate-run-state ${aiCandidateState}`}>AI · {({ cached: '缓存命中', queued: '排队', running: '识别中', completed: '完成', retrying: '局部重试', degraded: '降级', budget_deferred: '预算延后', circuit_deferred: '熔断延后', data_blocked: '数据阻断' })[aiCandidateState] ?? aiCandidateState}</small>}
                       </div>
                       <div className="signal-hunter-actions">
                         <button className="zone-btn" onClick={e => {
@@ -2150,6 +2448,19 @@ export default function SignalHunterPage() {
                               <b>判定依据</b>
                               <span>{sig.reasons?.length ? sig.reasons.join(' / ') : '-'}</span>
                               <span>{rejected ? `剔除：${sig.rejectReasons?.join(' / ') || '-'}` : '通过：位置、评分、R 值均达标'}</span>
+                            </section>
+                            <section>
+                              <b>AI叙述与反馈</b>
+                              <span>{sig.narrativeSummary || '当前没有AI叙述，本地结构不受影响。'}</span>
+                              {sig.riskNarrative && <span>风险说明：{sig.riskNarrative}</span>}
+                              <div className="signal-hunter-feedback-actions">
+                                {['有帮助', '没帮助', '过于空泛', '与图表不符'].map(rating => (
+                                  <button key={rating} type="button" className="zone-btn" onClick={event => {
+                                    event.stopPropagation()
+                                    recordAiFeedback(asset, rating)
+                                  }}>{rating}</button>
+                                ))}
+                              </div>
                             </section>
                             <section>
                               <b>完整决策链</b>

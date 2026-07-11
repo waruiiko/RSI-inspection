@@ -157,7 +157,8 @@ const useAlertStore = create((set, get) => ({
     const stamped = []
     const replaced = new Set()
     for (const [i, item] of items.entries()) {
-      const eventKey = [item.symbol ?? '', item.type ?? '', item.timeframe ?? '', item.signal ?? item.condition ?? ''].join('|')
+      const identity = item.underlyingKey || `${item.source ?? ''}:${item.apiSymbol ?? item.symbol ?? ''}`
+      const eventKey = [identity, item.type ?? '', item.timeframe ?? '', item.side ?? '', item.signal ?? item.condition ?? ''].join('|')
       const duplicate = current.find(row => row.eventKey === eventKey && ts - (row.ts ?? 0) <= 30 * 60 * 1000)
       if (duplicate) {
         replaced.add(duplicate.id)

@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('api', {
   loadSignalReplayHistory: () => ipcRenderer.invoke('signalReplay:history'),
   loadOperationalData: (key) => ipcRenderer.invoke('operational:load', key),
   saveOperationalData: (key, value) => ipcRenderer.invoke('operational:save', { key, value }),
+  syncSecCompanyEvents: (options) => ipcRenderer.invoke('companyEvents:syncSec', options),
+  syncEarningsCalendar: (options) => ipcRenderer.invoke('companyEvents:syncEarnings', options),
 
   // Asset management
   getAssetsConfig:  ()       => ipcRenderer.invoke('assets:getConfig'),
@@ -62,6 +64,7 @@ contextBridge.exposeInMainWorld('api', {
   clearCache:      ()        => ipcRenderer.invoke('settings:clearCache'),
   cleanupInstallers: ()      => ipcRenderer.invoke('settings:cleanupInstallers'),
   exportConfig:    ()        => ipcRenderer.invoke('settings:exportConfig'),
+  exportDiagnostics: (data)  => ipcRenderer.invoke('settings:exportDiagnostics', data),
   importConfig:    ()        => ipcRenderer.invoke('settings:importConfig'),
   checkForUpdates: (openRelease = true) => ipcRenderer.invoke('settings:checkUpdates', openRelease),
   getAutoLaunch:   ()        => ipcRenderer.invoke('settings:getAutoLaunch'),
@@ -70,11 +73,20 @@ contextBridge.exposeInMainWorld('api', {
   getCodexStatus:      ()        => ipcRenderer.invoke('codex:status'),
   runCodexReview:      (data)    => ipcRenderer.invoke('codex:runReview', data),
   runCodexScreen:      (data)    => ipcRenderer.invoke('codex:runScreen', data),
+  onCodexScreenProgress: (callback) => {
+    const listener = (_, progress) => callback(progress)
+    ipcRenderer.on('codex:screenProgress', listener)
+    return () => ipcRenderer.removeListener('codex:screenProgress', listener)
+  },
   runCodexLaunchReview:(data)    => ipcRenderer.invoke('codex:runLaunchReview', data),
   runCodexMarketChat:  (data)    => ipcRenderer.invoke('codex:runMarketChat', data),
   runCodexManagePlan:  (data)    => ipcRenderer.invoke('codex:runManagePlan', data),
   runCodexAlertPlan:   (data)    => ipcRenderer.invoke('codex:runAlertPlan', data),
   getCodexJobs:        ()        => ipcRenderer.invoke('codex:jobs'),
+  getCodexScreenRuntime: ()      => ipcRenderer.invoke('codex:screenRuntime'),
+  resetCodexScreenRuntime: (scope) => ipcRenderer.invoke('codex:resetScreenRuntime', scope),
+  cleanupCodexScreenRuns: (options) => ipcRenderer.invoke('codex:cleanupScreenRuns', options),
   cancelCodexJobs:     ()        => ipcRenderer.invoke('codex:cancelJobs'),
   openPath:            (target)  => ipcRenderer.invoke('shell:openPath', target),
+  openExternal:        (target)  => ipcRenderer.invoke('shell:openExternal', target),
 })

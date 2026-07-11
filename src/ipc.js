@@ -17,8 +17,10 @@ const AUTO_TRADFI_STRATEGIES = ['breakout', 'breakdown', 'volume_divergence']
 let _indicatorWorker = null
 let _indicatorSeq = 0
 const _indicatorPending = new Map()
-let _codexQueue = Promise.resolve()
+const _codexPending = []
+let _codexRunning = false
 const _cancelledCodexJobs = new Set()
+const _codexInFlightByKey = new Map()
 
 function codexJobLog() {
   const items = config.loadOperationalData('aiJobs')
@@ -30,7 +32,53 @@ function saveCodexJob(job) {
   config.saveOperationalData('aiJobs', next)
 }
 
+function crc32(buffer) {
+  let crc = 0xffffffff
+  for (const byte of buffer) {
+    crc ^= byte
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1))
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function createStoredZip(entries) {
+  const locals = []
+  const centrals = []
+  let offset = 0
+  for (const [name, content] of entries) {
+    const nameBuffer = Buffer.from(name, 'utf8')
+    const data = Buffer.from(content, 'utf8')
+    const crc = crc32(data)
+    const local = Buffer.alloc(30)
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6)
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(nameBuffer.length, 26)
+    locals.push(local, nameBuffer, data)
+    const central = Buffer.alloc(46)
+    central.writeUInt32LE(0x02014b50, 0); central.writeUInt16LE(20, 4); central.writeUInt16LE(20, 6); central.writeUInt16LE(0x800, 8)
+    central.writeUInt32LE(crc, 16); central.writeUInt32LE(data.length, 20); central.writeUInt32LE(data.length, 24); central.writeUInt16LE(nameBuffer.length, 28); central.writeUInt32LE(offset, 42)
+    centrals.push(central, nameBuffer)
+    offset += local.length + nameBuffer.length + data.length
+  }
+  const centralSize = centrals.reduce((sum, buffer) => sum + buffer.length, 0)
+  const end = Buffer.alloc(22)
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10)
+  end.writeUInt32LE(centralSize, 12); end.writeUInt32LE(offset, 16)
+  return Buffer.concat([...locals, ...centrals, end])
+}
+
+function sanitizeDiagnostics(value, key = '') {
+  if (/token|secret|password|webhook|chatid|api.?key/i.test(key)) return '[redacted]'
+  if (Array.isArray(value)) return value.slice(0, 100).map(item => sanitizeDiagnostics(item))
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([childKey, child]) => [childKey, sanitizeDiagnostics(child, childKey)]))
+  if (typeof value === 'string') return value.replace(/C:\\Users\\[^\\\s]+/gi, '%USERPROFILE%')
+  return value
+}
+
 function enqueueCodexJob(type, payload, runner) {
+  const candidateKeys = (payload?.candidates ?? []).map(item => item?.key ?? item?.symbol).filter(Boolean).sort().join(',')
+  const dedupeKey = `${type}:${payload?.scope ?? ''}:${candidateKeys}`
+  const existing = _codexInFlightByKey.get(dedupeKey)
+  if (existing) return existing.then(result => ({ ...result, deduplicated: true }))
   const job = {
     id: `ai-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     type,
@@ -58,9 +106,36 @@ function enqueueCodexJob(type, payload, runner) {
     })
     return { ...result, jobId: job.id }
   }
-  const queued = _codexQueue.catch(() => {}).then(execute)
-  _codexQueue = queued.catch(() => {})
+  let resolveQueued
+  let rejectQueued
+  const queued = new Promise((resolve, reject) => { resolveQueued = resolve; rejectQueued = reject })
+  _codexPending.push({
+    execute,
+    resolve: resolveQueued,
+    reject: rejectQueued,
+    priority: payload?.requestMode === 'auto' ? 0 : 10,
+    queuedAt: job.queuedAt,
+  })
+  _codexInFlightByKey.set(dedupeKey, queued)
+  queued.finally(() => {
+    if (_codexInFlightByKey.get(dedupeKey) === queued) _codexInFlightByKey.delete(dedupeKey)
+  }).catch(() => {})
+  drainCodexQueue()
   return queued
+}
+
+async function drainCodexQueue() {
+  if (_codexRunning) return
+  _codexRunning = true
+  try {
+    while (_codexPending.length) {
+      _codexPending.sort((a, b) => b.priority - a.priority || a.queuedAt - b.queuedAt)
+      const task = _codexPending.shift()
+      try { task.resolve(await task.execute()) } catch (error) { task.reject(error) }
+    }
+  } finally {
+    _codexRunning = false
+  }
 }
 
 function makeId() {
@@ -236,6 +311,99 @@ exports.register = (ipcMain) => {
   ipcMain.handle('signalReplay:history', () => config.loadSignalReplayHistory())
   ipcMain.handle('operational:load', (_, key) => config.loadOperationalData(key))
   ipcMain.handle('operational:save', (_, { key, value }) => config.saveOperationalData(key, value))
+  ipcMain.handle('companyEvents:syncSec', async (_, { symbols = [], userAgent = '', days = 90 } = {}) => {
+    const requested = [...new Set(symbols.map(value => String(value).trim().toUpperCase()).filter(Boolean))].slice(0, 20)
+    if (!requested.length) return { ok: true, events: [], missing: [] }
+    if (!/@/.test(userAgent)) throw new Error('SEC User-Agent 需要包含有效联系邮箱')
+    const headers = { 'User-Agent': String(userAgent).slice(0, 160), Accept: 'application/json' }
+    const tickerResponse = await fetch('https://www.sec.gov/files/company_tickers.json', { headers })
+    if (!tickerResponse.ok) throw new Error(`SEC ticker 映射请求失败：HTTP ${tickerResponse.status}`)
+    const tickerRows = Object.values(await tickerResponse.json())
+    const byTicker = new Map(tickerRows.map(row => [String(row.ticker).toUpperCase(), row]))
+    const cutoff = Date.now() - Math.max(7, Math.min(365, Number(days) || 90)) * 24 * 60 * 60 * 1000
+    const acceptedForms = new Set(['8-K', '8-K/A', '10-Q', '10-Q/A', '10-K', '10-K/A', '6-K', '6-K/A'])
+    const events = []
+    const missing = []
+    for (const symbol of requested) {
+      const company = byTicker.get(symbol)
+      if (!company) { missing.push(symbol); continue }
+      const cik = String(company.cik_str).padStart(10, '0')
+      const response = await fetch(`https://data.sec.gov/submissions/CIK${cik}.json`, { headers })
+      if (!response.ok) { missing.push(symbol); continue }
+      const data = await response.json()
+      const recent = data.filings?.recent ?? {}
+      for (let index = 0; index < (recent.form?.length ?? 0); index++) {
+        const form = recent.form[index]
+        const filedAt = Date.parse(`${recent.filingDate?.[index]}T12:00:00Z`)
+        if (!acceptedForms.has(form) || !Number.isFinite(filedAt) || filedAt < cutoff) continue
+        const accession = recent.accessionNumber[index]
+        const accessionCompact = String(accession).replace(/-/g, '')
+        const primaryDocument = recent.primaryDocument?.[index]
+        events.push({
+          id: `sec:${accession}`, underlyingKey: `equity:${symbol}`, symbol, cik,
+          eventType: form.startsWith('10-Q') || form.startsWith('10-K') ? 'financial_filing' : 'material_filing',
+          form, title: `${form} · ${company.title}`, announcedAt: filedAt, effectiveAt: filedAt,
+          severity: form.startsWith('8-K') || form.startsWith('6-K') ? 'caution' : 'info',
+          source: 'sec', sourceId: accession, confirmed: true,
+          url: `https://www.sec.gov/Archives/edgar/data/${Number(cik)}/${accessionCompact}/${primaryDocument}`,
+          details: recent.primaryDocDescription?.[index] || form,
+        })
+      }
+    }
+    const existing = config.loadOperationalData('companyEvents') ?? []
+    const merged = [...events, ...existing.filter(item => !events.some(next => next.id === item.id))]
+      .sort((a, b) => (b.announcedAt ?? 0) - (a.announcedAt ?? 0)).slice(0, 2000)
+    config.saveOperationalData('companyEvents', merged)
+    return { ok: true, events: merged, added: events.length, missing }
+  })
+  ipcMain.handle('companyEvents:syncEarnings', async (_, { symbols = [], apiKey = '' } = {}) => {
+    const requested = new Set(symbols.map(value => String(value).trim().toUpperCase()).filter(Boolean).slice(0, 100))
+    if (!requested.size) return { ok: true, events: config.loadOperationalData('companyEvents') ?? [], added: 0 }
+    if (!String(apiKey).trim()) throw new Error('请填写 Alpha Vantage API Key')
+    const url = new URL('https://www.alphavantage.co/query')
+    url.searchParams.set('function', 'EARNINGS_CALENDAR')
+    url.searchParams.set('horizon', '3month')
+    url.searchParams.set('apikey', String(apiKey).trim())
+    const response = await fetch(url, { headers: { Accept: 'text/csv' } })
+    if (!response.ok) throw new Error(`财报日历请求失败：HTTP ${response.status}`)
+    const text = await response.text()
+    if (/^(Information|Error Message|Note)/i.test(text.trim())) throw new Error(text.trim().slice(0, 240))
+    const parseCsvLine = line => {
+      const values = []; let value = ''; let quoted = false
+      for (let index = 0; index < line.length; index++) {
+        const char = line[index]
+        if (char === '"' && quoted && line[index + 1] === '"') { value += '"'; index++; continue }
+        if (char === '"') { quoted = !quoted; continue }
+        if (char === ',' && !quoted) { values.push(value); value = ''; continue }
+        value += char
+      }
+      values.push(value); return values
+    }
+    const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean)
+    const headers = parseCsvLine(lines.shift() ?? '').map(value => value.trim())
+    const events = lines.map(parseCsvLine).map(values => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ''])))
+      .filter(row => requested.has(String(row.symbol).toUpperCase()))
+      .flatMap(row => {
+        const symbol = String(row.symbol).toUpperCase()
+        const reportDate = Date.parse(`${row.reportDate || row.date}T12:00:00Z`)
+        if (!Number.isFinite(reportDate)) return []
+        const session = /before/i.test(row.reportTime) ? 'before_market' : /after/i.test(row.reportTime) ? 'after_market' : 'unknown'
+        return [{
+          id: `alphavantage:earnings:${symbol}:${row.reportDate || row.date}`,
+          underlyingKey: `equity:${symbol}`, symbol, eventType: 'earnings',
+          title: `${symbol} 财报日历`, announcedAt: Date.now(), effectiveAt: reportDate,
+          session, fiscalDateEnding: row.fiscalDateEnding || null,
+          estimate: row.estimate || null, currency: row.currency || null,
+          severity: 'caution', source: 'alphavantage', sourceId: `${symbol}:${row.reportDate || row.date}`,
+          confirmed: false, details: `预计财报日 ${row.reportDate || row.date}${session === 'unknown' ? '' : ` · ${session}`}`,
+        }]
+      })
+    const existing = config.loadOperationalData('companyEvents') ?? []
+    const merged = [...events, ...existing.filter(item => !events.some(next => next.id === item.id))]
+      .sort((a, b) => (b.effectiveAt ?? b.announcedAt ?? 0) - (a.effectiveAt ?? a.announcedAt ?? 0)).slice(0, 2000)
+    config.saveOperationalData('companyEvents', merged)
+    return { ok: true, events: merged, added: events.length }
+  })
   ipcMain.handle('settings:cleanupInstallers', () => cleanupOldInstallers())
 
   ipcMain.handle('settings:exportConfig', async (event) => {
@@ -247,6 +415,29 @@ exports.register = (ipcMain) => {
     })
     if (result.canceled || !result.filePath) return { canceled: true }
     fs.writeFileSync(result.filePath, JSON.stringify(config.exportUserConfig(), null, 2), 'utf8')
+    return { ok: true, filePath: result.filePath }
+  })
+
+  ipcMain.handle('settings:exportDiagnostics', async (event, rendererData = {}) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const result = await dialog.showSaveDialog(win, {
+      title: '导出脱敏诊断包',
+      defaultPath: `RSI-inspection-diagnostics-${new Date().toISOString().slice(0, 10)}.zip`,
+      filters: [{ name: 'ZIP', extensions: ['zip'] }],
+    })
+    if (result.canceled || !result.filePath) return { canceled: true }
+    const summary = sanitizeDiagnostics({
+      exportedAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+      diagnostics: config.getDiagnostics(),
+      jobs: codexJobLog().slice(0, 30),
+      signalHunter: rendererData,
+    })
+    const readme = 'RSI-inspection 脱敏诊断包\n不包含令牌、Webhook、密码、完整用户路径或原始行情数据。\n'
+    fs.writeFileSync(result.filePath, createStoredZip([
+      ['README.txt', readme],
+      ['diagnostics.json', JSON.stringify(summary, null, 2)],
+    ]))
     return { ok: true, filePath: result.filePath }
   })
 
@@ -289,8 +480,12 @@ exports.register = (ipcMain) => {
     return enqueueCodexJob('review', payload, () => codexReview.runReview(payload, config.loadSettings()))
   })
 
-  ipcMain.handle('codex:runScreen', async (_, payload) => {
-    return enqueueCodexJob('screen', payload, () => codexReview.runScreen(payload, config.loadSettings()))
+  ipcMain.handle('codex:runScreen', async (event, payload) => {
+    return enqueueCodexJob('screen', payload, () => codexReview.runScreen(
+      payload,
+      config.loadSettings(),
+      progress => event.sender.send('codex:screenProgress', progress),
+    ))
   })
 
   ipcMain.handle('codex:runLaunchReview', async (_, payload) => {
@@ -309,6 +504,9 @@ exports.register = (ipcMain) => {
     return enqueueCodexJob('alert-plan', payload, () => codexReview.runAlertPlan(payload, config.loadSettings()))
   })
   ipcMain.handle('codex:jobs', () => codexJobLog())
+  ipcMain.handle('codex:screenRuntime', () => codexReview.getScreenRuntimeState(config.loadSettings()))
+  ipcMain.handle('codex:resetScreenRuntime', (_, scope) => codexReview.resetScreenRuntime(scope))
+  ipcMain.handle('codex:cleanupScreenRuns', (_, options) => codexReview.cleanupScreenRuns(options))
   ipcMain.handle('codex:cancelJobs', () => {
     const jobs = codexJobLog()
     for (const job of jobs) if (job.status === 'queued' || job.status === 'running') _cancelledCodexJobs.add(job.id)
@@ -323,6 +521,12 @@ exports.register = (ipcMain) => {
     if (!target) return { ok: false, error: 'Missing path' }
     const result = await shell.openPath(target)
     return result ? { ok: false, error: result } : { ok: true }
+  })
+  ipcMain.handle('shell:openExternal', async (_, target) => {
+    const url = new URL(String(target || ''))
+    if (url.protocol !== 'https:' || !['www.sec.gov', 'sec.gov'].includes(url.hostname)) throw new Error('只允许打开 SEC HTTPS 链接')
+    await shell.openExternal(url.toString())
+    return { ok: true }
   })
 
   // Streaming: returns immediately, pushes chunks via event as each asset finishes
@@ -910,7 +1114,7 @@ function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, cand
   const ranked = [...candidates].sort((a, b) => b.score.total - a.score.total)
   const accepted = ranked
     .filter(c => !c.rejected)
-  const primary = accepted[0] ?? ranked[0]
+  const primary = accepted.find(candidate => candidate.executionEligible) ?? accepted[0] ?? ranked[0]
   let shadowComparison = null
   if (parameterMode === 'shadow') {
     const shadowProfile = signalHunterParameterProfile(asset, quoteVolume24h, 'v2')
@@ -984,6 +1188,8 @@ function signalHunterStructureSnapshot(signal) {
     marketRegime: signal.marketRegime,
     parameterProfile: signal.parameterProfile,
     entryTouched: signal.entryTouched,
+    executionEligible: Boolean(signal.executionEligible),
+    executionTier: signal.executionTier ?? 'observe',
   }
 }
 
@@ -1341,10 +1547,16 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
   )).toFixed(1))
   if (total < 6) return reject('最终评分不足', { setup, setupLabel, score: { total, chart, data, risk: riskScore, rr: rrScore, rewardRisk: Number(rewardRisk.toFixed(2)) }, reasons })
 
-  const status = risk >= 4 ? 'risk'
-    : triggered ? 'triggered'
-      : nearEntry ? 'armed'
-        : 'wait_entry'
+  // The broader structure detector remains visible, but only trend-aligned EMA
+  // pullbacks enter the executable/review cohort. Local cache replay showed the
+  // range/retest cohort was the main source of false entries.
+  const executionEligible = trendSetup && marketRegime === 'trend' && slopeAligned
+  if (!executionEligible) riskFlags.push('观察级结构：等待趋势与EMA回踩同向')
+  const status = !executionEligible ? 'watch'
+    : risk >= 4 ? 'risk'
+      : triggered ? 'triggered'
+        : nearEntry ? 'armed'
+          : 'wait_entry'
 
   return {
     status,
@@ -1402,6 +1614,8 @@ function evaluateSignalHunterTimeframe({ side = 'long', tf, price, change24h, qu
     marketRegime,
     parameterProfile: parameterProfile?.key ?? 'default',
     entryTouched,
+    executionEligible,
+    executionTier: executionEligible ? 'strict' : 'observe',
     rewardRisk: Number(rewardRisk.toFixed(2)),
     rejectReasons: [],
   }
@@ -1436,7 +1650,7 @@ function runSignalHunterReplay(asset, timeframe, candles, executionNotional = 50
       marketSession: 'regular',
       parameterProfile: profile,
       executionNotional,
-    })).filter(item => item && !item.rejected).sort((a, b) => b.score.total - a.score.total)
+    })).filter(item => item && !item.rejected && item.executionEligible).sort((a, b) => b.score.total - a.score.total)
     const plan = candidates[0]
     if (!plan) {
       index += 1
@@ -1483,6 +1697,15 @@ function runSignalHunterReplay(asset, timeframe, candles, executionNotional = 50
       setup: plan.setup,
       marketRegime: plan.marketRegime,
       parameterProfile: plan.parameterProfile,
+      score: plan.score?.total ?? null,
+      rewardRisk: plan.rewardRisk ?? null,
+      supportTouches: plan.supportTouches ?? null,
+      resistanceTouches: plan.resistanceTouches ?? null,
+      ema21SlopePct: plan.ema21SlopePct ?? null,
+      volumeRatio: plan.volumeRatio ?? null,
+      compression: Boolean(plan.compression),
+      atrExpansion: plan.atrExpansion ?? null,
+      efficiencyRatio: plan.efficiencyRatio ?? null,
       detectedAt: candleTimestamp(candles[index]),
       enteredAt: enteredAtIndex == null ? null : candleTimestamp(candles[enteredAtIndex]),
       finishedAt: candleTimestamp(candles[finishedAtIndex]),
@@ -1992,4 +2215,7 @@ function detectDivergence(closes, rsiSeries) {
 exports.__test = {
   signalHunterParameterProfile,
   replayEntryConfirmed,
+  runSignalHunterReplay,
+  createStoredZip,
+  sanitizeDiagnostics,
 }

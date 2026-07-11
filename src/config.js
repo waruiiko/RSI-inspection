@@ -21,6 +21,7 @@ const OPERATIONAL_FILES = {
   marketChat: 'market-chat.json',
   alertStates: 'alert-states.json',
   aiJobs: 'ai-jobs.json',
+  companyEvents: 'company-events.json',
 }
 function operationalFilePath(key) {
   const name = OPERATIONAL_FILES[key]
@@ -64,6 +65,16 @@ const SETTINGS_DEFAULTS = {
   autoAiLimit:      20,
   autoAiStartupDelay: 10,
   shAiInterval:     30,
+  shAiEnabled:      true,
+  shAiShadowEnabled:false,
+  shAiProfile:      'stable',
+  shAiBatchSize:    18,
+  shAiConcurrency:  1,
+  shAiCacheMinutes: 120,
+  shAiRetries:      1,
+  shAiHourlyBatches: 12,
+  shAiHourlyCandidates: 240,
+  shAiHourlyMinutes: 30,
   shExecutionNotional: 5000,
   shParameterMode: 'stable',
   shNightlyReplayEnabled: true,

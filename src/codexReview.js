@@ -3,7 +3,19 @@ const os = require('os')
 const path = require('path')
 const { spawn } = require('child_process')
 let _activeChild = null
+const _activeChildren = new Set()
 let _cancelRequested = false
+const _screenNarrativeCache = new Map()
+const SCREEN_BATCH_SIZE = 24
+const SCREEN_CACHE_TTL = 90 * 60 * 1000
+const _screenCircuit = { failures: 0, openUntil: 0, lastProbeAt: 0 }
+const _screenBudgetHistory = []
+const SCREEN_VERSIONS = Object.freeze({
+  pipeline: 'sh-ai-v3',
+  schema: 'narrative-v2',
+  prompt: 'narrative-v2',
+  strategy: 'strict-entry-v2',
+})
 
 function getReviewRoot() {
   return path.join(os.homedir(), '.rsi-inspection', 'codex-reviews')
@@ -127,7 +139,7 @@ function buildPrompt(payload) {
 
 function spawnCodex(command, args, input, cwd) {
   return new Promise(resolve => {
-    _cancelRequested = false
+    if (!_activeChildren.size) _cancelRequested = false
     const child = spawn(command, args, {
       cwd,
       windowsHide: true,
@@ -135,6 +147,7 @@ function spawnCodex(command, args, input, cwd) {
       shell: process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(command),
     })
     _activeChild = child
+    _activeChildren.add(child)
 
     let stdout = ''
     let stderr = ''
@@ -144,10 +157,11 @@ function spawnCodex(command, args, input, cwd) {
       settled = true
       clearTimeout(timeout)
       if (_activeChild === child) _activeChild = null
+      _activeChildren.delete(child)
       resolve(_cancelRequested ? { ...result, ok: false, cancelled: true, stderr: 'Codex task cancelled' } : result)
     }
     const timeout = setTimeout(() => {
-      child.kill()
+      terminateChild(child)
       finish({ ok: false, exitCode: null, stdout, stderr: `${stderr}\nCodex task timed out after 4 minutes`.trim(), timedOut: true })
     }, 4 * 60 * 1000)
 
@@ -167,10 +181,22 @@ function spawnCodex(command, args, input, cwd) {
   })
 }
 
+function terminateChild(child) {
+  if (!child?.pid) return
+  if (process.platform === 'win32') {
+    try {
+      const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true, stdio: 'ignore' })
+      killer.unref()
+      return
+    } catch {}
+  }
+  try { child.kill('SIGKILL') } catch {}
+}
+
 function cancelActive() {
-  if (!_activeChild) return false
+  if (!_activeChildren.size) return false
   _cancelRequested = true
-  _activeChild.kill()
+  for (const child of _activeChildren) terminateChild(child)
   return true
 }
 
@@ -227,6 +253,16 @@ async function runReview(payload, settings = {}) {
 }
 
 function buildSignalHunterScreenPrompt(payload) {
+  return [
+    '你是 Signal Hunter 的结构说明助手。本地程序已经决定方向、周期、关键位和执行状态。',
+    '你只能为每个候选补充简短中文结构摘要、风险说明和标签，不得改变 deterministicPlan。',
+    '严格输出符合 Schema 的 JSON，不要 Markdown，不要代码块，不要调用工具。',
+    '每个输入 key 必须且只能返回一次。摘要最多 80 字，风险最多 50 字，标签最多 4 个。',
+    '',
+    '输入 JSON：',
+    JSON.stringify(payload, null, 2),
+  ].join('\n')
+  /* Legacy prompt retained below for compatibility reference. */
   return [
     '你是 RSI-inspection 的 Signal Hunter 形态识别助手。',
     '任务：本地规则已经决定是否存在结构、方向、周期和关键位。你只负责解释 deterministicPlan、补充风险叙事并给出辅助评分，不得重写交易计划。',
@@ -289,7 +325,7 @@ function buildSignalHunterScreenPrompt(payload) {
 }
 
 function buildScreenPrompt(payload) {
-  if (String(payload?.scope || '').startsWith('signal-hunter')) return buildSignalHunterScreenPrompt(payload)
+  if (String(payload?.scope || '').startsWith('signal-hunter')) return buildSignalHunterScreenPrompt(screenPromptPayload(payload))
   return [
     '你是 RSI-inspection 的市场候选筛选助手。',
     '你的任务不是给买卖建议，也不是预测价格；你只负责把本地规则筛出来的候选进一步分类，帮助用户减少噪音。',
@@ -329,18 +365,87 @@ function buildScreenPrompt(payload) {
   ].join('\n')
 }
 
+function buildShadowScreenPrompt(payload) {
+  return [
+    '你是Signal Hunter的影子叙述评估器。执行结构由本地程序决定，你不得修改。',
+    '请用更具体、少套话的中文说明当前结构证据、最大不确定性和下一项观察变量。',
+    '严格输出Schema JSON；每个key只返回一次；不得出现买卖或下单指令。',
+    '输入JSON：',
+    JSON.stringify(payload, null, 2),
+  ].join('\n')
+}
+
+function screenPromptPayload(payload) {
+  if (!String(payload?.scope || '').startsWith('signal-hunter')) return payload
+  return {
+    scope: payload.scope,
+    createdAt: payload.createdAt,
+    updatedAt: payload.updatedAt,
+    note: payload.note,
+    candidates: (payload.candidates ?? []).map(candidate => ({
+      key: candidate.key,
+      symbol: candidate.symbol,
+      apiSymbol: candidate.apiSymbol,
+      source: candidate.source,
+      type: candidate.type,
+      price: candidate.price,
+      change24h: candidate.change24h,
+      turnover: candidate.turnover,
+      preferredTimeframe: candidate.preferredTimeframe,
+      rsi: candidate.rsi,
+      signalScore: candidate.signalScore,
+      volumeSignal: candidate.volumeSignal,
+      derivatives: candidate.derivatives ? {
+        oiChange1h: candidate.derivatives.oiChange1h,
+        oiChange4h: candidate.derivatives.oiChange4h,
+        oiChange24h: candidate.derivatives.oiChange24h,
+        fundingRate: candidate.derivatives.fundingRate,
+        priceChange1h: candidate.derivatives.priceChange1h,
+        priceChange4h: candidate.derivatives.priceChange4h,
+        stage: candidate.derivatives.stage,
+        label: candidate.derivatives.label,
+        reasons: candidate.derivatives.reasons,
+      } : null,
+      liquidity: candidate.liquidity ? {
+        spreadPct: candidate.liquidity.spreadPct,
+        topBookNotional: candidate.liquidity.topBookNotional,
+        source: candidate.liquidity.source,
+      } : null,
+      marketSession: candidate.marketSession,
+      dataQuality: candidate.dataQuality,
+      deterministicPlan: candidate.deterministicPlan,
+      priority: candidate.priority,
+    })),
+  }
+}
+
 function extractJson(text) {
-  const raw = String(text || '').trim()
+  const raw = String(text || '').replace(/^\uFEFF/, '').trim()
   if (!raw) return null
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i)
-  const body = fenced ? fenced[1].trim() : raw
-  try {
-    return JSON.parse(body)
-  } catch (_) {
-    const start = body.indexOf('{')
-    const end = body.lastIndexOf('}')
-    if (start >= 0 && end > start) {
-      try { return JSON.parse(body.slice(start, end + 1)) } catch (_) {}
+  const candidates = [raw, ...[...raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map(match => match[1].trim())]
+  for (const body of candidates) {
+    try { return JSON.parse(body) } catch (_) {}
+    for (let start = 0; start < body.length; start += 1) {
+      if (body[start] !== '{' && body[start] !== '[') continue
+      const stack = []; let quoted = false; let escaped = false
+      for (let index = start; index < body.length; index += 1) {
+        const char = body[index]
+        if (quoted) {
+          if (escaped) escaped = false
+          else if (char === '\\') escaped = true
+          else if (char === '"') quoted = false
+          continue
+        }
+        if (char === '"') { quoted = true; continue }
+        if (char === '{' || char === '[') stack.push(char)
+        else if (char === '}' || char === ']') {
+          const open = stack.pop()
+          if ((open === '{' && char !== '}') || (open === '[' && char !== ']')) break
+          if (!stack.length) {
+            try { return JSON.parse(body.slice(start, index + 1)) } catch (_) { break }
+          }
+        }
+      }
     }
   }
   return null
@@ -359,37 +464,13 @@ function screenOutputSchema(scope) {
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['key', 'symbol', 'status', 'side', 'timeframe', 'entryMode', 'setup', 'setupLabel', 'entryPrice', 'confirmPrice', 'stopLoss', 'targets', 'rewardRisk', 'score', 'reasons', 'riskFlags', 'narrativeSummary', 'narrativeTags', 'rejectReasons'],
+            required: ['key', 'symbol', 'narrativeSummary', 'riskNarrative', 'narrativeTags'],
             properties: {
               key: { type: 'string' },
               symbol: { type: 'string' },
-              status: { type: 'string', enum: ['armed', 'wait_entry', 'triggered', 'watch', 'risk', 'rejected'] },
-              side: { type: 'string', enum: ['long', 'short'] },
-              timeframe: { type: 'string', enum: ['1h', '4h'] },
-              entryMode: { type: 'string', enum: ['pullback', 'retest', 'base', 'breakout', 'breakdown'] },
-              setup: { type: 'string' },
-              setupLabel: { type: 'string' },
-              entryPrice: { type: 'number' },
-              confirmPrice: { type: 'number' },
-              stopLoss: { type: 'number' },
-              targets: { type: 'array', items: { type: 'number' } },
-              rewardRisk: { type: 'number' },
-              score: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['total', 'chart', 'data', 'risk'],
-                properties: {
-                  total: { type: 'number' },
-                  chart: { type: 'number' },
-                  data: { type: 'number' },
-                  risk: { type: 'number' },
-                },
-              },
-              reasons: { type: 'array', items: { type: 'string' } },
-              riskFlags: { type: 'array', items: { type: 'string' } },
               narrativeSummary: { type: 'string' },
+              riskNarrative: { type: 'string' },
               narrativeTags: { type: 'array', items: { type: 'string' } },
-              rejectReasons: { type: 'array', items: { type: 'string' } },
             },
           },
         },
@@ -447,7 +528,187 @@ function deterministicScreenFallback(payload, reason) {
   }
 }
 
-async function runScreen(payload, settings = {}) {
+function screenCandidateSignature(candidate) {
+  const compactNumber = value => Number.isFinite(Number(value)) ? Number(Number(value).toPrecision(4)) : null
+  const plan = candidate.deterministicPlan
+  return JSON.stringify({
+    key: candidate.key,
+    price: compactNumber(candidate.price),
+    rsi: Object.fromEntries(Object.entries(candidate.rsi ?? {}).map(([key, value]) => [key, Math.round(Number(value) * 10) / 10])),
+    derivatives: candidate.derivatives && {
+      oiChange1h: compactNumber(candidate.derivatives.oiChange1h),
+      oiChange4h: compactNumber(candidate.derivatives.oiChange4h),
+      fundingRate: compactNumber(candidate.derivatives.fundingRate),
+    },
+    plan: plan && {
+      status: plan.status, side: plan.side, timeframe: plan.timeframe, entryMode: plan.entryMode,
+      setup: plan.setup, entryPrice: compactNumber(plan.entryPrice), stopLoss: compactNumber(plan.stopLoss),
+      targets: (plan.targets ?? []).map(compactNumber), executionEligible: plan.executionEligible,
+    },
+  })
+}
+
+function persistedNarrativeItem(candidate, previousRunAt, now = Date.now(), ttlMs = SCREEN_CACHE_TTL, versions = null) {
+  const prior = candidate.localSignalHunter
+  const plan = candidate.deterministicPlan
+  if (!sameScreenVersions(versions) || !prior?.narrativeSummary || !plan || now - Number(previousRunAt || 0) >= ttlMs) return null
+  const sameIdentity = prior.side === plan.side && prior.timeframe === plan.timeframe &&
+    prior.entryMode === plan.entryMode && prior.setup === plan.setup
+  const priorEntry = Number(prior.entryPrice)
+  const nextEntry = Number(plan.entryPrice)
+  const entryDrift = Number.isFinite(priorEntry) && Number.isFinite(nextEntry) && priorEntry !== 0
+    ? Math.abs(nextEntry - priorEntry) / Math.abs(priorEntry)
+    : Infinity
+  if (!sameIdentity || entryDrift > 0.0025) return null
+  return {
+    key: candidate.key, symbol: candidate.symbol,
+    narrativeSummary: prior.narrativeSummary,
+    riskNarrative: prior.riskNarrative ?? '',
+    narrativeTags: prior.narrativeTags ?? [],
+  }
+}
+
+function chunkScreenCandidates(candidates, size = SCREEN_BATCH_SIZE) {
+  const batches = []
+  for (let i = 0; i < candidates.length; i += size) batches.push(candidates.slice(i, i + size))
+  return batches
+}
+
+function screenRuntimeOptions(settings = {}) {
+  const profile = settings.shAiProfile === 'fast' ? 'fast' : settings.shAiProfile === 'custom' ? 'custom' : 'stable'
+  const preset = profile === 'fast'
+    ? { batchSize: 24, concurrency: 2, cacheMinutes: 60, retries: 1 }
+    : { batchSize: 18, concurrency: 1, cacheMinutes: 120, retries: 1 }
+  const budget = {
+    hourlyBatches: Math.max(1, Number(settings.shAiHourlyBatches) || 12),
+    hourlyCandidates: Math.max(10, Number(settings.shAiHourlyCandidates) || 240),
+    hourlyMinutes: Math.max(5, Number(settings.shAiHourlyMinutes) || 30),
+  }
+  if (profile !== 'custom') return { profile, ...preset, ...budget }
+  return {
+    profile,
+    batchSize: Math.max(6, Math.min(30, Number(settings.shAiBatchSize) || 18)),
+    concurrency: Math.max(1, Math.min(2, Number(settings.shAiConcurrency) || 1)),
+    cacheMinutes: Math.max(15, Math.min(240, Number(settings.shAiCacheMinutes) || 120)),
+    retries: Math.max(0, Math.min(2, Number(settings.shAiRetries) || 1)),
+    ...budget,
+  }
+}
+
+function screenBudgetRemaining(options, now = Date.now()) {
+  while (_screenBudgetHistory.length && now - _screenBudgetHistory[0].at >= 60 * 60 * 1000) _screenBudgetHistory.shift()
+  const used = _screenBudgetHistory.reduce((sum, item) => ({
+    batches: sum.batches + item.batches,
+    candidates: sum.candidates + item.candidates,
+    durationMs: sum.durationMs + item.durationMs,
+  }), { batches: 0, candidates: 0, durationMs: 0 })
+  return {
+    batches: Math.max(0, options.hourlyBatches - used.batches),
+    candidates: Math.max(0, options.hourlyCandidates - used.candidates),
+    durationMs: Math.max(0, options.hourlyMinutes * 60 * 1000 - used.durationMs),
+    used,
+  }
+}
+
+function sameScreenVersions(value, expected = SCREEN_VERSIONS) {
+  return Object.entries(expected).every(([key, version]) => value?.[key] === version)
+}
+
+function prioritizeScreenCandidates(candidates) {
+  const statusWeight = { triggered: 0, armed: 1, wait_entry: 2, watch: 3, risk: 4, rejected: 5 }
+  return [...candidates].sort((a, b) => {
+    const ap = a.deterministicPlan ?? {}
+    const bp = b.deterministicPlan ?? {}
+    return Number(Boolean(bp.executionEligible)) - Number(Boolean(ap.executionEligible)) ||
+      (statusWeight[ap.status] ?? 9) - (statusWeight[bp.status] ?? 9) ||
+      Math.abs(Number(ap.distanceToEntryPct ?? 999)) - Math.abs(Number(bp.distanceToEntryPct ?? 999)) ||
+      Number(b.priority ?? 0) - Number(a.priority ?? 0)
+  })
+}
+
+function validNarrativeItem(item, expectedKeys) {
+  if (!item || !expectedKeys.has(item.key)) return false
+  const summary = String(item.narrativeSummary || '').trim()
+  const risk = String(item.riskNarrative || '').trim()
+  if (summary.length < 6 || risk.length < 4) return false
+  if (/买入|卖出|下单|做多|做空|止损/.test(`${summary} ${risk}`)) return false
+  const tags = Array.isArray(item.narrativeTags) ? item.narrativeTags.map(String) : []
+  return new Set(tags).size === tags.length
+}
+
+function classifyScreenFailure(result, output, parsed) {
+  if (result?.cancelled) return 'cancelled'
+  if (result?.timedOut) return 'timeout'
+  if (/schema|validation|does not match/i.test(String(result?.stderr || ''))) return 'schema_mismatch'
+  if (/unexpected end|truncat|\bEOF\b/i.test(String(result?.stderr || ''))) return 'truncated_output'
+  if (!result?.ok) return 'process_error'
+  if (!String(output || '').trim()) return 'empty_output'
+  if (!parsed && /[\[{]/.test(String(output)) && !/[\]}]\s*$/.test(String(output).trim())) return 'truncated_output'
+  if (!parsed) return 'invalid_json'
+  return ''
+}
+
+function canonicalScreenResult(payload, aiItems, diagnostics = {}) {
+  const byKey = new Map()
+  let duplicates = 0
+  for (const item of aiItems ?? []) {
+    const key = String(item?.key || '').trim()
+    if (!key) continue
+    if (byKey.has(key)) duplicates += 1
+    else byKey.set(key, item)
+  }
+  let missing = 0
+  const candidateKeys = new Set((payload.candidates ?? []).map(candidate => candidate.key))
+  const unexpected = [...byKey.keys()].filter(key => !candidateKeys.has(key)).length
+  const items = (payload.candidates ?? []).map(candidate => {
+    const ai = byKey.get(candidate.key)
+    if (!ai) missing += 1
+    const plan = candidate.deterministicPlan ?? {
+      status: 'rejected', side: 'long', timeframe: '1h', entryMode: 'pullback',
+      setup: 'ai_structure', setupLabel: '无本地结构', entryPrice: 0,
+      confirmPrice: 0, stopLoss: 0, targets: [], rewardRisk: 0,
+      score: { total: 0, chart: 0, data: 0, risk: 0 },
+      reasons: [], riskFlags: [], rejectReasons: ['本地规则没有形成可执行结构'],
+    }
+    return {
+      ...plan,
+      key: candidate.key,
+      symbol: candidate.symbol,
+      score: plan.score ?? { total: 0, chart: 0, data: 0, risk: 0 },
+      reasons: plan.reasons ?? [],
+      riskFlags: plan.riskFlags ?? [],
+      rejectReasons: plan.rejectReasons ?? [],
+      narrativeSummary: String(ai?.narrativeSummary ?? '').trim().slice(0, 160),
+      riskNarrative: String(ai?.riskNarrative ?? '').trim().slice(0, 100),
+      narrativeTags: Array.isArray(ai?.narrativeTags)
+        ? ai.narrativeTags.map(value => String(value).trim()).filter(Boolean).slice(0, 4)
+        : [],
+    }
+  })
+  return {
+    summary: diagnostics.degraded ? '部分AI说明不可用，已保留本地确定性结构。' : 'AI说明已完成，本地执行结构未被修改。',
+    items,
+    _meta: { ...diagnostics, missing, duplicates, unexpected },
+  }
+}
+
+async function runScreenBatch(target, payload, batchDir, schemaPath, promptBuilder = buildScreenPrompt) {
+  fs.mkdirSync(batchDir, { recursive: true })
+  const prompt = promptBuilder(payload)
+  const promptPath = path.join(batchDir, 'prompt.md')
+  const reportPath = path.join(batchDir, 'result.md')
+  fs.writeFileSync(promptPath, prompt, 'utf8')
+  const args = [
+    'exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only',
+    '--cd', batchDir, '--output-schema', schemaPath, '--output-last-message', reportPath, '-',
+  ]
+  const result = await spawnCodex(target.command, [...target.argsPrefix, ...args], prompt, batchDir)
+  const output = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, 'utf8') : ''
+  const parsed = extractJson(output)
+  return { result, output, parsed, failure: classifyScreenFailure(result, output, parsed), reportPath }
+}
+
+async function runScreen(payload, settings = {}, onProgress = () => {}) {
   const target = getCodexTarget(settings)
   const screenName = buildScreenName(payload)
   const screenDir = path.join(getScreenRoot(), screenName)
@@ -475,8 +736,11 @@ async function runScreen(payload, settings = {}) {
   ]
   const result = await spawnCodex(target.command, [...target.argsPrefix, ...args], prompt, screenDir)
 
-  if (!fs.existsSync(reportPath) && result.stdout.trim()) {
-    fs.writeFileSync(reportPath, result.stdout.trim(), 'utf8')
+  if (!fs.existsSync(reportPath)) {
+    const report = result.ok
+      ? result.stdout.trim()
+      : `Codex execution failed.\n${result.stderr || 'No model response was produced.'}`.trim()
+    if (report) fs.writeFileSync(reportPath, report, 'utf8')
   }
 
   const output = fs.existsSync(reportPath) ? fs.readFileSync(reportPath, 'utf8') : result.stdout
@@ -503,6 +767,234 @@ async function runScreen(payload, settings = {}) {
       ? 'AI 输出异常，已保留本地确定性信号；可打开 result.md 查看原文。'
       : 'Codex 输出不是可解析 JSON，请打开 result.md 查看原文。',
   }
+}
+
+async function runScreenBatched(payload, settings = {}, onProgress = () => {}) {
+  _cancelRequested = false
+  const target = getCodexTarget(settings)
+  const runVersions = { ...SCREEN_VERSIONS, model: settings.codexModel || 'default', cli: target.display }
+  const screenName = buildScreenName(payload)
+  const screenDir = path.join(getScreenRoot(), screenName)
+  const inputPath = path.join(screenDir, 'candidates.json')
+  const promptPath = path.join(screenDir, 'prompt.md')
+  const reportPath = path.join(screenDir, 'result.md')
+  const resultPath = path.join(screenDir, 'result.json')
+  const schemaPath = path.join(screenDir, 'schema.json')
+  fs.mkdirSync(screenDir, { recursive: true })
+  fs.writeFileSync(inputPath, JSON.stringify(payload, null, 2), 'utf8')
+  fs.writeFileSync(promptPath, buildScreenPrompt(screenPromptPayload(payload)), 'utf8')
+  fs.writeFileSync(schemaPath, JSON.stringify(screenOutputSchema(payload?.scope), null, 2), 'utf8')
+  const startedAt = Date.now()
+  const options = screenRuntimeOptions(settings)
+  const cacheTtlMs = options.cacheMinutes * 60 * 1000
+  const candidates = payload.candidates ?? []
+  const cachedItems = []
+  const pending = []
+  const dataFiltered = []
+  const refreshReasons = []
+  for (const candidate of candidates) {
+    const signature = screenCandidateSignature(candidate)
+    const cached = _screenNarrativeCache.get(candidate.key)
+    if (cached && sameScreenVersions(cached.versions, runVersions) && cached.signature === signature && startedAt - cached.at < cacheTtlMs) cachedItems.push(cached.item)
+    else {
+      const persisted = persistedNarrativeItem(candidate, payload.previousAiRunAt, startedAt, cacheTtlMs, payload.previousAiVersions && sameScreenVersions(payload.previousAiVersions, runVersions) ? runVersions : null)
+      if (persisted) cachedItems.push(persisted)
+      else {
+        if (candidate.dataQuality?.ok === false || !candidate.deterministicPlan) dataFiltered.push(candidate)
+        else pending.push(candidate)
+        refreshReasons.push({
+          key: candidate.key,
+          reason: !cached && !candidate.localSignalHunter?.narrativeSummary ? 'new_candidate'
+            : (cached && !sameScreenVersions(cached.versions, runVersions)) || !sameScreenVersions(payload.previousAiVersions, runVersions) ? 'version_changed'
+              : cached && startedAt - cached.at >= cacheTtlMs ? 'cache_expired'
+                : 'market_or_structure_changed',
+        })
+      }
+    }
+  }
+  const prioritized = prioritizeScreenCandidates(pending)
+  const adaptiveBatchSize = _screenCircuit.failures ? Math.max(6, Math.floor(options.batchSize / 2)) : options.batchSize
+  let queued = prioritized
+  const circuitOpen = startedAt < _screenCircuit.openUntil
+  const mayProbe = payload.healthProbe || startedAt - _screenCircuit.lastProbeAt >= 10 * 60 * 1000
+  if (circuitOpen) {
+    queued = mayProbe ? prioritized.slice(0, 4) : []
+    if (mayProbe) _screenCircuit.lastProbeAt = startedAt
+  }
+  const circuitQueued = [...queued]
+  const circuitDeferredCandidates = prioritized.slice(circuitQueued.length)
+  const budget = screenBudgetRemaining(options, startedAt)
+  const maxByBatches = budget.batches * adaptiveBatchSize
+  const allowedCandidates = Math.min(queued.length, budget.candidates, maxByBatches)
+  queued = budget.durationMs > 0 ? queued.slice(0, allowedCandidates) : []
+  const budgetDeferredCandidates = circuitQueued.slice(queued.length)
+  const deferredByBudget = budgetDeferredCandidates.length
+  const deferredByCircuit = circuitDeferredCandidates.length
+  const batches = chunkScreenCandidates(queued, adaptiveBatchSize)
+  const aiItems = [...cachedItems]
+  const failures = []
+  if (dataFiltered.length) failures.push({ label: 'data-quality', type: 'data_quality', count: dataFiltered.length, keys: dataFiltered.map(item => item.key) })
+  let retries = 0
+  let completed = cachedItems.length + dataFiltered.length
+  onProgress({
+    phase: 'start', completed, total: candidates.length, batch: 0, batches: batches.length, cached: cachedItems.length,
+    items: [
+      ...cachedItems.map(item => ({ key: item.key, status: 'cached' })),
+      ...queued.map(item => ({ key: item.key, status: 'queued' })),
+      ...dataFiltered.map(item => ({ key: item.key, status: 'data_blocked' })),
+    ],
+  })
+  const execute = async (batch, label, retriesLeft = options.retries) => {
+    if (_cancelRequested) return
+    const attempt = await runScreenBatch(target, screenPromptPayload({ ...payload, candidates: batch }), path.join(screenDir, label), schemaPath)
+    const expectedKeys = new Set(batch.map(candidate => candidate.key))
+    const keyCounts = new Map()
+    for (const item of attempt.parsed?.items ?? []) keyCounts.set(item?.key, (keyCounts.get(item?.key) ?? 0) + 1)
+    const validItems = (attempt.parsed?.items ?? []).filter(item => validNarrativeItem(item, expectedKeys) && keyCounts.get(item.key) === 1)
+    const validKeys = new Set(validItems.map(item => item.key))
+    aiItems.push(...validItems)
+    completed += validItems.length
+    const missingBatch = batch.filter(candidate => !validKeys.has(candidate.key))
+    if (validItems.length) onProgress({ phase: 'items', items: validItems.map(item => ({ key: item.key, status: 'completed' })) })
+    if (!missingBatch.length) return
+    if (retriesLeft > 0 && !attempt.result.cancelled) {
+      retries += 1
+      onProgress({ phase: 'items', items: missingBatch.map(item => ({ key: item.key, status: 'retrying' })) })
+      const retrySize = Math.max(1, Math.ceil(missingBatch.length / 2))
+      const retryBatches = chunkScreenCandidates(missingBatch, retrySize)
+      for (let i = 0; i < retryBatches.length; i += 1) await execute(retryBatches[i], `${label}-repair-${i + 1}`, retriesLeft - 1)
+      return
+    }
+    failures.push({ label, type: attempt.failure || (attempt.parsed ? 'narrative_quality' : 'schema_mismatch'), count: missingBatch.length, keys: missingBatch.map(item => item.key) })
+    onProgress({ phase: 'items', items: missingBatch.map(item => ({ key: item.key, status: 'degraded' })) })
+    completed += missingBatch.length
+  }
+  let nextBatch = 0
+  const worker = async () => {
+    while (!_cancelRequested) {
+      const index = nextBatch++
+      if (index >= batches.length) return
+      onProgress({ phase: 'batch', completed, total: candidates.length, batch: index + 1, batches: batches.length, cached: cachedItems.length, items: batches[index].map(item => ({ key: item.key, status: 'running' })) })
+      await execute(batches[index], `batch-${index + 1}`)
+      onProgress({ phase: 'batch-complete', completed, total: candidates.length, batch: index + 1, batches: batches.length, cached: cachedItems.length })
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(options.concurrency, Math.max(1, batches.length)) }, worker))
+  if (deferredByCircuit) {
+    failures.push({ label: 'circuit', type: 'circuit_open', count: deferredByCircuit, keys: circuitDeferredCandidates.map(item => item.key) })
+    completed += deferredByCircuit
+    onProgress({ phase: 'items', items: circuitDeferredCandidates.map(item => ({ key: item.key, status: 'circuit_deferred' })) })
+  }
+  if (deferredByBudget > 0) {
+    failures.push({ label: 'budget', type: 'budget_deferred', count: deferredByBudget, keys: budgetDeferredCandidates.map(item => item.key) })
+    completed += deferredByBudget
+    onProgress({ phase: 'items', items: budgetDeferredCandidates.map(item => ({ key: item.key, status: 'budget_deferred' })) })
+  }
+  const realFailures = failures.filter(item => !['circuit_open', 'budget_deferred', 'data_quality'].includes(item.type))
+  if (realFailures.length) {
+    _screenCircuit.failures += 1
+    if (_screenCircuit.failures >= 3) _screenCircuit.openUntil = Date.now() + 30 * 60 * 1000
+  } else if (batches.length) {
+    _screenCircuit.failures = 0
+    _screenCircuit.openUntil = 0
+  }
+  let shadow = null
+  if (settings.shAiShadowEnabled && !_cancelRequested && queued.length) {
+    const shadowCandidates = queued.slice(0, 4)
+    const shadowStartedAt = Date.now()
+    const shadowAttempt = await runScreenBatch(
+      target,
+      screenPromptPayload({ ...payload, candidates: shadowCandidates }),
+      path.join(screenDir, 'shadow-sample'),
+      schemaPath,
+      buildShadowScreenPrompt,
+    )
+    const expected = new Set(shadowCandidates.map(item => item.key))
+    const valid = (shadowAttempt.parsed?.items ?? []).filter(item => validNarrativeItem(item, expected))
+    shadow = {
+      promptVersion: 'narrative-shadow-v1',
+      samples: shadowCandidates.length,
+      valid: valid.length,
+      completeness: shadowCandidates.length ? Math.round(valid.length / shadowCandidates.length * 100) : 0,
+      durationMs: Date.now() - shadowStartedAt,
+      failure: shadowAttempt.failure || '',
+    }
+  }
+  const degraded = failures.length > 0
+  const parsed = canonicalScreenResult(payload, aiItems, {
+    degraded, cancelled: _cancelRequested, failures, retries,
+    cached: cachedItems.length, resumed: cachedItems.length, requested: queued.length, batches: batches.length,
+    profile: options.profile, batchSize: adaptiveBatchSize, concurrency: options.concurrency,
+    cacheLayers: { execution: candidates.length, narrative: cachedItems.length, marketFeatures: queued.length },
+    versions: runVersions,
+    snapshotId: payload.snapshotId ?? null,
+    refreshReasons,
+    shadow,
+    budget: { ...budget, deferred: Math.max(0, deferredByBudget) },
+    circuitOpen: Date.now() < _screenCircuit.openUntil, circuitFailures: _screenCircuit.failures,
+    durationMs: Date.now() - startedAt,
+  })
+  for (const candidate of candidates) {
+    const item = aiItems.find(value => value.key === candidate.key)
+    if (item) _screenNarrativeCache.set(candidate.key, { signature: screenCandidateSignature(candidate), item, at: Date.now(), versions: runVersions })
+  }
+  _screenBudgetHistory.push({ at: Date.now(), batches: batches.length + retries, candidates: queued.length, durationMs: Date.now() - startedAt })
+  fs.writeFileSync(resultPath, JSON.stringify(parsed, null, 2), 'utf8')
+  fs.writeFileSync(reportPath, JSON.stringify(failures.length ? { failures } : { ok: true, items: aiItems.length }, null, 2), 'utf8')
+  onProgress({ phase: _cancelRequested ? 'cancelled' : 'complete', completed, total: candidates.length, batch: batches.length, batches: batches.length, cached: cachedItems.length })
+  return {
+    ok: true,
+    cancelled: _cancelRequested,
+    degraded,
+    retryable: false,
+    screenName, screenDir, inputPath, promptPath, reportPath,
+    resultPath, result: parsed, cliPath: target.display,
+    diagnostics: parsed._meta,
+    versions: runVersions,
+    parseError: degraded ? `部分批次失败：${failures.map(item => `${item.type}(${item.count})`).join('、')}` : '',
+  }
+}
+
+function runScreenDispatch(payload, settings = {}, onProgress) {
+  return String(payload?.scope || '').startsWith('signal-hunter')
+    ? runScreenBatched(payload, settings, onProgress)
+    : runScreen(payload, settings)
+}
+
+function getScreenRuntimeState(settings = {}) {
+  const options = screenRuntimeOptions(settings)
+  let directories = []
+  try { directories = fs.readdirSync(getScreenRoot(), { withFileTypes: true }).filter(entry => entry.isDirectory()) } catch {}
+  return {
+    narrativeCache: _screenNarrativeCache.size,
+    activeProcesses: _activeChildren.size,
+    circuit: { ..._screenCircuit, remainingMs: Math.max(0, _screenCircuit.openUntil - Date.now()) },
+    budget: screenBudgetRemaining(options),
+    queuedTasks: directories.length,
+    versions: SCREEN_VERSIONS,
+  }
+}
+
+function resetScreenRuntime(scope = 'all') {
+  if (scope === 'all' || scope === 'cache') _screenNarrativeCache.clear()
+  if (scope === 'all' || scope === 'circuit') Object.assign(_screenCircuit, { failures: 0, openUntil: 0, lastProbeAt: 0 })
+  if (scope === 'all' || scope === 'budget') _screenBudgetHistory.splice(0)
+  return { ok: true, scope }
+}
+
+function cleanupScreenRuns({ keep = 50, maxAgeDays = 14 } = {}) {
+  const root = getScreenRoot()
+  let entries = []
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => ({ name: entry.name, path: path.join(root, entry.name), mtimeMs: fs.statSync(path.join(root, entry.name)).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  } catch { return { ok: true, removed: 0, remaining: 0 } }
+  const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
+  const removable = entries.filter((entry, index) => index >= keep || entry.mtimeMs < cutoff)
+  for (const entry of removable) fs.rmSync(entry.path, { recursive: true, force: true })
+  return { ok: true, removed: removable.length, remaining: entries.length - removable.length }
 }
 
 function buildLaunchReviewPrompt(payload) {
@@ -843,7 +1335,7 @@ async function runAlertPlan(payload, settings = {}) {
 module.exports = {
   getStatus,
   runReview,
-  runScreen,
+  runScreen: runScreenDispatch,
   runLaunchReview,
   runMarketChat,
   runManagePlan,
@@ -855,5 +1347,8 @@ module.exports = {
   getManagePlanRoot,
   getAlertPlanRoot,
   cancelActive,
-  __test: { extractJson, screenOutputSchema, deterministicScreenFallback },
+  getScreenRuntimeState,
+  resetScreenRuntime,
+  cleanupScreenRuns,
+  __test: { extractJson, screenOutputSchema, deterministicScreenFallback, screenPromptPayload, canonicalScreenResult, classifyScreenFailure, chunkScreenCandidates, persistedNarrativeItem, screenRuntimeOptions, prioritizeScreenCandidates, validNarrativeItem, sameScreenVersions, screenBudgetRemaining, buildShadowScreenPrompt, SCREEN_VERSIONS },
 }

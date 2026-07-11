@@ -152,6 +152,16 @@ function groupCountLabel(group) {
   return `${group.total} 单 / ${group.winRate == null ? '-' : `${group.winRate.toFixed(1)}%`} / ${fmtR(group.netR)}`
 }
 
+function winRateConfidence(wins, total) {
+  if (!total) return null
+  const z = 1.96
+  const p = wins / total
+  const denominator = 1 + z * z / total
+  const center = (p + z * z / (2 * total)) / denominator
+  const margin = z * Math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator
+  return { low: Math.max(0, center - margin) * 100, high: Math.min(1, center + margin) * 100, sufficient: total >= 30 }
+}
+
 function fmtDuration(ms) {
   if (!Number.isFinite(ms)) return '-'
   const hours = ms / 36e5
@@ -263,7 +273,9 @@ export default function SignalReviewPage({ onNavigate }) {
   const [replayHistory, setReplayHistory] = useState([])
 
   useEffect(() => {
-    window.api?.loadSignalReplayHistory?.().then(items => setReplayHistory(Array.isArray(items) ? items : []))
+    window.api?.loadSignalReplayHistory?.()
+      .then(items => setReplayHistory(Array.isArray(items) ? items : []))
+      .catch(err => console.warn('[signal-replay-history]', err))
   }, [])
 
   const runReplay = async () => {
@@ -290,6 +302,16 @@ export default function SignalReviewPage({ onNavigate }) {
   const [confirmClearAll, setConfirmClearAll] = useState(false)
   const reportPeriodMeta = REPORT_PERIODS.find(period => period.key === reportPeriod) ?? REPORT_PERIODS[0]
   const report = useMemo(() => buildReviewReport(items, tradeLogs, reportPeriodMeta), [items, tradeLogs, reportPeriodMeta])
+  const crossMarketStats = useMemo(() => {
+    const groups = ['confirmed', 'diverged', 'single', 'none'].map(key => {
+      const logs = tradeLogs.filter(item => (item.crossMarketConfirmation ?? 'none') === key)
+      const closed = logs.filter(item => item.result === 'win' || item.result === 'loss')
+      const wins = closed.filter(item => item.result === 'win').length
+      const avgR = closed.length ? closed.reduce((sum, item) => sum + (Number(item.rMultiple) || 0), 0) / closed.length : null
+      return { key, count: closed.length, winRate: closed.length ? wins / closed.length * 100 : null, avgR, confidence: winRateConfidence(wins, closed.length) }
+    })
+    return groups.filter(group => group.count)
+  }, [tradeLogs])
   const captureRejectRows = useMemo(() => {
     const reasons = captureRejectStats?.reasons ?? {}
     return Object.entries(reasons)
@@ -511,6 +533,17 @@ export default function SignalReviewPage({ onNavigate }) {
           <button className="feed-type-btn" disabled={!items.length && !tradeLogs.length} onClick={() => setConfirmClearAll(true)}>清空全部</button>
         )}
       </div>
+
+      {!!crossMarketStats.length && <section className="signal-review-cross-market">
+        <b>跨市场效果</b>
+        {crossMarketStats.map(group => <div key={group.key}>
+          <span>{({ confirmed: '同向确认', diverged: '方向背离', single: '单边信号', none: '无配对' })[group.key]}</span>
+          <strong>{group.count} 单</strong>
+          <em>胜率 {group.winRate == null ? '-' : `${group.winRate.toFixed(1)}%`}</em>
+          <em>平均 {group.avgR == null ? '-' : `${group.avgR >= 0 ? '+' : ''}${group.avgR.toFixed(2)}R`}</em>
+          <small>{group.confidence?.sufficient ? `95%区间 ${group.confidence.low.toFixed(0)}–${group.confidence.high.toFixed(0)}%` : `样本不足 ${group.count}/30 · 暂不可校准`}</small>
+        </div>)}
+      </section>}
 
       {cleanNotice && (
         <div className="signal-review-clean-notice">
@@ -838,6 +871,21 @@ export default function SignalReviewPage({ onNavigate }) {
             </div>
           ) : (
             <div className="signal-review-log-list">
+              <div className="signal-review-log-head" aria-hidden="true">
+                <span>#</span>
+                <span>标的</span>
+                <span>方向 / 周期</span>
+                <span>形态</span>
+                <span>触发</span>
+                <span>结果</span>
+                <span>入场时间</span>
+                <span>出场时间</span>
+                <span>计划 / 观测入场</span>
+                <span>离场</span>
+                <span>涨跌</span>
+                <span>R</span>
+                <span>净R / MFE / MAE</span>
+              </div>
               {filteredTradeLogs.map((log, index) => (
                 <div key={log.id} className={`signal-review-log-row ${log.result}`}>
                   <span className="signal-review-log-index">{index + 1}</span>

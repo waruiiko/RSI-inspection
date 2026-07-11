@@ -87,7 +87,9 @@ export default function SettingsPage() {
     observationEnabled, rsiSensitivity, startupStateAlerts,
     silentStart, silentEnd,
     telegramToken, telegramChatId, discordWebhook, codexCliPath,
-    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, shAiInterval, watchPoolRetentionDays,
+    autoAiEnabled, autoAiInterval, autoAiLimit, autoAiStartupDelay, shAiInterval, shAiEnabled, shAiShadowEnabled, watchPoolRetentionDays,
+    shAiProfile, shAiBatchSize, shAiConcurrency, shAiCacheMinutes, shAiRetries,
+    shAiHourlyBatches, shAiHourlyCandidates, shAiHourlyMinutes,
     shExecutionNotional, shParameterMode, shNightlyReplayEnabled,
     themeMode,
     update,
@@ -106,6 +108,31 @@ export default function SettingsPage() {
   const [cacheStats, setCacheStats] = useState(null)
   const [codexStatus, setCodexStatus] = useState(null)
   const [codexJobs, setCodexJobs] = useState([])
+  const [codexRuntime, setCodexRuntime] = useState(null)
+  const [shAiMetrics, setShAiMetrics] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('rsi:signalHunter:aiMetrics') || '[]') } catch { return [] }
+  })
+  const [shAiFeedback] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('rsi:signalHunter:feedback') || '[]') } catch { return [] }
+  })
+  const shAiQuality = useMemo(() => {
+    if (!shAiMetrics.length) return null
+    const successful = shAiMetrics.filter(item => !(item.failures?.length) && !item.missing && !item.duplicates).length
+    return {
+      runs: shAiMetrics.length,
+      successRate: Math.round(successful / shAiMetrics.length * 100),
+      averageSeconds: Math.round(shAiMetrics.reduce((sum, item) => sum + (item.durationMs ?? 0), 0) / shAiMetrics.length / 1000),
+      retries: shAiMetrics.reduce((sum, item) => sum + (item.retries ?? 0), 0),
+      degraded: shAiMetrics.filter(item => item.degraded).length,
+    }
+  }, [shAiMetrics])
+  const shPromptScore = useMemo(() => {
+    if (!shAiQuality) return null
+    const helpful = shAiFeedback.filter(item => item.rating === '有帮助').length
+    const feedbackRate = shAiFeedback.length ? helpful / shAiFeedback.length : 0.5
+    const speedScore = Math.max(0, Math.min(1, 1 - (shAiQuality.averageSeconds - 30) / 210))
+    return Math.round(shAiQuality.successRate * 0.5 + feedbackRate * 30 + speedScore * 20)
+  }, [shAiFeedback, shAiQuality])
 
   const healthMetrics = useMemo(() => {
     const blocked = assets.filter(asset => asset.dataQuality?.ok === false)
@@ -128,14 +155,16 @@ export default function SettingsPage() {
   }, [])
 
   const refreshDiagnostics = async () => {
-    const [diag, cache, jobs] = await Promise.all([
+    const [diag, cache, jobs, runtime] = await Promise.all([
       window.api.getDiagnostics(),
       window.api.getCacheStats(),
       window.api.getCodexJobs?.() ?? [],
+      window.api.getCodexScreenRuntime?.() ?? null,
     ])
     setDiagnostics(diag)
     setCacheStats(cache)
     setCodexJobs(Array.isArray(jobs) ? jobs : [])
+    setCodexRuntime(runtime)
   }
 
   const updateLevelCooldown = (level, hours) => {
@@ -191,7 +220,7 @@ export default function SettingsPage() {
       <div className="manage-header">
         <span className="manage-title">设置</span>
         <span style={{ fontSize: 'var(--text-sm)', color: 'var(--dim)', alignSelf: 'center' }}>
-          v1.2.0
+          v1.3.0
         </span>
       </div>
 
@@ -282,6 +311,22 @@ export default function SettingsPage() {
             </div>
             {healthMetrics.sourceFailures.slice(0, 6).map(([scope, count]) => <div className="health-row warn" key={scope}><b>{scope}</b><span>当前会话失败 {count} 次</span><em>可重试</em></div>)}
             {codexJobs.slice(0, 5).map(job => <div className={`health-row ${job.status === 'failed' ? 'warn' : ''}`} key={job.id}><b>{job.type}</b><span>{job.status} · {job.scope || '全局'}</span><em>{job.durationMs ? `${(job.durationMs / 1000).toFixed(1)}s` : '-'}</em></div>)}
+            {codexRuntime && <div className="ai-runtime-panel">
+              <b>SH AI运行时</b>
+              <span>叙述缓存 {codexRuntime.narrativeCache} · 活跃进程 {codexRuntime.activeProcesses} · 识别目录 {codexRuntime.queuedTasks}</span>
+              <span>熔断失败 {codexRuntime.circuit?.failures ?? 0} · 剩余 {Math.ceil((codexRuntime.circuit?.remainingMs ?? 0) / 60000)}分钟</span>
+              <span>预算剩余：批次 {codexRuntime.budget?.batches ?? 0} · 候选 {codexRuntime.budget?.candidates ?? 0} · {Math.round((codexRuntime.budget?.durationMs ?? 0) / 60000)}分钟</span>
+              <div>
+                <button className="zone-btn" onClick={async () => { await window.api.resetCodexScreenRuntime('cache'); refreshDiagnostics() }}>清叙述缓存</button>
+                <button className="zone-btn" onClick={async () => { await window.api.resetCodexScreenRuntime('circuit'); refreshDiagnostics() }}>重置熔断</button>
+                <button className="zone-btn" onClick={async () => { await window.api.resetCodexScreenRuntime('budget'); refreshDiagnostics() }}>重置预算</button>
+                <button className="zone-btn" onClick={async () => {
+                  const result = await window.api.cleanupCodexScreenRuns({ keep: 50, maxAgeDays: 14 })
+                  setSettingsMsg(`已清理 ${result.removed ?? 0} 个旧识别目录`)
+                  refreshDiagnostics()
+                }}>清理旧识别目录</button>
+              </div>
+            </div>}
           </div>
 
           <Row label="开机自动启动" hint="登录后自动在后台运行">
@@ -537,6 +582,25 @@ export default function SettingsPage() {
             </button>
           </Row>
 
+          <Row label="导出诊断包" hint="生成脱敏ZIP：版本、失败批次、运行指标和缓存摘要；不包含密钥或原始行情">
+            <button
+              className="zone-btn"
+              style={{ fontSize: 11, padding: '3px 10px' }}
+              onClick={async () => {
+                let cacheMeta = null
+                try { cacheMeta = JSON.parse(localStorage.getItem('rsi:signalHunter:aiCache') || 'null')?.meta ?? null } catch {}
+                const result = await window.api.exportDiagnostics({
+                  metrics: shAiMetrics,
+                  feedback: shAiFeedback,
+                  cacheMeta,
+                })
+                if (result?.ok) setSettingsMsg(`诊断包已导出：${result.filePath}`)
+              }}
+            >
+              导出ZIP
+            </button>
+          </Row>
+
           <Row label="导入配置" hint="导入后建议重新刷新市场数据；现有 Webhook 密钥会保留">
             <button
               className="zone-btn"
@@ -611,6 +675,69 @@ export default function SettingsPage() {
               onChange={v => update('shAiInterval', v)}
               format={v => `${v} 分钟`}
             />
+          </Row>
+
+          <Row label="SH AI 叙述" hint="关闭后只运行本地Signal Hunter规则；以后可重新开启补写摘要">
+            <Toggle checked={shAiEnabled} onChange={e => update('shAiEnabled', e.target.checked)} />
+          </Row>
+
+          <Row label="影子提示词抽样" hint="每轮最多抽4个候选对比新提示词，只记录质量，不发布到SH页面">
+            <Toggle checked={shAiShadowEnabled} onChange={e => update('shAiShadowEnabled', e.target.checked)} disabled={!shAiEnabled} />
+          </Row>
+
+          <Row label="SH AI 运行预设" hint="稳定模式优先成功率；快速模式允许两批并发；自定义可调整高级参数">
+            <BtnGroup
+              options={['stable', 'fast', 'custom']}
+              value={shAiProfile}
+              onChange={v => update('shAiProfile', v)}
+              format={v => ({ stable: '稳定', fast: '快速', custom: '自定义' })[v]}
+            />
+          </Row>
+
+          {shAiProfile === 'custom' && <>
+            <Row label="AI 批次大小" hint="单次提交给Codex的候选数">
+              <BtnGroup options={[12, 18, 24]} value={shAiBatchSize} onChange={v => update('shAiBatchSize', v)} />
+            </Row>
+            <Row label="AI 并发批次" hint="并发越高越快，但资源占用和失败概率也更高">
+              <BtnGroup options={[1, 2]} value={shAiConcurrency} onChange={v => update('shAiConcurrency', v)} />
+            </Row>
+            <Row label="AI 缓存时间" hint="结构无明显变化时复用叙述结果">
+              <BtnGroup options={[30, 60, 120]} value={shAiCacheMinutes} onChange={v => update('shAiCacheMinutes', v)} format={v => `${v}分钟`} />
+            </Row>
+            <Row label="AI 修复重试" hint="仅重新提交缺失或质量不合格的候选">
+              <BtnGroup options={[0, 1, 2]} value={shAiRetries} onChange={v => update('shAiRetries', v)} format={v => `${v}次`} />
+            </Row>
+          </>}
+
+          <Row label="SH AI 每小时预算" hint="达到任一上限后，剩余候选延后到下一轮；本地规则继续工作">
+            <div className="settings-budget-grid">
+              <label>批次 <select value={shAiHourlyBatches} onChange={e => update('shAiHourlyBatches', Number(e.target.value))}><option>6</option><option>12</option><option>24</option></select></label>
+              <label>候选 <select value={shAiHourlyCandidates} onChange={e => update('shAiHourlyCandidates', Number(e.target.value))}><option>120</option><option>240</option><option>480</option></select></label>
+              <label>分钟 <select value={shAiHourlyMinutes} onChange={e => update('shAiHourlyMinutes', Number(e.target.value))}><option>15</option><option>30</option><option>45</option></select></label>
+            </div>
+          </Row>
+
+          <Row label="SH AI 质量监控" hint="最近30次识别的完整率、耗时、重试和降级情况">
+            <div className="settings-note">
+              {shAiQuality
+                ? `提示词评分 ${shPromptScore}/100 · 完整率 ${shAiQuality.successRate}% · ${shAiQuality.runs}次 · 平均 ${shAiQuality.averageSeconds}秒 · 重试 ${shAiQuality.retries} · 降级 ${shAiQuality.degraded} · 反馈 ${shAiFeedback.length}`
+                : '暂无识别质量样本'}
+              {shAiMetrics.length > 0 && <button className="zone-btn" onClick={() => {
+                localStorage.removeItem('rsi:signalHunter:aiMetrics')
+                setShAiMetrics([])
+              }}>清空统计</button>}
+              {shAiMetrics.length > 0 && <details className="settings-ai-history">
+                <summary>查看最近运行</summary>
+                {shAiMetrics.slice(0, 10).map((item, index) => (
+                  <div key={`${item.at}-${index}`}>
+                    <span>{new Date(item.at).toLocaleString('zh-CN')}</span>
+                    <span>{item.profile ?? 'stable'} · {item.batches ?? 0}批 · {Math.round((item.durationMs ?? 0) / 1000)}秒</span>
+                    <span>缓存 {item.cached ?? 0} · 重试 {item.retries ?? 0} · 缺失 {item.missing ?? 0}</span>
+                    <span>{item.failures?.length ? item.failures.map(failure => `${failure.type}:${failure.count}`).join(' / ') : '完整'}</span>
+                  </div>
+                ))}
+              </details>}
+            </div>
           </Row>
 
           <Row label="SH 执行规模" hint="多档盘口滑点、成交比例和真实R值使用的计划名义金额">

@@ -10,7 +10,7 @@ import { isUSMarketOpen } from './utils/marketHours'
 import { playAlertSound } from './utils/sound'
 import { sendWebhooks }  from './utils/webhook'
 import { getRsiZone }   from './utils/rsi'
-import { matchesAssetRef } from './utils/assetKey'
+import { matchesAssetRef, underlyingKey } from './utils/assetKey'
 import { applyLiquidityLimit, getQuoteVolume } from './utils/liquidity'
 import { buildCandidates, candidateSignature, makeAiFeedItems } from './utils/aiCandidates'
 import { advanceSignalLifecycleItems } from './utils/signalLifecycle'
@@ -32,6 +32,8 @@ const WatchPoolPage = lazy(() => import('./components/WatchPoolPage'))
 const OpportunityPage = lazy(() => import('./components/OpportunityPage'))
 const SignalHunterPage = lazy(() => import('./components/SignalHunterPage'))
 const AssetWorkspacePage = lazy(() => import('./components/AssetWorkspacePage'))
+const CrossMarketAuditPage = lazy(() => import('./components/CrossMarketAuditPage'))
+const CompanyEventsPage = lazy(() => import('./components/CompanyEventsPage'))
 
 function LazyFallback({ label = '正在加载...' }) {
   return <div className="lazy-fallback">{label}</div>
@@ -372,10 +374,19 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.2.0'
+const APP_VERSION = 'v1.3.0'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
+}
+
+function isNewerVersion(candidate, current) {
+  const a = normalizeVersionTag(candidate).split('.').map(value => Number(value) || 0)
+  const b = normalizeVersionTag(current).split('.').map(value => Number(value) || 0)
+  for (let index = 0; index < Math.max(a.length, b.length); index++) {
+    if ((a[index] ?? 0) !== (b[index] ?? 0)) return (a[index] ?? 0) > (b[index] ?? 0)
+  }
+  return false
 }
 
 function SummaryBar({ assets, timeframe }) {
@@ -639,7 +650,7 @@ export default function App() {
     if (!settingsLoaded || !autoCheckUpdates) return
     window.api.checkForUpdates?.(false)
       .then(info => {
-        if (info?.tag && normalizeVersionTag(info.tag) !== normalizeVersionTag(APP_VERSION)) setUpdateInfo(info)
+        if (info?.tag && isNewerVersion(info.tag, APP_VERSION)) setUpdateInfo(info)
       })
       .catch(err => console.warn('[update-check]', err))
   }, [settingsLoaded, autoCheckUpdates])
@@ -1025,6 +1036,10 @@ export default function App() {
         id: `signal-hunter-lifecycle-${item.symbol}-${item.to}-${completedAt}`,
         ts: completedAt,
         symbol: item.symbol,
+        apiSymbol: item.apiSymbol,
+        source: item.source,
+        assetType: item.type,
+        underlyingKey: underlyingKey(item),
         type: 'signal_hunter_ai',
         condition: item.to === 'triggered' ? 'focus' : item.to === 'completed' ? 'completed' : 'risk',
         value: item.signalHunter.score?.total ?? 0,
@@ -1073,7 +1088,7 @@ export default function App() {
   return (
     <div className={`app app-tab-${activeTab}`}>
       <Toolbar activeTab={activeTab} setActiveTab={setActiveTab} />
-      {updateInfo && (
+      {updateInfo && isNewerVersion(updateInfo.tag, APP_VERSION) && (
         <div className="update-banner">
           <span>发现新版本：{updateInfo.tag}</span>
           <button onClick={() => window.api.checkForUpdates(true)}>查看发布页</button>
@@ -1100,6 +1115,10 @@ export default function App() {
               <SignalHunterPage />
             ) : activeTab === 'workspace' ? (
               <AssetWorkspacePage />
+            ) : activeTab === 'cross-market-audit' ? (
+              <CrossMarketAuditPage />
+            ) : activeTab === 'company-events' ? (
+              <CompanyEventsPage />
             ) : activeTab === 'ai-review' ? (
               <AiReviewPage />
             ) : activeTab === 'trail' ? (

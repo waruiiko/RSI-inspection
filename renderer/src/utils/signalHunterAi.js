@@ -1,4 +1,4 @@
-import { assetKey } from './assetKey'
+import { assetKey, underlyingKey } from './assetKey'
 import { getQuoteVolume } from './liquidity'
 import { findRecentSignalLoss, findSignalCalibration } from './signalCalibration'
 
@@ -85,13 +85,15 @@ export function buildSignalHunterAiCandidate(asset) {
     marketRegime: local.marketRegime ?? null,
     parameterProfile: local.parameterProfile ?? null,
     entryTouched: Boolean(local.entryTouched),
+    executionEligible: Boolean(local.executionEligible),
+    executionTier: local.executionTier ?? 'observe',
     reasons: local.reasons ?? [],
     riskFlags: local.riskFlags ?? [],
     rejectReasons: local.rejectReasons ?? [],
   }))
   const deterministicPlan = timeframeCandidates
     .filter(local => !local.rejected)
-    .sort((a, b) => (Number(b.score?.total) || 0) - (Number(a.score?.total) || 0))[0] ?? null
+    .sort((a, b) => Number(b.executionEligible) - Number(a.executionEligible) || (Number(b.score?.total) || 0) - (Number(a.score?.total) || 0))[0] ?? null
   return {
     key: assetKey(asset),
     symbol: asset.symbol,
@@ -276,7 +278,7 @@ function deterministicLocalPlan(asset) {
   const structures = asset?.signalHunter?.structureCandidates ?? []
   return structures
     .filter(item => !item.rejected && VALID_SIDES.has(item.side) && TFS.includes(item.timeframe))
-    .sort((a, b) => (Number(b.score?.total) || 0) - (Number(a.score?.total) || 0))[0] ?? null
+    .sort((a, b) => Number(b.executionEligible) - Number(a.executionEligible) || (Number(b.score?.total) || 0) - (Number(a.score?.total) || 0))[0] ?? null
 }
 
 function closePrice(a, b, tolerance = 0.015) {
@@ -692,6 +694,8 @@ export function normalizeSignalHunterAiResults(aiResult, assets, calibration = n
       parameterMode: asset.signalHunter?.parameterMode ?? 'stable',
       parameterVersion: asset.signalHunter?.parameterVersion ?? 'v1',
       shadowComparison: asset.signalHunter?.shadowComparison ?? null,
+      executionEligible: Boolean(localPlan?.executionEligible),
+      executionTier: localPlan?.executionTier ?? 'observe',
       targetBasis: 'ai_structure',
       score: {
         total,
@@ -705,6 +709,7 @@ export function normalizeSignalHunterAiResults(aiResult, assets, calibration = n
       reasons: allReasons,
       riskFlags: allRiskFlags,
       narrativeSummary: String(item.narrativeSummary ?? item.narrative ?? '').trim(),
+      riskNarrative: String(item.riskNarrative ?? '').trim(),
       narrativeTags: narrativeTags.map(tag => String(tag).trim()).filter(Boolean).slice(0, 5),
       rejectReasons: Array.isArray(item.rejectReasons) ? item.rejectReasons : [],
       rejected: status === 'rejected',
@@ -769,7 +774,10 @@ export function normalizeSignalHunterAiResults(aiResult, assets, calibration = n
       }] : []),
     ]
 
-    return { key: assetKey(asset), symbol: asset.symbol, signalHunter: sig }
+    return {
+      key: assetKey(asset), symbol: asset.symbol, apiSymbol: asset.apiSymbol,
+      source: asset.source, type: asset.type, underlyingKey: underlyingKey(asset), signalHunter: sig,
+    }
   }).filter(Boolean)
 }
 
@@ -797,7 +805,7 @@ function signalHunterAiRisk(sig) {
 export function signalHunterAiAlertKey(item) {
   const sig = item?.signalHunter ?? {}
   return [
-    item?.symbol ?? '',
+    item?.underlyingKey ?? item?.symbol ?? '',
     sig.side ?? '',
     sig.timeframe ?? '',
     sig.status ?? '',
@@ -819,6 +827,10 @@ export function makeSignalHunterAiFeedItems(items, now = Date.now()) {
         id: `signal-hunter-ai-${item.symbol}-${now}`,
         ts: now,
         symbol: item.symbol,
+        apiSymbol: item.apiSymbol,
+        source: item.source,
+        assetType: item.type,
+        underlyingKey: item.underlyingKey,
         type: 'signal_hunter_ai',
         alertKey: signalHunterAiAlertKey(item),
         condition,
