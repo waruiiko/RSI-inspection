@@ -5743,6 +5743,14 @@ select {
   white-space: nowrap;
 }
 
+.signal-review-recent-count label { display: inline-flex; align-items: center; gap: 3px; color: var(--dim); font-size: 11px; }
+.signal-review-recent-count input { width: 54px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); }
+.signal-review-log-symbol, .signal-review-card-symbol { min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); text-align: left; cursor: pointer; font: inherit; }
+.signal-review-log-symbol:hover, .signal-review-card-symbol:hover { color: var(--blue); }
+.signal-review-log-symbol strong, .signal-review-log-symbol small { display: block; }
+.signal-review-log-symbol small { margin-top: 2px; color: var(--blue); font-size: 10px; }
+.signal-review-card-symbol { font-weight: 700; }
+
 .signal-review-breakdown-toggle {
   min-width: 78px;
 }

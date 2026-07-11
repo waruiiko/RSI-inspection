@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
 import useSignalReviewStore from '../store/signalReviewStore'
 import useMarketStore from '../store/marketStore'
 import { formatPrice } from '../utils/rsi'
 import { signalIdFromReviewItem } from '../utils/signalId'
 import { buildSignalCalibration } from '../utils/signalCalibration'
+
+const ChartModal = lazy(() => import('./ChartModal'))
 
 const SH_FOCUS_KEY = 'rsi:signalHunter:focus'
 const MIN_TAKE_PROFIT_R = 1.5
@@ -267,6 +269,11 @@ export default function SignalReviewPage({ onNavigate }) {
   const [logFilter, setLogFilter] = useState('all')
   const [logQuery, setLogQuery] = useState('')
   const [logMinScore, setLogMinScore] = useState(minScore)
+  const [logWindow, setLogWindow] = useState(() => {
+    const value = Number(localStorage.getItem('rsi:signalReview:recentCount'))
+    return Number.isFinite(value) ? Math.min(200, Math.max(5, value)) : 20
+  })
+  const [chartSelection, setChartSelection] = useState(null)
   const [replayBusy, setReplayBusy] = useState(false)
   const [replayReport, setReplayReport] = useState(null)
   const [replayError, setReplayError] = useState('')
@@ -389,7 +396,7 @@ export default function SignalReviewPage({ onNavigate }) {
   }, [tradeLogs, logFilter, logQuery, logMinScore])
 
   const logSummary = useMemo(() => {
-    const recent = filteredTradeLogs.slice(0, 20)
+    const recent = filteredTradeLogs.slice(0, logWindow)
     const wins = recent.filter(log => log.result === 'win')
     const losses = recent.filter(log => log.result === 'loss')
     const winR = sumR(wins)
@@ -414,7 +421,19 @@ export default function SignalReviewPage({ onNavigate }) {
       avgHoldMs: holds.length ? holds.reduce((sum, value) => sum + value, 0) / holds.length : null,
       winRate: recent.length ? (wins.length / recent.length) * 100 : null,
     }
-  }, [filteredTradeLogs])
+  }, [filteredTradeLogs, logWindow])
+
+  const updateLogWindow = value => {
+    const next = Math.min(200, Math.max(5, Number(value) || 20))
+    setLogWindow(next)
+    localStorage.setItem('rsi:signalReview:recentCount', String(next))
+  }
+
+  const openLogChart = log => {
+    const asset = assets.find(item => item.source === log.source && (item.apiSymbol ?? item.symbol) === (log.apiSymbol ?? log.symbol))
+      ?? assets.find(item => item.symbol === log.symbol)
+    if (asset) setChartSelection({ asset, item: log })
+  }
 
   const logBreakdown = useMemo(() => {
     const recent = logSummary.recent
@@ -713,7 +732,7 @@ export default function SignalReviewPage({ onNavigate }) {
           <article key={item.id} className={`signal-review-card ${resultTone(item.result)}`}>
             <div className="signal-review-card-main">
               <div className="signal-review-title">
-                <strong>{item.symbol}</strong>
+                <button type="button" className="signal-review-card-symbol" onClick={() => openLogChart(item)} title="查看K线">{item.symbol}</button>
                 <code className="signal-id-badge">{signalIdOf(item)}</code>
                 <span>{sideLabel(item.side)}</span>
                 <span>{item.timeframe}</span>
@@ -802,7 +821,7 @@ export default function SignalReviewPage({ onNavigate }) {
             </div>
           </div>
           <div className="signal-review-log-summary">
-            <div><span>最近 20 单</span><b>{logSummary.recent.length}</b></div>
+            <div className="signal-review-recent-count"><span>最近</span><label><input type="number" min="5" max="200" step="5" value={logWindow} onChange={event => updateLogWindow(event.target.value)} />单</label><b>{logSummary.recent.length}</b></div>
             <div><span>成功</span><b>{logSummary.wins.length} 单 / {fmtR(logSummary.winR)}</b></div>
             <div><span>失败</span><b>{logSummary.losses.length} 单 / {fmtR(-logSummary.lossR)}</b></div>
             <div><span>净收益</span><b>{fmtR(logSummary.netR)}</b></div>
@@ -880,7 +899,7 @@ export default function SignalReviewPage({ onNavigate }) {
                 <span>结果</span>
                 <span>入场时间</span>
                 <span>出场时间</span>
-                <span>计划 / 观测入场</span>
+                <span title="计划价是信号生成时的目标入场价；实际入场价是闭合K线确认触发时观测到的成交参考价。">计划价 / 实际入场价</span>
                 <span>离场</span>
                 <span>涨跌</span>
                 <span>R</span>
@@ -889,15 +908,15 @@ export default function SignalReviewPage({ onNavigate }) {
               {filteredTradeLogs.map((log, index) => (
                 <div key={log.id} className={`signal-review-log-row ${log.result}`}>
                   <span className="signal-review-log-index">{index + 1}</span>
-                  <strong>{log.symbol}<small>{log.name ? `${log.name} · ${signalIdOf(log)}` : signalIdOf(log)}</small></strong>
+                  <button type="button" className="signal-review-log-symbol" onClick={() => openLogChart(log)} title="查看该笔交易对应的K线"><strong>{log.symbol}</strong><small>{log.name ? `${log.name} · ${signalIdOf(log)}` : signalIdOf(log)}</small></button>
                   <span>{sideLabel(log.side)} · {log.timeframe}</span>
                   <span>{displaySetup(log.setup)}</span>
                   <span>{log.entryTriggerLabel ?? '-'}</span>
                   <span>{log.result === 'win' ? `止盈${log.hitTarget ? ` T${log.hitTarget}` : ''}` : '止损'}</span>
-                  <small>入场 {fmtTime(log.entryTime ?? log.enteredAt)}</small>
-                  <small>出场 {fmtTime(log.exitTime ?? log.closedAt)}</small>
-                  <span>入场 {formatPrice(log.entryPrice)} / {formatPrice(log.entryObservedPrice)}</span>
-                  <span>离场 {formatPrice(log.exitPrice)}</span>
+                  <small>{fmtTime(log.entryTime ?? log.enteredAt)}</small>
+                  <small>{fmtTime(log.exitTime ?? log.closedAt)}</small>
+                  <span title="计划价 / 实际入场价">{formatPrice(log.entryPrice)} / {formatPrice(log.entryObservedPrice)}</span>
+                  <span>{formatPrice(log.exitPrice)}</span>
                   <span className="signal-review-log-return">{fmtPct(log.returnPct)}</span>
                   <span className="signal-review-log-r">{fmtR(log.rMultiple)}</span>
                   <small>净 {fmtR(log.executionAdjustedR)} · MFE {fmtR(log.mfeR)} / MAE {fmtR(log.maeR)}</small>
@@ -907,6 +926,7 @@ export default function SignalReviewPage({ onNavigate }) {
           )}
         </div>
       )}
+      {chartSelection && <Suspense fallback={null}><ChartModal asset={chartSelection.asset} alertItem={chartSelection.item} onClose={() => setChartSelection(null)} /></Suspense>}
     </div>
   )
 }
