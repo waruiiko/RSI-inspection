@@ -198,3 +198,40 @@ test('operational data keeps an atomic backup and restores it when primary JSON 
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('runtime health history is persisted as operational data', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'runtime-health-test-'))
+  try {
+    config.init(dir)
+    const events = [{ ts: 1, scope: 'binance', level: 'warn', message: 'timeout' }]
+    config.saveOperationalData('runtimeHealth', events)
+    assert.deepEqual(config.loadOperationalData('runtimeHealth'), events)
+    assert.equal(fs.existsSync(path.join(dir, 'runtime-health.json')), true)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('shadow strategy observations use atomic operational storage', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'shadow-strategy-test-'))
+  try {
+    config.init(dir)
+    const payload = { observations: [{ id: 'scan:BTC', stablePassed: true, shadowPassed: false }], plans: [] }
+    config.saveOperationalData('shadowStrategy', payload)
+    assert.deepEqual(config.loadOperationalData('shadowStrategy'), payload)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('rule drift snapshots use atomic operational storage', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rule-drift-test-'))
+  try {
+    config.init(dir)
+    const snapshots = [{ scanAt: 1, counts: { scanned: 10, accepted: 2 } }]
+    config.saveOperationalData('ruleDrift', snapshots)
+    assert.deepEqual(config.loadOperationalData('ruleDrift'), snapshots)
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})

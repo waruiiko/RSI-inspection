@@ -128,7 +128,21 @@ const useMarketStore = create((set, get) => ({
   setRsiZones:  (zones)     => { _saveLayoutPref('rsiZones', zones); set({ rsiZones: zones }) },
   setHovered:   (symbol)    => set({ hoveredSymbol: symbol }),
   setFlash:     (symbol)    => set({ flashSymbol: symbol ? { symbol, ts: Date.now() } : null }),
-  clearStatus:  ()          => set({ statusEvents: [] }),
+  hydrateStatusEvents: async () => {
+    if (!window.api?.loadOperationalData) return
+    try {
+      const stored = await window.api.loadOperationalData('runtimeHealth')
+      if (Array.isArray(stored)) set({ statusEvents: stored.slice(0, 50) })
+    } catch (err) {
+      console.warn('[runtime-health] hydrate failed', err)
+    }
+  },
+  clearStatus:  ()          => {
+    set({ statusEvents: [] })
+    window.api?.saveOperationalData?.('runtimeHealth', []).catch(err => {
+      console.warn('[runtime-health] clear failed', err)
+    })
+  },
   applySignalHunterAiResults: (items = []) => {
     if (!Array.isArray(items) || !items.length) return
     const byKey = new Map(items.map(item => [item.key ?? assetKey(item), item.signalHunter]))
@@ -183,7 +197,13 @@ const useMarketStore = create((set, get) => ({
 
     const unsubStatus = window.api.onMarketStatus?.(({ requestId: statusRequestId, item }) => {
       if (statusRequestId !== _activeRequestId || !item) return
-      set(state => ({ statusEvents: [item, ...state.statusEvents].slice(0, 20) }))
+      set(state => {
+        const statusEvents = [item, ...state.statusEvents].slice(0, 50)
+        window.api.saveOperationalData?.('runtimeHealth', statusEvents).catch(err => {
+          console.warn('[runtime-health] save failed', err)
+        })
+        return { statusEvents }
+      })
     })
 
     try {

@@ -6,6 +6,8 @@ import useGroupsStore   from './store/groupsStore'
 import useSignalTrailStore from './store/signalTrailStore'
 import useWatchPoolStore from './store/watchPoolStore'
 import useSignalReviewStore from './store/signalReviewStore'
+import useShadowStrategyStore from './store/shadowStrategyStore'
+import useRuleDriftStore from './store/ruleDriftStore'
 import { isUSMarketOpen } from './utils/marketHours'
 import { playAlertSound } from './utils/sound'
 import { sendWebhooks }  from './utils/webhook'
@@ -34,6 +36,8 @@ const SignalHunterPage = lazy(() => import('./components/SignalHunterPage'))
 const AssetWorkspacePage = lazy(() => import('./components/AssetWorkspacePage'))
 const CrossMarketAuditPage = lazy(() => import('./components/CrossMarketAuditPage'))
 const CompanyEventsPage = lazy(() => import('./components/CompanyEventsPage'))
+const DataGapPage = lazy(() => import('./components/DataGapPage'))
+const RuntimeCenterPage = lazy(() => import('./components/RuntimeCenterPage'))
 
 function LazyFallback({ label = '正在加载...' }) {
   return <div className="lazy-fallback">{label}</div>
@@ -374,7 +378,7 @@ const ZONE_COLORS = {
 const ZONE_LABELS = {
   overbought: '超买', strong: '强势', neutral: '中性', weak: '弱势', oversold: '超卖',
 }
-const APP_VERSION = 'v1.2.2'
+const APP_VERSION = 'v1.2.3'
 
 function normalizeVersionTag(v) {
   return String(v || '').trim().replace(/^v/i, '')
@@ -601,6 +605,11 @@ export default function App() {
   const updateSignalReviews = useSignalReviewStore(s => s.updateFromAssets)
   const hydrateSignalReviews = useSignalReviewStore(s => s.hydrate)
   const hydrateWatchPool = useWatchPoolStore(s => s.hydrate)
+  const hydrateStatusEvents = useMarketStore(s => s.hydrateStatusEvents)
+  const hydrateShadowStrategy = useShadowStrategyStore(s => s.hydrate)
+  const recordShadowStrategy = useShadowStrategyStore(s => s.recordFromAssets)
+  const hydrateRuleDrift = useRuleDriftStore(s => s.hydrate)
+  const recordRuleDrift = useRuleDriftStore(s => s.recordFromAssets)
 
   useEffect(() => {
     loadSettings()
@@ -609,6 +618,9 @@ export default function App() {
     hydrateSignalTrail()
     hydrateSignalReviews()
     hydrateWatchPool()
+    hydrateStatusEvents()
+    hydrateShadowStrategy()
+    hydrateRuleDrift()
   }, [])
 
   useEffect(() => {
@@ -1074,7 +1086,9 @@ export default function App() {
     updateSignalTrail(assets)
     syncSignalReviews(assets)
     updateSignalReviews(assets)
-  }, [completedAt, assets, updateSignalTrail, syncSignalReviews, updateSignalReviews])
+    recordShadowStrategy(assets, completedAt)
+    recordRuleDrift(assets, completedAt)
+  }, [completedAt, assets, updateSignalTrail, syncSignalReviews, updateSignalReviews, recordShadowStrategy, recordRuleDrift])
 
   /* 鈹€鈹€ Filtered assets for summary bar 鈹€鈹€ */
   const filteredAssets = useMemo(() => {
@@ -1119,6 +1133,10 @@ export default function App() {
               <CrossMarketAuditPage />
             ) : activeTab === 'company-events' ? (
               <CompanyEventsPage />
+            ) : activeTab === 'data-gaps' ? (
+              <DataGapPage />
+            ) : activeTab === 'runtime-center' ? (
+              <RuntimeCenterPage onNavigate={setActiveTab} />
             ) : activeTab === 'ai-review' ? (
               <AiReviewPage />
             ) : activeTab === 'trail' ? (

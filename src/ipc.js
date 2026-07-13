@@ -940,7 +940,7 @@ async function buildResult(asset, timeframes, tickers, rsiPeriod = 14) {
   }
 
   const reviewCandlesByTf = Object.fromEntries(
-    ['15m', '1h', '4h'].map(tf => [
+    ['15m', '1h', '4h', '1d'].map(tf => [
       tf,
       (closedCandlesByTf[tf] ?? []).slice(-72).map(c => ({
         time: c.time,
@@ -1128,6 +1128,7 @@ function buildSignalHunterSignal({ asset, price, change24h, quoteVolume24h, cand
       timeframe: shadowPrimary?.timeframe ?? null,
       score: shadowPrimary?.score?.total ?? 0,
       reason: shadowPrimary?.rejectReasons?.[0] ?? shadowPrimary?.reasons?.[0] ?? '',
+      plan: shadowPrimary ? signalHunterStructureSnapshot(shadowPrimary) : null,
     }
   }
   return {

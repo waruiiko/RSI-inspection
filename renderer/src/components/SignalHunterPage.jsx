@@ -3,6 +3,8 @@ import useMarketStore from '../store/marketStore'
 import useAlertStore from '../store/alertStore'
 import useSettingsStore from '../store/settingsStore'
 import useSignalReviewStore from '../store/signalReviewStore'
+import useShadowStrategyStore from '../store/shadowStrategyStore'
+import useRuleDriftStore from '../store/ruleDriftStore'
 import { formatPrice } from '../utils/rsi'
 import { formatTurnover, getQuoteVolume } from '../utils/liquidity'
 import { buildSignalHunterAiCandidate, buildSignalHunterAiCandidates, hasExecutableStopDistance, makeSignalHunterAiFeedItems, minExecutableStopDistance, normalizeSignalHunterAiResults, signalHunterCandidateSignature } from '../utils/signalHunterAi'
@@ -749,6 +751,39 @@ function loadSeenKeys() {
   return new Set(loadJson(SH_AI_SEEN_KEY, []))
 }
 
+function buildSignalFunnel(assets) {
+  const scanned = assets ?? []
+  const healthy = scanned.filter(asset => asset.dataQuality?.ok !== false)
+  const structured = healthy.filter(asset => asset.signalHunter)
+  const accepted = structured.filter(asset => !asset.signalHunter.rejected && asset.signalHunter.status !== 'rejected')
+  const executable = accepted.filter(asset => asset.signalHunter.executionEligible !== false)
+  const waiting = executable.filter(asset => ['armed', 'wait_entry', 'wait_confirm'].includes(asset.signalHunter.status))
+  const triggered = executable.filter(asset => asset.signalHunter.status === 'triggered')
+  const blockerCounts = new Map()
+  for (const asset of scanned) {
+    const sig = asset.signalHunter
+    const reason = asset.dataQuality?.ok === false
+      ? asset.dataQuality.issues?.[0] ?? '数据质量阻断'
+      : !sig
+        ? '未形成1h/4h结构'
+        : sig.rejected || sig.status === 'rejected'
+          ? sig.rejectReasons?.[0] ?? '本地结构剔除'
+          : sig.executionEligible === false
+            ? '仅观察，暂不可执行'
+            : null
+    if (reason) blockerCounts.set(reason, (blockerCounts.get(reason) ?? 0) + 1)
+  }
+  return {
+    stages: [
+      ['扫描', scanned.length], ['数据合格', healthy.length], ['形成结构', structured.length],
+      ['通过硬筛', accepted.length], ['可执行', executable.length],
+    ],
+    waiting: waiting.length,
+    triggered: triggered.length,
+    blockers: [...blockerCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3),
+  }
+}
+
 function loadScoreThreshold() {
   const value = Number(localStorage.getItem(SH_SCORE_THRESHOLD_KEY))
   return Number.isFinite(value) ? value : 7
@@ -935,6 +970,83 @@ function mergeSignalHunterCacheItems(previousItems, nextItems) {
   return [...byKey.values()]
 }
 
+function summarizeShadowStrategy(observations, plans = []) {
+  const items = observations ?? []
+  const stablePassed = items.filter(item => item.stablePassed).length
+  const shadowPassed = items.filter(item => item.shadowPassed).length
+  const disagreements = items.filter(item => item.stablePassed !== item.shadowPassed)
+  const scans = new Set(items.map(item => item.scanAt)).size
+  const groups = new Map()
+  for (const item of items) {
+    const key = `${item.type ?? 'unknown'} · ${item.timeframe ?? 'unknown'} · ${item.side ?? 'unknown'}`
+    const group = groups.get(key) ?? { key, total: 0, disagreements: 0 }
+    group.total += 1
+    if (item.stablePassed !== item.shadowPassed) group.disagreements += 1
+    groups.set(key, group)
+  }
+  return {
+    total: items.length,
+    scans,
+    stablePassed,
+    shadowPassed,
+    disagreements: disagreements.length,
+    stableOnly: disagreements.filter(item => item.stablePassed).length,
+    shadowOnly: disagreements.filter(item => item.shadowPassed).length,
+    groups: [...groups.values()].sort((a, b) => b.total - a.total).slice(0, 4),
+    plans: plans.length,
+    waitingPlans: plans.filter(item => item.status === 'waiting').length,
+    triggeredPlans: plans.filter(item => item.status === 'triggered').length,
+    wins: plans.filter(item => item.status === 'win').length,
+    losses: plans.filter(item => item.status === 'loss').length,
+    ambiguous: plans.filter(item => item.status === 'ambiguous').length,
+    completed: plans.filter(item => item.status === 'win' || item.status === 'loss'),
+  }
+}
+
+function summarizeDriftWindow(items) {
+  const totals = { scanned: 0, healthy: 0, structured: 0, accepted: 0, executable: 0, triggered: 0 }
+  const blockers = new Map()
+  const regimes = new Map()
+  for (const item of items) {
+    for (const key of Object.keys(totals)) totals[key] += item.counts?.[key] ?? 0
+    for (const [key, count] of Object.entries(item.blockers ?? {})) blockers.set(key, (blockers.get(key) ?? 0) + count)
+    for (const [key, count] of Object.entries(item.regimes ?? {})) regimes.set(key, (regimes.get(key) ?? 0) + count)
+  }
+  const rate = (value, base) => base ? value / base * 100 : null
+  return {
+    scans: items.length,
+    avgCandidates: items.length ? totals.structured / items.length : 0,
+    healthyRate: rate(totals.healthy, totals.scanned),
+    acceptedRate: rate(totals.accepted, totals.structured),
+    executableRate: rate(totals.executable, totals.accepted),
+    triggerRate: rate(totals.triggered, totals.executable),
+    topBlocker: [...blockers.entries()].sort((a, b) => b[1] - a[1])[0] ?? null,
+    topRegime: [...regimes.entries()].sort((a, b) => b[1] - a[1])[0] ?? null,
+    regimeTotal: [...regimes.values()].reduce((sum, count) => sum + count, 0),
+  }
+}
+
+function summarizeRuleDrift(snapshots, now = Date.now()) {
+  const day = 24 * 60 * 60 * 1000
+  const windowFor = days => summarizeDriftWindow((snapshots ?? []).filter(item => now - item.scanAt <= days * day))
+  const recentItems = (snapshots ?? []).filter(item => now - item.scanAt <= 7 * day)
+  const baselineItems = (snapshots ?? []).filter(item => now - item.scanAt > 7 * day && now - item.scanAt <= 30 * day)
+  const recent = summarizeDriftWindow(recentItems)
+  const baseline = summarizeDriftWindow(baselineItems)
+  let state = { key: 'collecting', label: '采集中', detail: `近期 ${recent.scans}/5 轮，基线 ${baseline.scans}/5 轮` }
+  if (recent.scans >= 5 && baseline.scans >= 5) {
+    const healthyDelta = (recent.healthyRate ?? 0) - (baseline.healthyRate ?? 0)
+    const acceptedDelta = (recent.acceptedRate ?? 0) - (baseline.acceptedRate ?? 0)
+    const recentRegimeShare = recent.topRegime && recent.regimeTotal ? recent.topRegime[1] / recent.regimeTotal * 100 : 0
+    const baselineRegimeShare = baseline.topRegime?.[0] === recent.topRegime?.[0] && baseline.regimeTotal ? baseline.topRegime[1] / baseline.regimeTotal * 100 : 0
+    if (healthyDelta <= -10) state = { key: 'data', label: '数据异常', detail: `数据合格率较基线下降 ${Math.abs(healthyDelta).toFixed(1)} 个百分点` }
+    else if (recent.topRegime?.[0] !== baseline.topRegime?.[0] || recentRegimeShare - baselineRegimeShare >= 20) state = { key: 'market', label: '市场变化', detail: `主要市场状态变为 ${recent.topRegime?.[0] ?? 'unknown'}` }
+    else if (acceptedDelta <= -15) state = { key: 'rule', label: '规则偏严', detail: `硬筛通过率较基线下降 ${Math.abs(acceptedDelta).toFixed(1)} 个百分点` }
+    else state = { key: 'stable', label: '稳定', detail: '近期通过率和数据质量未出现显著漂移' }
+  }
+  return { windows: [['7天', windowFor(7)], ['30天', windowFor(30)], ['90天', windowFor(90)]], state }
+}
+
 export default function SignalHunterPage() {
   const assets = useMarketStore(s => s.assets)
   const updatedAt = useMarketStore(s => s.updatedAt)
@@ -943,7 +1055,12 @@ export default function SignalHunterPage() {
   const shAiInterval = useSettingsStore(s => s.shAiInterval ?? 30)
   const shAiEnabled = useSettingsStore(s => s.shAiEnabled !== false)
   const tradeLogs = useSignalReviewStore(s => s.tradeLogs)
+  const shadowObservations = useShadowStrategyStore(s => s.observations)
+  const shadowPlans = useShadowStrategyStore(s => s.plans)
+  const driftSnapshots = useRuleDriftStore(s => s.snapshots)
   const signalCalibration = useMemo(() => buildSignalCalibration(tradeLogs), [tradeLogs])
+  const shadowSummary = useMemo(() => summarizeShadowStrategy(shadowObservations, shadowPlans), [shadowObservations, shadowPlans])
+  const driftSummary = useMemo(() => summarizeRuleDrift(driftSnapshots), [driftSnapshots])
   const [filter, setFilter] = useState('all')
   const [sideFilter, setSideFilter] = useState('all')
   const [categoryFilter, setCategoryFilter] = useState('all')
@@ -1744,6 +1861,7 @@ export default function SignalHunterPage() {
     const blocked = checked.filter(asset => asset.dataQuality?.ok === false || asset.signalHunter?.runtimeBlocked)
     return { checked: checked.length, blocked: blocked.length }
   }, [assets])
+  const signalFunnel = useMemo(() => buildSignalFunnel(assets), [assets])
   const aiQualitySuccessRate = aiMetrics.length
     ? Math.round(aiMetrics.filter(item => !(item.failures?.length) && !item.missing && !item.duplicates).length / aiMetrics.length * 100)
     : null
@@ -1877,6 +1995,56 @@ export default function SignalHunterPage() {
         <span className="signal-hunter-filter-summary">{activeFilterSummary}</span>
         <span>待确认 {aiSummary.pending} · 观察 {aiSummary.watch} · 剔除 {aiSummary.rejected} · 变强 {aiSummary.changedUp} · 变弱 {aiSummary.changedDown}</span>
       </div>
+
+      <details className="signal-hunter-funnel">
+        <summary>本轮信号漏斗</summary>
+        <div className="signal-hunter-funnel-stages">
+          {signalFunnel.stages.map(([label, count], index) => <Fragment key={label}><span><b>{count}</b>{label}</span>{index < signalFunnel.stages.length - 1 && <i>→</i>}</Fragment>)}
+          <span className="branch"><b>{signalFunnel.waiting}</b>等待入场</span>
+          <span className="branch"><b>{signalFunnel.triggered}</b>已触发</span>
+        </div>
+        <div className="signal-hunter-funnel-blockers">
+          <strong>主要阻断</strong>
+          {signalFunnel.blockers.length ? signalFunnel.blockers.map(([reason, count]) => <em key={reason}>{reason} {count}</em>) : <em>暂无阻断</em>}
+        </div>
+      </details>
+
+      <details className="signal-hunter-funnel signal-hunter-shadow-scorecard">
+        <summary>影子策略成绩表 <b>{shadowSummary.total ? `${shadowSummary.disagreements} 个分歧` : '等待采样'}</b></summary>
+        {shadowSummary.total ? <>
+          <div className="signal-hunter-funnel-stages">
+            <span><b>{shadowSummary.scans}</b>轮扫描</span>
+            <span><b>{shadowSummary.total}</b>个对照</span>
+            <span><b>{shadowSummary.stablePassed}</b>正式通过</span>
+            <span><b>{shadowSummary.shadowPassed}</b>影子通过</span>
+            <span className="branch"><b>{shadowSummary.stableOnly}</b>仅正式</span>
+            <span className="branch"><b>{shadowSummary.shadowOnly}</b>仅影子</span>
+            <span><b>{shadowSummary.waitingPlans}</b>计划等待</span>
+            <span><b>{shadowSummary.triggeredPlans}</b>计划触发</span>
+            <span><b>{shadowSummary.wins}/{shadowSummary.losses}</b>胜/负</span>
+          </div>
+          <div className="signal-hunter-funnel-blockers">
+            <strong>分组对照</strong>
+            {shadowSummary.groups.map(group => <em key={group.key}>{group.key}：{group.disagreements}/{group.total} 分歧</em>)}
+          </div>
+          <div className="signal-hunter-shadow-note">影子计划 {shadowSummary.plans} 个 · 完成 {shadowSummary.completed.length} 个 · 胜率 {shadowSummary.completed.length ? `${(shadowSummary.wins / shadowSummary.completed.length * 100).toFixed(1)}%` : '样本不足'} · 歧义 {shadowSummary.ambiguous} 个不计入。</div>
+        </> : <div className="signal-hunter-shadow-note">请在设置中把“SH 参数模式”切换为“影子观察”，后续扫描会开始累计，但不会影响正式信号。</div>}
+      </details>
+
+      <details className="signal-hunter-funnel signal-hunter-drift-monitor">
+        <summary>规则漂移监控 <b className={`drift-${driftSummary.state.key}`}>{driftSummary.state.label}</b></summary>
+        <div className="signal-hunter-drift-windows">
+          {driftSummary.windows.map(([label, item]) => <div key={label}>
+            <strong>{label}</strong><small>{item.scans}轮扫描</small>
+            <span>平均结构 {item.avgCandidates.toFixed(1)}</span>
+            <span>数据合格 {item.healthyRate == null ? '-' : `${item.healthyRate.toFixed(1)}%`}</span>
+            <span>硬筛通过 {item.acceptedRate == null ? '-' : `${item.acceptedRate.toFixed(1)}%`}</span>
+            <span>状态可执行 {item.executableRate == null ? '-' : `${item.executableRate.toFixed(1)}%`}</span>
+            <em>{item.topBlocker ? `主要阻断：${item.topBlocker[0]} (${item.topBlocker[1]})` : '暂无阻断样本'}</em>
+          </div>)}
+        </div>
+        <div className="signal-hunter-shadow-note">{driftSummary.state.detail}。漂移监控只提示变化，不会自动调整阈值。</div>
+      </details>
 
       {aiStatus && (
         <div className={`signal-hunter-status-notice ${aiStatusTone}`}>

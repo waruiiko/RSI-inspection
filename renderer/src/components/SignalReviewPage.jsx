@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
-import useSignalReviewStore from '../store/signalReviewStore'
+import useSignalReviewStore, { captureRejectReason } from '../store/signalReviewStore'
 import useMarketStore from '../store/marketStore'
 import { formatPrice } from '../utils/rsi'
 import { signalIdFromReviewItem } from '../utils/signalId'
@@ -152,6 +152,18 @@ function groupTradeLogs(rows, keyFn, labelFn) {
 
 function groupCountLabel(group) {
   return `${group.total} 单 / ${group.winRate == null ? '-' : `${group.winRate.toFixed(1)}%`} / ${fmtR(group.netR)}`
+}
+
+function reviewQualificationNext(asset, minScore) {
+  const sig = asset?.signalHunter
+  if (!sig) return '等待 Signal Hunter 生成结构'
+  if (asset.dataQuality?.ok === false || sig.runtimeBlocked) return `补齐数据后自动重试${(asset.dataQuality?.issues ?? sig.runtimeBlockReasons ?? []).length ? `：${(asset.dataQuality?.issues ?? sig.runtimeBlockReasons).join(' / ')}` : ''}`
+  if (sig.rejected || sig.status === 'rejected') return sig.rejectReasons?.at(-1) ?? '等待下一次形成新的有效结构'
+  if (sig.executionEligible === false) return '当前仅观察；等待止损距离、流动性和入场位置满足可执行条件'
+  if (sig.stability && !sig.stability.confirmed && sig.status !== 'triggered') return '等待下一轮扫描确认结构稳定'
+  if ((sig.score?.total ?? 0) < minScore) return `当前 ${(sig.score?.total ?? 0).toFixed(1)} 分，复盘门槛 ${minScore.toFixed(1)} 分`
+  if (!Number.isFinite(sig.entryPrice ?? sig.triggerPrice) || !Number.isFinite(sig.stopLoss)) return '等待生成完整入场价和失效位'
+  return '等待状态转为可复盘阶段'
 }
 
 function winRateConfidence(wins, total) {
@@ -325,6 +337,17 @@ export default function SignalReviewPage({ onNavigate }) {
       .sort((a, b) => b[1] - a[1])
       .slice(0, 6)
   }, [captureRejectStats])
+  const pendingQualification = useMemo(() => assets
+    .filter(asset => asset.signalHunter)
+    .map(asset => ({
+      key: `${asset.source}:${asset.apiSymbol ?? asset.symbol}`,
+      symbol: asset.symbol,
+      reason: captureRejectReason(asset, minScore),
+      updatedAt: asset.signalHunter?.lastLifecycleCheckAt ?? asset.signalHunter?.detectedAt ?? null,
+      next: reviewQualificationNext(asset, minScore),
+    }))
+    .filter(item => item.reason)
+    .slice(0, 20), [assets, minScore])
 
   const handleClear = () => {
     clear()
@@ -610,6 +633,22 @@ export default function SignalReviewPage({ onNavigate }) {
             <em key={reason}>{reason} {count}</em>
           )) : <em>暂无过滤</em>}
         </div>
+      )}
+
+      {view === 'samples' && pendingQualification.length > 0 && (
+        <details className="signal-review-qualification">
+          <summary>尚未进入复盘的信号 <b>{pendingQualification.length}</b></summary>
+          <div className="signal-review-qualification-list">
+            {pendingQualification.map(item => (
+              <div key={item.key}>
+                <strong>{item.symbol}</strong>
+                <span>{item.reason}</span>
+                <em>{item.next}</em>
+                <small>{item.updatedAt ? `最近检查 ${fmtTime(item.updatedAt)}` : '等待首次生命周期检查'}</small>
+              </div>
+            ))}
+          </div>
+        </details>
       )}
 
       {view === 'report' ? (

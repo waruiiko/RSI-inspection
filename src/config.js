@@ -21,6 +21,9 @@ const OPERATIONAL_FILES = {
   marketChat: 'market-chat.json',
   alertStates: 'alert-states.json',
   aiJobs: 'ai-jobs.json',
+  runtimeHealth: 'runtime-health.json',
+  shadowStrategy: 'shadow-strategy.json',
+  ruleDrift: 'rule-drift.json',
   companyEvents: 'company-events.json',
 }
 function operationalFilePath(key) {

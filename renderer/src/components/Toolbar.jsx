@@ -214,6 +214,8 @@ export default function Toolbar({ activeTab, setActiveTab }) {
     { key: 'settings', label: '设置' },
   ]
   const ADVANCED_TABS = [
+    { key: 'runtime-center', label: '运行中心' },
+    { key: 'data-gaps', label: '数据缺口' },
     { key: 'company-events', label: '公司事件' },
     { key: 'cross-market-audit', label: '跨市场映射' },
     { key: 'ai-review', label: 'AI复盘' },
@@ -237,7 +239,7 @@ export default function Toolbar({ activeTab, setActiveTab }) {
             boxShadow: '0 0 8px rgba(31,111,235,0.4)',
           }}>R</div>
           <h1 className="toolbar-title">市场 RSI 热力图</h1>
-          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.2.2</span>
+          <span style={{ fontSize: 10, color: 'var(--dim)', letterSpacing: '0.02em', alignSelf: 'center', marginLeft: 2 }}>v1.2.3</span>
         </div>
 
         {/* Underline tab navigation */}
