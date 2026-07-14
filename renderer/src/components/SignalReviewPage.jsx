@@ -275,6 +275,7 @@ export default function SignalReviewPage({ onNavigate }) {
   const setEntryConfirmBufferPct = useSignalReviewStore(s => s.setEntryConfirmBufferPct)
   const clearCleanNotice = useSignalReviewStore(s => s.clearCleanNotice)
   const [view, setView] = useState('report')
+  const [overviewCollapsed, setOverviewCollapsed] = useState(() => localStorage.getItem('rsi:signalReview:overviewCollapsed') === '1')
   const [reportPeriod, setReportPeriod] = useState('24h')
   const [filter, setFilter] = useState('all')
   const [sampleQuery, setSampleQuery] = useState('')
@@ -502,7 +503,7 @@ export default function SignalReviewPage({ onNavigate }) {
   }, [items])
 
   return (
-    <div className={`signal-review-page ${view === 'logs' ? 'signal-review-page-logs' : ''}`}>
+    <div className={`signal-review-page ${view === 'logs' ? 'signal-review-page-logs' : ''} ${overviewCollapsed ? 'signal-review-overview-collapsed' : ''}`}>
       <div className="signal-review-head">
         <div>
           <span className="signal-review-kicker">{report.periodLabel} PERFORMANCE REVIEW</span>
@@ -532,6 +533,10 @@ export default function SignalReviewPage({ onNavigate }) {
         <button className="feed-type-btn" disabled={replayBusy || !assets.length} onClick={runReplay}>
           {replayBusy ? '逐根回放中' : '运行近期回放'}
         </button>
+        <button className="feed-type-btn" onClick={() => setOverviewCollapsed(value => {
+          localStorage.setItem('rsi:signalReview:overviewCollapsed', value ? '0' : '1')
+          return !value
+        })}>{overviewCollapsed ? '展开概览' : '折叠概览'}</button>
         {view === 'report' && <div className="signal-review-periods" aria-label="复盘周期">
           {REPORT_PERIODS.map(period => (
             <button

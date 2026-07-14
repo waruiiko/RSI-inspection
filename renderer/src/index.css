@@ -5543,8 +5543,19 @@ select {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
 }
+
+.signal-review-overview-collapsed .signal-review-head { padding-block: 9px !important; align-items: center; }
+.signal-review-overview-collapsed .signal-review-head p,
+.signal-review-overview-collapsed .signal-review-summary,
+.signal-review-overview-collapsed .signal-review-cross-market,
+.signal-review-overview-collapsed > .signal-review-filter-stats,
+.signal-review-overview-collapsed > .signal-review-qualification { display: none; }
+.signal-review-overview-collapsed .signal-review-head h2 { margin: 0; font-size: 17px; }
+.signal-review-overview-collapsed .signal-review-kicker { display: none; }
 
 .signal-review-page:not(.signal-review-page-logs) .signal-review-head {
   padding: 15px 18px;
@@ -6159,13 +6170,16 @@ select {
 }
 
 .signal-review-list {
-  flex: 1;
+  flex: 0 0 auto;
   min-height: 0;
-  overflow: auto;
+  overflow: visible;
   display: grid;
   align-content: start;
   gap: 10px;
 }
+
+.signal-review-page .signal-review-log-page { flex: 0 0 auto; }
+.signal-review-page .signal-review-log-list { flex: 0 0 auto; overflow-y: visible; }
 
 .signal-review-card {
   display: grid;
